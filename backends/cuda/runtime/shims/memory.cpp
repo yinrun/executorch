@@ -43,6 +43,7 @@ using c10::Device;
 using c10::DeviceIndex;
 using c10::DeviceType;
 using c10::ScalarType;
+using c10::device_type_from_aoti;
 
 namespace {
 
@@ -148,7 +149,7 @@ AOTITorchError aoti_torch_create_tensor_from_blob_v2(
       strides,
       static_cast<ScalarType>(dtype),
       Device(
-          static_cast<DeviceType>(device_type),
+          device_type_from_aoti(device_type),
           static_cast<DeviceIndex>(device_index)),
       storage_offset));
 
@@ -191,7 +192,7 @@ AOTITorchError aoti_torch_create_tensor_from_blob(
         makeArrayRef(contig_strides),
         static_cast<ScalarType>(dtype),
         Device(
-            static_cast<DeviceType>(device_type),
+            device_type_from_aoti(device_type),
             static_cast<DeviceIndex>(device_index)),
         storage_offset));
   } else {
@@ -202,7 +203,7 @@ AOTITorchError aoti_torch_create_tensor_from_blob(
         strides,
         static_cast<ScalarType>(dtype),
         Device(
-            static_cast<DeviceType>(device_type),
+            device_type_from_aoti(device_type),
             static_cast<DeviceIndex>(device_index)),
         storage_offset));
   }
@@ -239,7 +240,7 @@ AOTITorchError aoti_torch_empty_strided(
         makeArrayRef(contig_strides),
         static_cast<ScalarType>(dtype),
         Device(
-            static_cast<DeviceType>(device_type),
+            device_type_from_aoti(device_type),
             static_cast<DeviceIndex>(device_index))));
   } else {
     IntArrayRef strides(strides_ptr, static_cast<size_t>(ndim));
@@ -248,7 +249,7 @@ AOTITorchError aoti_torch_empty_strided(
         strides,
         static_cast<ScalarType>(dtype),
         Device(
-            static_cast<DeviceType>(device_type),
+            device_type_from_aoti(device_type),
             static_cast<DeviceIndex>(device_index))));
   }
 
@@ -264,7 +265,7 @@ AOTITorchError aoti_torch_empty_strided_pinned(
     int32_t device_index,
     SlimTensor** ret_new_tensor) {
   ET_CHECK_OR_RETURN_ERROR(
-      static_cast<DeviceType>(device_type) == DeviceType::CPU,
+        device_type_from_aoti(device_type) == DeviceType::CPU,
       InvalidArgument,
       "aoti_torch_empty_strided_pinned: pinned memory is host memory, so the "
       "device type must be CPU, got %d",

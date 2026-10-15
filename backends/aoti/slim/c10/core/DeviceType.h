@@ -26,6 +26,16 @@ enum class DeviceType : int8_t {
 constexpr DeviceType kCPU = DeviceType::CPU;
 constexpr DeviceType kCUDA = DeviceType::CUDA;
 
+inline DeviceType device_type_from_aoti(int32_t device_type) {
+#if defined(EXECUTORCH_USE_MUSA)
+  // TorchMUSA exposes its backend through c10::DeviceType::PrivateUse1.
+  if (device_type == 20) {
+    return DeviceType::CUDA;
+  }
+#endif
+  return static_cast<DeviceType>(device_type);
+}
+
 /// Maximum number of device types at compile time.
 constexpr int COMPILE_TIME_MAX_DEVICE_TYPES =
     static_cast<int>(DeviceType::COMPILE_TIME_MAX_DEVICE_TYPES);
