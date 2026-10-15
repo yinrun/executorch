@@ -296,7 +296,7 @@ class ET_EXPERIMENTAL CudaBackend final
           return Error::InvalidArgument;
         }
       } else if (std::strcmp(option.key, kEnableCudaGraphForMethod) == 0) {
-#if defined(EXECUTORCH_USE_HIP)
+#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
         // HIP ignores the graph-instantiation flag required by this path.
         ET_LOG(
             Error,
@@ -365,7 +365,7 @@ class ET_EXPERIMENTAL CudaBackend final
       uint32_t current_sm = 0;
       if (!(fqn_weights.variants.size() == 1 &&
             fqn_weights.variants[0].target_sm == 0)) {
-#if defined(EXECUTORCH_USE_HIP)
+#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
         ET_LOG(
             Error,
             "Multi-SM CUDA AOTI metadata is not supported by the ROCm runtime");

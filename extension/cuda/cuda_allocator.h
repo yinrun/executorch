@@ -147,7 +147,7 @@ class EXECUTORCH_EXTENSION_CUDA_API CudaAllocator final
   static void release_cached_memory(
       executorch::runtime::etensor::DeviceIndex index);
 
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
   /**
    * The shared memory pool this allocator uses on a device, or nullptr if it
    * has not allocated there or the pool could not be created.
@@ -162,7 +162,7 @@ class EXECUTORCH_EXTENSION_CUDA_API CudaAllocator final
    */
   static cudaMemPool_t pool_for_device(
       executorch::runtime::etensor::DeviceIndex index);
-#endif // !EXECUTORCH_USE_HIP
+#endif // !EXECUTORCH_USE_HIP && !EXECUTORCH_USE_MUSA
 
   /**
    * Copy memory asynchronously on the given CUDA stream.

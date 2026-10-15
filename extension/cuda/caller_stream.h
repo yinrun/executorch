@@ -13,7 +13,7 @@
 
 #include <executorch/extension/cuda/export.h>
 
-#if defined(EXECUTORCH_USE_HIP)
+#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
 #include <executorch/extension/cuda/runtime_api.h>
 #else
 // Declared here rather than including <cuda_runtime.h>, so this header compiles

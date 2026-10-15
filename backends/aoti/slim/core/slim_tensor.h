@@ -478,9 +478,17 @@ class SlimTensor {
         // dst_offset = dst_offset + counter[d] * this->stride(d)
         ET_CHECK_MSG(
             !::c10::mul_overflows(counter[d], other.stride(d), &src_term) &&
+#if defined(EXECUTORCH_USE_MUSA)
+                !__builtin_add_overflow(src_offset, src_term, &src_offset) &&
+#else
                 !::c10::add_overflows(src_offset, src_term, &src_offset) &&
+#endif
                 !::c10::mul_overflows(counter[d], this->stride(d), &dst_term) &&
+#if defined(EXECUTORCH_USE_MUSA)
+                !__builtin_add_overflow(dst_offset, dst_term, &dst_offset),
+#else
                 !::c10::add_overflows(dst_offset, dst_term, &dst_offset),
+#endif
             "copy_: offset computation overflow");
       }
       size_t src_byte_offset = 0;

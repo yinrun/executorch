@@ -11,7 +11,7 @@
 #include <executorch/runtime/platform/log.h>
 #include <executorch/runtime/platform/platform.h>
 
-#if defined(EXECUTORCH_USE_HIP)
+#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
 #include <executorch/extension/cuda/runtime_api.h>
 #else
 #include <cuda_runtime.h>

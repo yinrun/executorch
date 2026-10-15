@@ -157,7 +157,7 @@ struct CudaGraphState {
   // without a matching free node. Call once the graph is captured.
   void note_graph_allocations() {
     graph_allocations.clear();
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
     size_t count = 0;
     if (graph == nullptr ||
         cudaGraphGetNodes(graph, nullptr, &count) != cudaSuccess) {

@@ -17,7 +17,7 @@
 #include <mutex>
 #include <unordered_map>
 
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
 #include <vector>
 #endif
 
@@ -52,7 +52,7 @@ RoundedAllocations& rounded_allocations() {
   return *state;
 }
 
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
 // The stream ordered allocator hands physical memory back to the driver
 // whenever a synchronization observes a pending free, so with the default
 // release threshold of zero a pool is emptied repeatedly during one inference
@@ -262,7 +262,7 @@ Error deallocate_without_pools(
   return Error::Ok;
 }
 
-#endif // !EXECUTORCH_USE_HIP
+#endif // !EXECUTORCH_USE_HIP && !EXECUTORCH_USE_MUSA
 
 Error copy_impl(
     void* dst,
@@ -584,7 +584,7 @@ Result<void*> CudaAllocator::allocate_async(
   // Named for the log below, so a failure points at the call that actually ran.
   const char* allocator_name = "cudaMallocAsync";
   int log_device = static_cast<int>(index);
-#if defined(EXECUTORCH_USE_HIP)
+#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
   err = cudaMallocAsync(&ptr, nbytes, stream);
 #else
   // Allocating from this allocator's pool keeps its retained memory out of
@@ -644,7 +644,7 @@ void CudaAllocator::deallocate_async(
     return;
   }
 
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
   // Decided by the device the memory lives on, the same answer allocate_async
   // reached for it. Looked up only once some device without memory pools has
   // been seen, so a process whose devices all have them frees as before.
@@ -675,7 +675,7 @@ void CudaAllocator::deallocate_async(
 }
 
 bool CudaAllocator::memory_pools_supported(DeviceIndex index) {
-#if defined(EXECUTORCH_USE_HIP)
+#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
   (void)index;
   return true;
 #else
@@ -688,7 +688,7 @@ Result<void*> CudaAllocator::allocate_stream_ordered(
     size_t nbytes,
     DeviceIndex index,
     cudaStream_t stream) {
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
   const int device = resolve_device(index);
   if (device >= 0 && !device_supports_memory_pools(device)) {
     return allocate_without_pools(nbytes, index, stream);
@@ -717,7 +717,7 @@ executorch::runtime::Error CudaAllocator::deallocate_stream_ordered(
   if (ptr == nullptr) {
     return Error::Ok;
   }
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
   const int device = resolve_device(index);
   if (device >= 0 && !device_supports_memory_pools(device)) {
     return deallocate_without_pools(ptr, index, stream);
@@ -736,7 +736,7 @@ executorch::runtime::Error CudaAllocator::deallocate_stream_ordered(
   return Error::Ok;
 }
 
-#if !defined(EXECUTORCH_USE_HIP)
+#if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
 cudaMemPool_t CudaAllocator::pool_for_device(DeviceIndex index) {
   const int device = resolve_device(index);
   if (device < 0) {
@@ -747,10 +747,10 @@ cudaMemPool_t CudaAllocator::pool_for_device(DeviceIndex index) {
   const auto it = state.pools.find(device);
   return it == state.pools.end() ? nullptr : it->second;
 }
-#endif // !EXECUTORCH_USE_HIP
+#endif // !EXECUTORCH_USE_HIP && !EXECUTORCH_USE_MUSA
 
 void CudaAllocator::release_cached_memory(DeviceIndex index) {
-#if defined(EXECUTORCH_USE_HIP)
+#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
   (void)index;
 #else
   std::vector<std::pair<int, cudaMemPool_t>> targets;

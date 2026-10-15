@@ -39,7 +39,11 @@ endif()
 # Use dynamic linking for the GPU runtime.
 set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
 
-if(EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_MUSA)
+  find_package(MUSAToolkit REQUIRED)
+  set(_cuda_runtime_libraries MUSA::musart)
+  set(_cuda_include_directories ${MUSAToolkit_INCLUDE_DIRS})
+elseif(EXECUTORCH_BUILD_ROCM)
   find_package(hip CONFIG REQUIRED)
   set(_cuda_runtime_libraries hip::host)
   set(_cuda_include_directories "")
@@ -53,7 +57,10 @@ endif()
 # available. Some CI environments (notably Windows packaging jobs) provide
 # CUDAToolkit headers/libs but cannot complete CUDA compiler identification. In
 # those cases, keep configuration working and skip CUDA-only sources below.
-if(NOT EXECUTORCH_BUILD_ROCM AND NOT CMAKE_CUDA_COMPILER)
+if(NOT EXECUTORCH_BUILD_ROCM
+   AND NOT EXECUTORCH_BUILD_MUSA
+   AND NOT CMAKE_CUDA_COMPILER
+)
   include(CheckLanguage)
   check_language(CUDA)
 endif()
@@ -80,9 +87,9 @@ endif()
 # value and cannot be read as a caller's intent: doing so replaced torch's
 # autodetected architecture with CMake's default and broke the build on a device
 # the default does not cover.
-if(EXECUTORCH_BUILD_ROCM)
-  # ROCm never enables the CUDA language below, so there is no architecture list
-  # to choose and nothing here would be read.
+if(EXECUTORCH_BUILD_ROCM OR EXECUTORCH_BUILD_MUSA)
+  # Non-CUDA runtimes do not enable the CUDA language below, so there is no
+  # architecture list to choose and nothing here would be read.
 elseif(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
   string(REPLACE "." "" _executorch_cuda_arch_list "$ENV{TORCH_CUDA_ARCH_LIST}")
   string(REPLACE " " ";" _executorch_cuda_arch_list
@@ -168,7 +175,10 @@ else()
   )
 endif()
 
-if(NOT EXECUTORCH_BUILD_ROCM AND CMAKE_CUDA_COMPILER)
+if(NOT EXECUTORCH_BUILD_ROCM
+   AND NOT EXECUTORCH_BUILD_MUSA
+   AND CMAKE_CUDA_COMPILER
+)
   enable_language(CUDA)
   # nvcc compiles host code with cl.exe on Windows, and the CCCL that ships with
   # CUDA 13.2 and newer stops with an #error under cl.exe's traditional
@@ -254,7 +264,10 @@ set(_aoti_cuda_shim_sources runtime/shims/memory.cpp
 )
 
 # Only build CUDA-only operator shims when the CUDA toolchain is available.
-if(NOT EXECUTORCH_BUILD_ROCM AND CMAKE_CUDA_COMPILER)
+if(NOT EXECUTORCH_BUILD_ROCM
+   AND NOT EXECUTORCH_BUILD_MUSA
+   AND CMAKE_CUDA_COMPILER
+)
   list(APPEND _aoti_cuda_shim_sources runtime/shims/int4mm.cu
        runtime/shims/sort.cu runtime/shims/rand.cu
   )
@@ -264,7 +277,9 @@ add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
 
 # Define CUDA_AVAILABLE to use SlimTensor on GPU in common_shims_slim.h
 target_compile_definitions(aoti_cuda_shims PRIVATE CUDA_AVAILABLE=1)
-if(EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_MUSA)
+  target_compile_definitions(aoti_cuda_shims PUBLIC EXECUTORCH_USE_MUSA=1)
+elseif(EXECUTORCH_BUILD_ROCM)
   target_compile_definitions(aoti_cuda_shims PUBLIC EXECUTORCH_USE_HIP=1)
 endif()
 
@@ -380,7 +395,10 @@ endif()
 # Python extension and then never copied beside it, and the installed extension
 # fails to load on a missing dependency. Static is also what a ROCm build
 # produced before the wheel layout existed, so nothing there changes.
-if(EXECUTORCH_BUILD_SHARED AND NOT EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_SHARED
+   AND NOT EXECUTORCH_BUILD_ROCM
+   AND NOT EXECUTORCH_BUILD_MUSA
+)
   set(_executorch_cuda_ships_libraries ON)
   set(_aoti_cuda_backend_library_type SHARED)
 else()
@@ -397,7 +415,9 @@ target_include_directories(
   PUBLIC ${_cuda_include_directories} $<BUILD_INTERFACE:${EXECUTORCH_ROOT}>
          $<INSTALL_INTERFACE:include>
 )
-if(EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_MUSA)
+  target_compile_definitions(aoti_cuda_backend PUBLIC EXECUTORCH_USE_MUSA=1)
+elseif(EXECUTORCH_BUILD_ROCM)
   target_compile_definitions(aoti_cuda_backend PUBLIC EXECUTORCH_USE_HIP=1)
 endif()
 target_compile_options(
@@ -495,7 +515,10 @@ if(BUILD_TESTING)
   target_compile_definitions(test_cuda_weight_cache PRIVATE CUDA_AVAILABLE=1)
   # sort.cu and rand.cu are compiled only under this condition (see
   # _aoti_cuda_shim_sources), so the test that calls them is too.
-  if(NOT EXECUTORCH_BUILD_ROCM AND CMAKE_CUDA_COMPILER)
+  if(NOT EXECUTORCH_BUILD_ROCM
+     AND NOT EXECUTORCH_BUILD_MUSA
+     AND CMAKE_CUDA_COMPILER
+  )
     et_cxx_test(
       test_cuda_sort_rand SOURCES runtime/test/test_cuda_sort_rand.cpp
       EXTRA_LIBS aoti_cuda_backend

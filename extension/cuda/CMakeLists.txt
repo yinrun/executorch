@@ -16,7 +16,9 @@ if(NOT EXECUTORCH_ROOT)
   set(EXECUTORCH_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 endif()
 
-if(EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_MUSA)
+  find_package(MUSAToolkit REQUIRED)
+elseif(EXECUTORCH_BUILD_ROCM)
   find_package(hip CONFIG REQUIRED)
 else()
   # Found here rather than relied on from the parent scope. The Torch package
@@ -48,7 +50,9 @@ if(EXECUTORCH_BUILD_SHARED)
 endif()
 # The allocator and device guard call the runtime. The caller-stream helper
 # treats its handle as opaque. The toolkit is present in accelerator builds.
-if(EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_MUSA)
+  target_link_libraries(extension_cuda PUBLIC MUSA::musart)
+elseif(EXECUTORCH_BUILD_ROCM)
   target_link_libraries(extension_cuda PUBLIC hip::host)
 else()
   target_link_libraries(extension_cuda PUBLIC CUDA::cudart)
@@ -71,13 +75,16 @@ target_compile_definitions(
   PUBLIC C10_USING_CUSTOM_GENERATED_MACROS
   PRIVATE EXECUTORCH_EXTENSION_CUDA_BUILDING
 )
-if(EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_MUSA)
+  target_compile_definitions(extension_cuda PUBLIC EXECUTORCH_USE_MUSA=1)
+elseif(EXECUTORCH_BUILD_ROCM)
   target_compile_definitions(extension_cuda PUBLIC EXECUTORCH_USE_HIP=1)
 endif()
 
 if(BUILD_TESTING
    AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND NOT EXECUTORCH_BUILD_ROCM
+   AND NOT EXECUTORCH_BUILD_MUSA
 )
   # Interposes CUDA allocation calls and must not load the backend's registrar.
   add_executable(test_cuda_allocator_exit test/cuda_allocator_exit.cpp)

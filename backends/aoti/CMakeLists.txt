@@ -84,7 +84,11 @@ target_compile_definitions(
 )
 
 # Add GPU support for SlimTensor when building with CUDA or ROCm.
-if(EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_MUSA)
+  find_package(MUSAToolkit REQUIRED)
+  target_link_libraries(slimtensor INTERFACE MUSA::toolkit extension_cuda)
+  target_compile_definitions(slimtensor INTERFACE EXECUTORCH_USE_MUSA=1)
+elseif(EXECUTORCH_BUILD_ROCM)
   find_package(hip CONFIG REQUIRED)
   target_link_libraries(slimtensor INTERFACE hip::host extension_cuda)
   target_compile_definitions(slimtensor INTERFACE EXECUTORCH_USE_HIP=1)
@@ -106,7 +110,7 @@ install(
 # TODO(gasoonjia): Replace aoti_common with this one after metal migration
 # ==============================================================================
 set(_aoti_common_shims_slim_sources common_shims_slim.cpp)
-if(EXECUTORCH_BUILD_CUDA OR EXECUTORCH_BUILD_ROCM)
+if(EXECUTORCH_BUILD_CUDA OR EXECUTORCH_BUILD_ROCM OR EXECUTORCH_BUILD_MUSA)
   list(APPEND _aoti_common_shims_slim_sources slim/cuda/guard.cpp)
 endif()
 
@@ -150,7 +154,9 @@ endif()
 
 # These two files had a Buck target and no CMake one, so the CMake build never
 # compiled them. Declared beside the library that carries their subject.
-if(BUILD_TESTING AND (EXECUTORCH_BUILD_CUDA OR EXECUTORCH_BUILD_ROCM))
+if(BUILD_TESTING
+   AND (EXECUTORCH_BUILD_CUDA OR EXECUTORCH_BUILD_ROCM OR EXECUTORCH_BUILD_MUSA)
+)
   include(${EXECUTORCH_ROOT}/tools/cmake/Test.cmake)
   et_cxx_test(
     test_cuda_guard SOURCES slim/cuda/test/test_cuda_guard.cpp EXTRA_LIBS
