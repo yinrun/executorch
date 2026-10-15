@@ -32,5 +32,4 @@ class MusaPartitioner(AotiPartitioner):
             compile_spec = list(compile_spec) + [
                 CompileSpec(TARGET_DEVICE_COMPILE_SPEC_KEY, b"cuda:0")
             ]
-        super().__init__(MusaBackend.__name__, compile_spec)
-
+        super().__init__("CudaBackend", compile_spec)
