@@ -17,4 +17,8 @@ namespace executorch::backends::cuda {
 // Backend id under which the CUDA backend registers (see cuda_backend.cpp).
 inline constexpr char kCudaBackendId[] = "CudaBackend";
 
+#if defined(EXECUTORCH_USE_MUSA)
+inline constexpr char kMusaBackendId[] = "MusaBackend";
+#endif
+
 } // namespace executorch::backends::cuda

@@ -1584,6 +1584,12 @@ executorch::runtime::Backend backend{cuda::kCudaBackendId, &cls};
 static executorch::runtime::Error success_with_compiler =
     register_backend(backend);
 
+#if defined(EXECUTORCH_USE_MUSA)
+executorch::runtime::Backend musa_backend{cuda::kMusaBackendId, &cls};
+static executorch::runtime::Error musa_success_with_compiler =
+    register_backend(musa_backend);
+#endif
+
 // Auto-register the CudaAllocator so that DeviceMemoryBuffer::create(CUDA)
 // works whenever the CUDA backend library is linked.
 static bool cuda_allocator_registered = [] {
