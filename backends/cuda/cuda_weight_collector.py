@@ -94,7 +94,7 @@ def _write_tensor_storage(tensor: torch.Tensor, path: str) -> bytes:
     storage = tensor.untyped_storage()
     nbytes = storage.nbytes()
     with open(path, "wb") as output:
-        if nbytes and tensor.is_cuda:
+        if nbytes and (tensor.is_cuda or getattr(tensor, "is_musa", False)):
             byte_tensor = torch.empty(0, dtype=torch.uint8, device=tensor.device).set_(
                 storage, 0, (nbytes,), (1,)
             )
