@@ -80,6 +80,11 @@ using slim::SlimTensor;
 using slim::c10::Device;
 
 namespace {
+#if defined(EXECUTORCH_USE_MUSA)
+constexpr char kAotiDeviceName[] = "musa";
+#else
+constexpr char kAotiDeviceName[] = "cuda";
+#endif
 constexpr char kSkipCopyOutputToCpuForMethod[] =
     "skip_copy_output_to_cpu_for_method";
 constexpr char kUseSharedCudaStream[] = "use_shared_cuda_stream";
@@ -472,8 +477,8 @@ class ET_EXPERIMENTAL CudaBackend final
 
     AOTInductorModelContainerHandle container_handle = nullptr;
 
-    ET_CHECK_OK_OR_RETURN_ERROR(
-        handle->create_with_device(&container_handle, 1, "cuda", nullptr));
+  ET_CHECK_OK_OR_RETURN_ERROR(
+      handle->create_with_device(&container_handle, 1, kAotiDeviceName, nullptr));
 
     ET_LOG(Info, "container_handle = %p", container_handle);
 
