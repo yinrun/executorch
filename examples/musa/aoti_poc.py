@@ -33,8 +33,11 @@ def main() -> None:
     exported = export(AddOne().eval(), (example,))
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     result = MusaBackend.preprocess(exported, compile_spec)
-    metadata = decode_cuda_aoti_metadata(result.processed_bytes)
-    so_key = metadata.variants[0].so_blob_key
+    if result.processed_bytes.startswith(b"ETCUDAFQN0"):
+        metadata = decode_cuda_aoti_metadata(result.processed_bytes)
+        so_key = metadata.variants[0].so_blob_key
+    else:
+        so_key = result.processed_bytes.decode("utf-8").splitlines()[0]
     so_data = _extract_named_data(result, so_key)
 
     with tempfile.NamedTemporaryFile(suffix=".wrapper.so", delete=False) as output:
