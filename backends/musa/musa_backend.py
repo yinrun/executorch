@@ -132,6 +132,9 @@ class MusaBackend(AotiBackend, BackendDetails):
             result = AotiBackend.preprocess.__func__(cls, edge_program, compile_specs)
         if capture.artifact is None:
             raise RuntimeError("MUSA AOTI did not return a structured Weights output")
+        if not capture.artifact.entries:
+            collector.finish()
+            return result
         collector.add_preprocess_result(
             result,
             capture.artifact,
@@ -139,4 +142,3 @@ class MusaBackend(AotiBackend, BackendDetails):
         )
         collector.finish()
         return result
-
