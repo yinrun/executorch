@@ -89,7 +89,7 @@ struct DeviceWorkspace {
   }
 };
 
-} // namespace
+}
 
 extern "C" {
 
@@ -161,7 +161,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   const int64_t kernel_height = weight->size(2);
   const int64_t kernel_width = weight->size(3);
   ET_CHECK_OR_RETURN_ERROR(
-      input_channels % groups == 0 && weight->size(1) == input_channels / groups &&
+      input_channels % groups == 0 && output_channels % groups == 0 &&
+          weight->size(1) == input_channels / groups &&
           (bias == nullptr || bias->dim() == 1) &&
           (bias == nullptr || bias->size(0) == output_channels),
       InvalidArgument,
