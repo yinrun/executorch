@@ -18,6 +18,21 @@ class TestMusaAoti(unittest.TestCase):
     def test_does_not_advertise_at_tensor_fallbacks(self) -> None:
         self.assertEqual(MusaBackend.get_supported_fallback_kernels(), {})
 
+    def test_pointwise_aoti_compile(self) -> None:
+        class AddOne(nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x + 1
+
+        example = torch.randn(2, 8, device="musa")
+        exported = export(AddOne().eval(), (example,))
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_weighted_linear_requires_slimtensor_fallback(self) -> None:
         class WeightedLinear(nn.Module):
             def __init__(self) -> None:
