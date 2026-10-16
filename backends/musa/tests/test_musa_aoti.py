@@ -10,15 +10,15 @@ import torch
 from torch import nn
 from torch.export import export
 
-from executorch.backends.cuda.cuda_weight_collector import (
-    decode_cuda_aoti_metadata,
-)
 from executorch.backends.musa import MusaBackend
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
-    def test_weighted_linear_aoti_compile(self) -> None:
+    def test_does_not_advertise_at_tensor_fallbacks(self) -> None:
+        self.assertEqual(MusaBackend.get_supported_fallback_kernels(), {})
+
+    def test_weighted_linear_requires_slimtensor_fallback(self) -> None:
         class WeightedLinear(nn.Module):
             def __init__(self) -> None:
                 super().__init__()
@@ -30,15 +30,12 @@ class TestMusaAoti(unittest.TestCase):
         example = torch.randn(2, 8, device="musa")
         module = WeightedLinear().eval().to("musa")
         exported = export(module, (example,))
-        result = MusaBackend.preprocess(
-            exported,
-            [MusaBackend.generate_method_name_compile_spec("forward")],
-        )
+        with self.assertRaisesRegex(
+            RuntimeError, "Method forward missing fallback kernels"
+        ) as context:
+            MusaBackend.preprocess(
+                exported,
+                [MusaBackend.generate_method_name_compile_spec("forward")],
+            )
 
-        metadata = decode_cuda_aoti_metadata(result.processed_bytes)
-        self.assertGreaterEqual(len(metadata.entries), 1)
-        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
-
-        entries = {entry.fqn: entry for entry in metadata.entries}
-        self.assertIn("linear.weight", entries)
-        self.assertEqual(entries["linear.weight"].sizes, (4, 8))
+        self.assertIn("aoti_torch_musa_addmm_out", str(context.exception))

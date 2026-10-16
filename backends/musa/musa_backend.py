@@ -47,9 +47,9 @@ class MusaBackend(AotiBackend, BackendDetails):
 
     @classmethod
     def get_supported_fallback_kernels(cls) -> Dict[str, Any]:
-        return {
-            "aoti_torch_musa_addmm_out": None,
-        }
+        # TorchMUSA's generated AOTI shims expect at::Tensor handles, while
+        # ExecuTorch passes SlimTensor handles to the model runtime.
+        return {}
 
     @classmethod
     def get_decomposition_table(cls) -> Dict[Any, Any]:
