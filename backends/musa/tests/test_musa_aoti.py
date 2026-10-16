@@ -13,11 +13,13 @@ from torch.export import export
 from executorch.backends.musa import MusaBackend
 
 
-@unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
-class TestMusaAoti(unittest.TestCase):
+class TestMusaAotiFallbacks(unittest.TestCase):
     def test_does_not_advertise_at_tensor_fallbacks(self) -> None:
         self.assertEqual(MusaBackend.get_supported_fallback_kernels(), {})
 
+
+@unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
+class TestMusaAoti(unittest.TestCase):
     def test_pointwise_aoti_compile(self) -> None:
         class AddOne(nn.Module):
             def forward(self, x: torch.Tensor) -> torch.Tensor:
