@@ -49,6 +49,8 @@ class MusaBackend(AotiBackend, BackendDetails):
     def get_supported_fallback_kernels(cls) -> Dict[str, Any]:
         return {
             "aoti_torch_musa_addmm_out": None,
+            "aoti_torch_musa_mm_out": None,
+            "aoti_torch_musa_bmm_out": None,
         }
 
     @classmethod

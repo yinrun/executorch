@@ -221,5 +221,154 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
   return error == Error::Ok ? destroy_error : error;
 }
 
+AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_mm_out(
+    SlimTensor* out,
+    SlimTensor* mat1,
+    SlimTensor* mat2) {
+  return aoti_torch_musa_addmm_out(out, out, mat1, mat2, 0.0, 1.0);
+}
+
+AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
+    SlimTensor* out,
+    SlimTensor* mat1,
+    SlimTensor* mat2) {
+  ET_CHECK_OR_RETURN_ERROR(
+      out != nullptr && mat1 != nullptr && mat2 != nullptr,
+      InvalidArgument,
+      "MUSA bmm received a null tensor handle");
+
+  const auto dtype = out->dtype();
+  ET_CHECK_OR_RETURN_ERROR(
+      (dtype == ScalarType::Float || dtype == ScalarType::Half ||
+       dtype == ScalarType::BFloat16) &&
+          mat1->dtype() == dtype && mat2->dtype() == dtype,
+      NotSupported,
+      "MUSA bmm supports float32, float16, and bfloat16 tensors only");
+  ET_CHECK_OR_RETURN_ERROR(
+      out->is_cuda() && mat1->is_cuda() && mat2->is_cuda(),
+      InvalidArgument,
+      "MUSA bmm expects device tensors");
+  ET_CHECK_OR_RETURN_ERROR(
+      out->dim() == 3 && mat1->dim() == 3 && mat2->dim() == 3,
+      NotSupported,
+      "MUSA bmm expects three-dimensional tensors");
+
+  const int64_t batch = mat1->size(0);
+  const int64_t m = mat1->size(1);
+  const int64_t k = mat1->size(2);
+  const int64_t n = mat2->size(2);
+  ET_CHECK_OR_RETURN_ERROR(
+      mat2->size(0) == batch && mat2->size(1) == k &&
+          out->size(0) == batch && out->size(1) == m && out->size(2) == n,
+      InvalidArgument,
+      "MUSA bmm tensor dimensions are incompatible");
+  ET_CHECK_OR_RETURN_ERROR(
+      out->is_contiguous() && mat1->is_contiguous(),
+      NotSupported,
+      "MUSA bmm currently supports contiguous output and mat1");
+
+  const auto mat2_strides = mat2->strides();
+  const bool mat2_row_major =
+      mat2->is_contiguous() && mat2_strides[1] == n &&
+      mat2_strides[2] == 1;
+  const bool mat2_column_major =
+      mat2_strides[1] == 1 && mat2_strides[2] == k;
+  ET_CHECK_OR_RETURN_ERROR(
+      mat2_row_major || mat2_column_major,
+      NotSupported,
+      "MUSA bmm supports contiguous or transposed mat2 only");
+  ET_CHECK_OR_RETURN_ERROR(
+      out->device_index() == mat1->device_index() &&
+          out->device_index() == mat2->device_index(),
+      InvalidArgument,
+      "MUSA bmm tensors must use the same device");
+  ET_CHECK_OR_RETURN_ERROR(
+      fits_mublas_dimension(batch) && fits_mublas_dimension(m) &&
+          fits_mublas_dimension(k) && fits_mublas_dimension(n),
+      NotSupported,
+      "MUSA bmm dimensions exceed mublas limits");
+
+  auto stream_result = getCurrentCUDAStream(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
+  cudaStream_t stream = stream_result.get();
+
+  mublasHandle_t handle = nullptr;
+  AOTITorchError error = check_mublas(mublasCreate(&handle), "mublasCreate");
+  if (error != Error::Ok) {
+    return error;
+  }
+  error = check_mublas(
+      mublasSetStream(handle, reinterpret_cast<MUstream>(stream)),
+      "mublasSetStream");
+  if (error != Error::Ok) {
+    mublasDestroy(handle);
+    return error;
+  }
+  error = check_mublas(
+      mublasSetPointerMode(handle, MUBLAS_POINTER_MODE_HOST),
+      "mublasSetPointerMode");
+  if (error != Error::Ok) {
+    mublasDestroy(handle);
+    return error;
+  }
+
+  const float alpha_float = 1.0f;
+  const float beta_float = 0.0f;
+  const executorch::runtime::etensor::Half alpha_half(alpha_float);
+  const executorch::runtime::etensor::Half beta_half(beta_float);
+  const void* alpha_ptr = dtype == ScalarType::Half
+      ? static_cast<const void*>(&alpha_half)
+      : static_cast<const void*>(&alpha_float);
+  const void* beta_ptr = dtype == ScalarType::Half
+      ? static_cast<const void*>(&beta_half)
+      : static_cast<const void*>(&beta_float);
+  const musaDataType_t data_type =
+      dtype == ScalarType::Float
+      ? MUSA_R_32F
+      : (dtype == ScalarType::Half ? MUSA_R_16F : MUSA_R_16BF);
+  const mublasComputeType_t compute_type =
+      dtype == ScalarType::Half ? MUBLAS_COMPUTE_16F : MUBLAS_COMPUTE_32F;
+  const mublasOperation_t mat2_operation =
+      mat2_column_major ? MUBLAS_OP_T : MUBLAS_OP_N;
+  const int mat2_leading_dimension =
+      static_cast<int>(mat2_column_major ? k : n);
+  const long long mat2_batch_stride =
+      static_cast<long long>(mat2_strides[0]);
+  const long long mat1_batch_stride =
+      static_cast<long long>(mat1->strides()[0]);
+  const long long out_batch_stride = static_cast<long long>(out->strides()[0]);
+
+  error = check_mublas(
+      mublasGemmStridedBatchedEx(
+          handle,
+          mat2_operation,
+          MUBLAS_OP_N,
+          static_cast<int>(n),
+          static_cast<int>(m),
+          static_cast<int>(k),
+          alpha_ptr,
+          mat2->data_ptr(),
+          data_type,
+          mat2_leading_dimension,
+          mat2_batch_stride,
+          mat1->data_ptr(),
+          data_type,
+          static_cast<int>(k),
+          mat1_batch_stride,
+          beta_ptr,
+          out->data_ptr(),
+          data_type,
+          static_cast<int>(n),
+          out_batch_stride,
+          static_cast<int>(batch),
+          compute_type,
+          MUBLAS_GEMM_DEFAULT),
+      "mublasGemmStridedBatchedEx");
+
+  const AOTITorchError destroy_error =
+      check_mublas(mublasDestroy(handle), "mublasDestroy");
+  return error == Error::Ok ? destroy_error : error;
+}
+
 } // extern "C"
 } // namespace executorch::backends::cuda

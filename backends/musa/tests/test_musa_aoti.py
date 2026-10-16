@@ -20,6 +20,8 @@ class TestMusaAotiFallbacks(unittest.TestCase):
     def test_registers_native_slimtensor_fallback(self) -> None:
         fallbacks = MusaBackend.get_supported_fallback_kernels()
         self.assertIn("aoti_torch_musa_addmm_out", fallbacks)
+        self.assertIn("aoti_torch_musa_mm_out", fallbacks)
+        self.assertIn("aoti_torch_musa_bmm_out", fallbacks)
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
