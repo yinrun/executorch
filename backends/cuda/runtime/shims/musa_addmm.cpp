@@ -16,6 +16,7 @@
 #include <executorch/backends/aoti/slim/c10/cuda/Exception.h>
 #include <executorch/backends/aoti/slim/cuda/guard.h>
 #include <executorch/extension/cuda/runtime_api.h>
+#include <executorch/runtime/core/portable_type/half.h>
 #include <executorch/runtime/platform/assert.h>
 #include <executorch/runtime/platform/log.h>
 
@@ -170,6 +171,14 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
 
   const float alpha_float = static_cast<float>(alpha);
   const float beta_float = static_cast<float>(beta);
+  const executorch::runtime::etensor::Half alpha_half(alpha_float);
+  const executorch::runtime::etensor::Half beta_half(beta_float);
+  const void* alpha_ptr = dtype == ScalarType::Half
+      ? static_cast<const void*>(&alpha_half)
+      : static_cast<const void*>(&alpha_float);
+  const void* beta_ptr = dtype == ScalarType::Half
+      ? static_cast<const void*>(&beta_half)
+      : static_cast<const void*>(&beta_float);
   const mublasOperation_t mat2_operation =
       mat2_column_major ? MUBLAS_OP_T : MUBLAS_OP_N;
   const int mat2_leading_dimension =
@@ -178,6 +187,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       dtype == ScalarType::Float
       ? MUSA_R_32F
       : (dtype == ScalarType::Half ? MUSA_R_16F : MUSA_R_16BF);
+  const mublasComputeType_t compute_type =
+      dtype == ScalarType::Half ? MUBLAS_COMPUTE_16F : MUBLAS_COMPUTE_32F;
 
   // mublas uses column-major matrices. Swapping the row-major operands and
   // dimensions computes the same row-major mat1 @ mat2 result in-place. A
@@ -190,18 +201,18 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
           static_cast<int>(n),
           static_cast<int>(m),
           static_cast<int>(k),
-          &alpha_float,
+          alpha_ptr,
           mat2->data_ptr(),
           data_type,
           mat2_leading_dimension,
           mat1->data_ptr(),
           data_type,
           static_cast<int>(k),
-          &beta_float,
+          beta_ptr,
           out->data_ptr(),
           data_type,
           static_cast<int>(n),
-          MUBLAS_COMPUTE_32F,
+          compute_type,
           MUBLAS_GEMM_DEFAULT),
       "mublasGemmEx");
 
