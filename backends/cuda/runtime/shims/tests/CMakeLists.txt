@@ -61,7 +61,7 @@ set(CUDA_SHIM_TESTS
 set(CUDA_KERNEL_TESTS test_aoti_torch_cuda__weight_int4pack_mm)
 
 if(EXECUTORCH_BUILD_MUSA)
-  list(APPEND CUDA_SHIM_TESTS test_musa_addmm)
+  list(APPEND CUDA_SHIM_TESTS test_musa_addmm test_musa_convolution)
 endif()
 
 enable_testing()
@@ -75,7 +75,7 @@ foreach(test_name ${CUDA_SHIM_TESTS})
   )
 
   target_compile_definitions(${test_name} PRIVATE CUDA_AVAILABLE=1)
-  if(test_name STREQUAL "test_musa_addmm")
+  if(test_name MATCHES "^test_musa_")
     target_compile_definitions(${test_name} PRIVATE EXECUTORCH_USE_MUSA=1)
   endif()
 

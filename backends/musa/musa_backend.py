@@ -51,6 +51,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_addmm_out": None,
             "aoti_torch_musa_mm_out": None,
             "aoti_torch_musa_bmm_out": None,
+            "aoti_torch_musa_convolution": None,
         }
 
     @classmethod

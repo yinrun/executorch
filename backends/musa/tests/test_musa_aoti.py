@@ -22,6 +22,7 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertIn("aoti_torch_musa_addmm_out", fallbacks)
         self.assertIn("aoti_torch_musa_mm_out", fallbacks)
         self.assertIn("aoti_torch_musa_bmm_out", fallbacks)
+        self.assertIn("aoti_torch_musa_convolution", fallbacks)
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
@@ -65,3 +66,23 @@ class TestMusaAoti(unittest.TestCase):
         entries = {entry.fqn: entry for entry in metadata.entries}
         self.assertIn("linear.weight", entries)
         self.assertEqual(entries["linear.weight"].sizes, (4, 8))
+
+    def test_conv2d_aoti_compile(self) -> None:
+        class Conv2dModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.conv = nn.Conv2d(3, 4, 3, padding=1)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return self.conv(x)
+
+        example = torch.randn(1, 3, 8, 8, device="musa")
+        module = Conv2dModel().eval().to("musa")
+        exported = export(module, (example,))
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
