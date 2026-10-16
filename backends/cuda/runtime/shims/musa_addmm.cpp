@@ -61,13 +61,14 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       InvalidArgument,
       "MUSA addmm received a null tensor handle");
 
+  const auto dtype = out->dtype();
   ET_CHECK_OR_RETURN_ERROR(
-      out->dtype() == ScalarType::Float &&
-          self->dtype() == ScalarType::Float &&
-          mat1->dtype() == ScalarType::Float &&
-          mat2->dtype() == ScalarType::Float,
+      (dtype == ScalarType::Float || dtype == ScalarType::Half ||
+       dtype == ScalarType::BFloat16) &&
+          self->dtype() == dtype && mat1->dtype() == dtype &&
+          mat2->dtype() == dtype,
       NotSupported,
-      "MUSA addmm currently supports float32 tensors only");
+      "MUSA addmm supports float32, float16, and bfloat16 tensors only");
 
   ET_CHECK_OR_RETURN_ERROR(
       out->is_cuda() && self->is_cuda() && mat1->is_cuda() && mat2->is_cuda(),
@@ -147,20 +148,15 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
 
   if (beta != 0.0) {
     if (self->dim() == 1) {
+      const size_t row_bytes =
+          static_cast<size_t>(n) * static_cast<size_t>(out->itemsize());
       for (int64_t row = 0; row < m; ++row) {
-        error = check_mublas(
-            mublasScopy(
-                handle,
-                static_cast<int>(n),
-                static_cast<const float*>(self->data_ptr()),
-                1,
-                static_cast<float*>(out->data_ptr()) + row * n,
-                1),
-            "mublasScopy");
-        if (error != Error::Ok) {
-          mublasDestroy(handle);
-          return error;
-        }
+        ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
+            static_cast<char*>(out->data_ptr()) + row * row_bytes,
+            self->data_ptr(),
+            row_bytes,
+            cudaMemcpyDeviceToDevice,
+            stream));
       }
     } else if (out->data_ptr() != self->data_ptr()) {
       ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
@@ -178,12 +174,16 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       mat2_column_major ? MUBLAS_OP_T : MUBLAS_OP_N;
   const int mat2_leading_dimension =
       static_cast<int>(mat2_column_major ? k : n);
+  const musaDataType_t data_type =
+      dtype == ScalarType::Float
+      ? MUSA_R_32F
+      : (dtype == ScalarType::Half ? MUSA_R_16F : MUSA_R_16BF);
 
   // mublas uses column-major matrices. Swapping the row-major operands and
   // dimensions computes the same row-major mat1 @ mat2 result in-place. A
   // transposed row-major weight is already column-major for the logical mat2.
   error = check_mublas(
-      mublasSgemm(
+      mublasGemmEx(
           handle,
           mat2_operation,
           MUBLAS_OP_N,
@@ -191,14 +191,19 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
           static_cast<int>(m),
           static_cast<int>(k),
           &alpha_float,
-          static_cast<const float*>(mat2->data_ptr()),
+          mat2->data_ptr(),
+          data_type,
           mat2_leading_dimension,
-          static_cast<const float*>(mat1->data_ptr()),
+          mat1->data_ptr(),
+          data_type,
           static_cast<int>(k),
           &beta_float,
-          static_cast<float*>(out->data_ptr()),
-          static_cast<int>(n)),
-      "mublasSgemm");
+          out->data_ptr(),
+          data_type,
+          static_cast<int>(n),
+          MUBLAS_COMPUTE_32F,
+          MUBLAS_GEMM_DEFAULT),
+      "mublasGemmEx");
 
   const AOTITorchError destroy_error =
       check_mublas(mublasDestroy(handle), "mublasDestroy");
