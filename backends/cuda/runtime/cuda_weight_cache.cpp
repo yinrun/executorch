@@ -28,6 +28,7 @@
 namespace executorch::backends::cuda {
 
 using aoti::AOTInductorConstantMapEntry;
+using aoti::AOTInductorConstantMapHandle;
 using aoti::AtenTensorHandle;
 using aoti::slim::SlimTensor;
 using aoti::slim::c10::Device;
@@ -510,7 +511,8 @@ Error CudaWeightCache::load(
   ET_CHECK_OR_RETURN_ERROR(
       handle->get_num_constants && handle->get_constant_name &&
           handle->get_constant_original_fqn && handle->get_constant_dtype &&
-          handle->update_user_managed_constant_buffer_pairs,
+          (handle->update_user_managed_constant_buffer_pairs ||
+           handle->update_user_managed_constant_buffer),
       NotSupported,
       "AOTI library does not expose the APIs required by CUDA FQN weights");
 
@@ -653,14 +655,28 @@ Error CudaWeightCache::load(
     // Full validation stays on with off-graph KV present: those constants are
     // AOTI buffers, which the check permits to be absent, while every weight
     // must still be supplied.
-    ET_CHECK_OK_OR_RETURN_ERROR(
-        handle->update_user_managed_constant_buffer_pairs(
-            handle->container_handle,
-            pairs.data(),
-            pairs.size(),
-            /*use_inactive=*/false,
-            /*validate_full_update=*/true),
-        "Failed to bind CUDA FQN weights");
+    if (handle->update_user_managed_constant_buffer_pairs != nullptr) {
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          handle->update_user_managed_constant_buffer_pairs(
+              handle->container_handle,
+              pairs.data(),
+              pairs.size(),
+              /*use_inactive=*/false,
+              /*validate_full_update=*/true),
+          "Failed to bind CUDA FQN weights");
+    } else {
+      std::unordered_map<std::string, AtenTensorHandle> constant_map;
+      for (const auto& pair : pairs) {
+        constant_map.emplace(pair.name, pair.handle);
+      }
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          handle->update_user_managed_constant_buffer(
+              handle->container_handle,
+              reinterpret_cast<AOTInductorConstantMapHandle>(&constant_map),
+              /*use_inactive=*/false,
+              /*validate_full_update=*/true),
+          "Failed to bind CUDA FQN weights");
+    }
   }
   ET_LOG(
       Info,

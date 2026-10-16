@@ -243,6 +243,9 @@ class ET_EXPERIMENTAL CudaBackend final
     LOAD_OPTIONAL_SYMBOL(
         update_user_managed_constant_buffer_pairs,
         AOTInductorModelContainerUpdateUserManagedConstantBufferPairs);
+    LOAD_OPTIONAL_SYMBOL(
+        update_user_managed_constant_buffer,
+        AOTInductorModelContainerUpdateUserManagedConstantBuffer);
 #undef LOAD_OPTIONAL_SYMBOL
 
     return Error::Ok;

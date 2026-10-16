@@ -124,6 +124,13 @@ using AOTInductorModelContainerUpdateUserManagedConstantBufferPairsFunc =
         bool use_inactive,
         bool validate_full_update);
 
+using AOTInductorModelContainerUpdateUserManagedConstantBufferFunc =
+    AOTIRuntimeError (*)(
+        AOTInductorModelContainerHandle container_handle,
+        AOTInductorConstantMapHandle constant_map_handle,
+        bool use_inactive,
+        bool validate_full_update);
+
 } // extern "C"
 
 // AOTI Delegate Handle structure
@@ -148,6 +155,8 @@ struct AOTIDelegateHandle {
   AOTInductorModelContainerExtractConstantsMapFunc extract_constants_map;
   AOTInductorModelContainerUpdateUserManagedConstantBufferPairsFunc
       update_user_managed_constant_buffer_pairs;
+  AOTInductorModelContainerUpdateUserManagedConstantBufferFunc
+      update_user_managed_constant_buffer;
 };
 
 // New-format payload is "<so_key>\n<weights_key>"; an empty payload is a
