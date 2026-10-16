@@ -273,6 +273,10 @@ if(NOT EXECUTORCH_BUILD_ROCM
   )
 endif()
 
+if(EXECUTORCH_BUILD_MUSA)
+  list(APPEND _aoti_cuda_shim_sources runtime/shims/musa_addmm.cpp)
+endif()
+
 add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
 
 # Define CUDA_AVAILABLE to use SlimTensor on GPU in common_shims_slim.h
@@ -335,6 +339,10 @@ else()
             -Wl,--no-whole-archive
     PUBLIC ${_cuda_runtime_libraries} extension_cuda ${CMAKE_DL_LIBS}
   )
+endif()
+
+if(EXECUTORCH_BUILD_MUSA)
+  target_link_libraries(aoti_cuda_shims PUBLIC MUSA::mublas)
 endif()
 
 if(NOT _cuda_is_msvc_toolchain)
