@@ -13,7 +13,11 @@ import torch
 
 # Imported for its registration side effect: the decomposition calls
 # torch.ops.triton.sdpa, which only exists once this module has been loaded.
-from executorch.backends.cuda.triton.kernels.sdpa import sdpa  # noqa: F401
+try:
+    from executorch.backends.cuda.triton.kernels.sdpa import sdpa  # noqa: F401
+except ModuleNotFoundError as error:
+    if error.name != "triton":
+        raise
 from executorch.backends.transforms.utils import create_constant_placeholder
 from executorch.exir.dialects._ops import ops as exir_ops
 from torch.export import ExportedProgram
