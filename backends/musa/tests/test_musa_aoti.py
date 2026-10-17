@@ -241,6 +241,28 @@ class TestMusaAoti(unittest.TestCase):
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
+    def test_conv_transpose1d_aoti_compile(self) -> None:
+        class ConvTranspose1dModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.conv = nn.ConvTranspose1d(
+                    2, 3, 3, stride=2, padding=1, output_padding=1
+                )
+
+            def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+                return self.conv(input_tensor)
+
+        example = torch.randn(1, 2, 5, device="musa")
+        module = ConvTranspose1dModel().eval().to("musa")
+        exported = export(module, (example,))
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_conv_transpose3d_aoti_compile(self) -> None:
         class ConvTranspose3dModel(nn.Module):
             def __init__(self) -> None:

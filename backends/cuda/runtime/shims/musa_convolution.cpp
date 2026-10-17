@@ -139,12 +139,13 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       "MUSA convolution supports 1D, 2D, and 3D convolution only");
   const int64_t spatial_dims = input->dim() - 2;
   ET_CHECK_OR_RETURN_ERROR(
-      (!transposed || spatial_dims >= 2) && stride != nullptr &&
-          padding != nullptr && dilation != nullptr && output_padding != nullptr &&
+      stride != nullptr && padding != nullptr && dilation != nullptr &&
+          output_padding != nullptr &&
           stride_len == spatial_dims && padding_len == spatial_dims &&
           dilation_len == spatial_dims && output_padding_len == spatial_dims,
       NotSupported,
-      "MUSA convolution supports transposed 2D/3D and non-transposed 1D/2D/3D only");
+      "MUSA convolution expects one stride, padding, dilation, and output "
+      "padding per spatial dimension");
   for (int64_t index = 0; index < spatial_dims; ++index) {
     ET_CHECK_OR_RETURN_ERROR(
         stride[index] > 0 && dilation[index] > 0 && padding[index] >= 0 &&
@@ -387,6 +388,9 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
 
   const float alpha = 1.0f;
   const float beta = 0.0f;
+  const auto backward_data_algorithm = transposed && one_dim_as_two
+      ? MUDNN_CONVOLUTION_BWD_DATA_ALGO_GEMM
+      : MUDNN_CONVOLUTION_BWD_DATA_ALGO_IMPLICIT_GEMM;
   size_t workspace_size = 0;
   error = transposed
       ? check_mudnn(
@@ -396,7 +400,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
                 context.input,
                 context.convolution,
                 context.output,
-                MUDNN_CONVOLUTION_BWD_DATA_ALGO_IMPLICIT_GEMM,
+                backward_data_algorithm,
                 &workspace_size),
             "mudnnGetConvolutionBackwardDataWorkspaceSize")
       : check_mudnn(
@@ -427,7 +431,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
                 context.input,
                 input_for_mudnn->data_ptr(),
                 context.convolution,
-                MUDNN_CONVOLUTION_BWD_DATA_ALGO_IMPLICIT_GEMM,
+                backward_data_algorithm,
                 workspace.data,
                 workspace_size,
                 &beta,

@@ -1,11 +1,12 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for thirteen models:
+`aoti_model_acceptance.py` validates the complete MUSA path for fourteen models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
 - `simple_video_cnn`: Conv3d + ReLU + MaxPool3d + Conv3d + pooling + Linear;
 - `simple_decoder`: ConvTranspose2d + ReLU + ConvTranspose2d with output padding;
+- `simple_audio_decoder`: ConvTranspose1d + ReLU + ConvTranspose1d with output padding;
 - `simple_video_decoder`: ConvTranspose3d + ReLU + ConvTranspose3d with output padding;
 - `transformer_block`: torchvision-independent TransformerEncoderLayer;
 - `causal_attention`: causal grouped-query attention with Q/K/V projections;
@@ -46,9 +47,9 @@ downloads weights automatically.
 The MUSA backend disables TorchInductor's layout optimization so Conv1d/2d/3d
 fallback outputs and generated kernels agree on contiguous NCHW layout. The
 eager reference disables muDNN TF32 to match the fallback's FP32 FMA math.
-The native fallback supports non-transposed Conv1d/2d/3d and transposed
-Conv2d/3d with output padding smaller than its stride. Transposed Conv1d is
-not supported by the current muDNN backward-data configuration.
+The native fallback supports non-transposed and transposed Conv1d/2d/3d with
+output padding smaller than its stride. Transposed Conv1d uses muDNN's GEMM
+backward-data algorithm; its implicit-GEMM algorithm rejects the 1D descriptor.
 MUSA AOTI decomposes inference-only SDPA into matmul, softmax, and masking to
 avoid an unavailable TorchMUSA AOTI fallback. Pattern matching is disabled
 only while compiling graphs containing SDPA or attention-like softmax/matmul
@@ -85,6 +86,11 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
 $PYTHON examples/musa/aoti_model_acceptance.py \
   --model simple_cnn \
   --output-dir /tmp/executorch-musa-acceptance/simple_cnn \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model simple_audio_decoder --dtype bf16 \
+  --output-dir /tmp/executorch-musa-acceptance/simple_audio_decoder_bf16 \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -142,6 +148,7 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | Simple CNN | 1x3x32x32 | FP16 / BF16 | Random | 2.44e-4 / 1.95e-3 |
 | Simple 3D CNN | 1x1x4x8x8 | FP32 | Random | 7.45e-9 |
 | Simple decoder | 1x3x8x8 | FP32 | Random | 5.96e-8 |
+| Simple audio decoder | 1x2x5 | FP32 / FP16 / BF16 | Random | 2.98e-8 / 2.44e-4 / 1.95e-3 |
 | Simple video decoder | 1x1x2x3x4 | FP32 / FP16 / BF16 | Random | 0 / 0 / 0 |
 | TransformerEncoderLayer | 1x4x16 | FP32 / FP16 / BF16 | Random | 4.77e-7 / 1.95e-3 / 7.81e-3 |
 | Causal GQA | 1x4x16 | FP32 / FP16 / BF16 | Random | 1.19e-7 / 1.22e-4 / 3.91e-3 |

@@ -95,6 +95,19 @@ class SimpleDecoder(nn.Module):
         return self.layers(x)
 
 
+class SimpleAudioDecoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.ConvTranspose1d(2, 3, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose1d(3, 1, 3, padding=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x)
+
+
 class SimpleVideoDecoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -276,6 +289,7 @@ MODEL_FACTORIES = {
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
     "simple_video_cnn": (SimpleVideoCnn, (1, 1, 4, 8, 8)),
     "simple_decoder": (SimpleDecoder, (1, 3, 8, 8)),
+    "simple_audio_decoder": (SimpleAudioDecoder, (1, 2, 5)),
     "simple_video_decoder": (SimpleVideoDecoder, (1, 1, 2, 3, 4)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
