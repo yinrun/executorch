@@ -7,10 +7,9 @@
 """Export and execute representative models through the MUSA AOTI backend.
 
 The script deliberately uses fixed-shape, float32 inputs. It is an acceptance
-smoke test for the complete export path, not a benchmark or a reference model
-implementation. The ``resnet18`` model keeps the ResNet-18 block topology but
-uses narrow channels so compilation and execution remain practical on a
-development device.
+smoke test for the complete export path, not a benchmark. The
+``narrow_resnet18`` model keeps the ResNet-18 block topology but uses narrow
+channels; ``resnet18`` is the standard torchvision model with random weights.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ import json
 import os
 import shutil
 import subprocess
-import sys
+import sysconfig
 from pathlib import Path
 from typing import Iterator
 
@@ -142,10 +141,17 @@ class Resnet18(nn.Module):
         return self.classifier(self.pool(x).flatten(1))
 
 
+def _torchvision_resnet18() -> nn.Module:
+    from torchvision.models import resnet18
+
+    return resnet18(weights=None)
+
+
 MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
-    "resnet18": (Resnet18, (1, 3, 32, 32)),
+    "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
+    "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
 }
 
 
@@ -185,21 +191,18 @@ def _runner_environment() -> dict[str, str]:
         Path("/usr/local/musa/lib"),
     ]
     existing_library_path = os.environ.get("LD_LIBRARY_PATH", "")
-    library_path = ":".join(
-        str(path)
-        for path in library_dirs
-        if path.is_dir()
-    )
+    library_path = ":".join(str(path) for path in library_dirs if path.is_dir())
     if existing_library_path:
         library_path = f"{library_path}:{existing_library_path}"
 
     preload = []
-    for path in (
-        Path(sys.executable).resolve().parent.parent / "lib/libpython3.10.so.1.0",
-        torch_root / "lib/libtorch_python.so",
-    ):
-        if path.exists():
-            preload.append(str(path))
+    python_library = sysconfig.get_config_var("LDLIBRARY")
+    python_library_dir = sysconfig.get_config_var("LIBDIR")
+    if python_library and python_library_dir:
+        preload.append(str(Path(python_library_dir) / python_library))
+    torch_python_library = torch_root / "lib/libtorch_python.so"
+    if torch_python_library.exists():
+        preload.append(str(torch_python_library))
 
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = library_path
@@ -223,13 +226,20 @@ def _run_runner(
         f"--output_file={output_prefix}",
         "--print_output=summary",
     ]
-    return subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=_runner_environment(),
-    )
+    try:
+        return subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_runner_environment(),
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(
+            "executor_runner failed\n"
+            f"stdout:\n{error.stdout}\n"
+            f"stderr:\n{error.stderr}"
+        ) from error
 
 
 def export_model(model_name: str, output_dir: Path) -> tuple[Path, Path, Path, torch.Tensor]:
@@ -240,7 +250,7 @@ def export_model(model_name: str, output_dir: Path) -> tuple[Path, Path, Path, t
     torch.manual_seed(0)
     model = model_type().eval().to("musa")
     example = torch.randn(input_shape, device="musa")
-    with torch.no_grad():
+    with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
         expected = model(example)
 
     exported = export(model, (example,))
@@ -295,9 +305,7 @@ def main() -> None:
             output_prefix,
         )
         output_path = Path(f"{output_prefix}-0.bin")
-        actual = torch.frombuffer(
-            bytearray(output_path.read_bytes()), dtype=torch.float32
-        )
+        actual = torch.frombuffer(bytearray(output_path.read_bytes()), dtype=torch.float32)
         expected_flat = expected.detach().cpu().flatten()
         torch.testing.assert_close(
             actual,

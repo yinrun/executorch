@@ -257,6 +257,88 @@ void run_convolution_1d() {
   delete bias;
 }
 
+void run_convolution_noncontiguous_input(ScalarType dtype) {
+  SlimTensor* input = empty_tensor(dtype, {1, 1, 3, 3}, {9, 9, 1, 3});
+  SlimTensor* weight = empty_tensor(dtype, {1, 1, 2, 2}, {4, 4, 2, 1});
+  SlimTensor* bias = empty_tensor(dtype, {1}, {1});
+  copy_to_device(input, encode_values({1, 4, 7, 2, 5, 8, 3, 6, 9}, dtype));
+  copy_to_device(weight, encode_values({1, 2, 3, 4}, dtype));
+  copy_to_device(bias, encode_values({1}, dtype));
+
+  const int64_t stride[] = {1, 1};
+  const int64_t padding[] = {0, 0};
+  const int64_t dilation[] = {1, 1};
+  const int64_t output_padding[] = {0, 0};
+  SlimTensor* output = nullptr;
+  EXPECT_EQ(
+      aoti_torch_musa_convolution(
+          input,
+          weight,
+          bias,
+          stride,
+          2,
+          padding,
+          2,
+          dilation,
+          2,
+          false,
+          output_padding,
+          2,
+          1,
+          &output),
+      Error::Ok);
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  expect_values(copy_from_device(output, dtype), {38, 48, 68, 78});
+
+  delete output;
+  delete input;
+  delete weight;
+  delete bias;
+}
+
+void run_convolution_channels_last(ScalarType dtype) {
+  SlimTensor* input = empty_tensor(dtype, {1, 2, 3, 3}, {18, 1, 6, 2});
+  SlimTensor* weight = empty_tensor(dtype, {1, 2, 2, 2}, {8, 4, 2, 1});
+  copy_to_device(
+      input,
+      encode_values(
+          {1, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1, 7, 1, 8, 1, 9, 1},
+          dtype));
+  copy_to_device(weight, encode_values({1, 2, 3, 4, 1, 1, 1, 1}, dtype));
+
+  const int64_t stride[] = {1, 1};
+  const int64_t padding[] = {0, 0};
+  const int64_t dilation[] = {1, 1};
+  const int64_t output_padding[] = {0, 0};
+  SlimTensor* output = nullptr;
+  EXPECT_EQ(
+      aoti_torch_musa_convolution(
+          input,
+          weight,
+          nullptr,
+          stride,
+          2,
+          padding,
+          2,
+          dilation,
+          2,
+          false,
+          output_padding,
+          2,
+          1,
+          &output),
+      Error::Ok);
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  EXPECT_TRUE(output->is_contiguous());
+  expect_values(copy_from_device(output, dtype), {41, 51, 71, 81});
+
+  delete output;
+  delete input;
+  delete weight;
+}
+
 TEST_F(MusaConvolutionTest, ForwardDtypes) {
   for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_convolution(dtype);
@@ -265,6 +347,18 @@ TEST_F(MusaConvolutionTest, ForwardDtypes) {
 
 TEST_F(MusaConvolutionTest, ForwardNd) {
   run_convolution_1d();
+}
+
+TEST_F(MusaConvolutionTest, NonContiguousInput) {
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    run_convolution_noncontiguous_input(dtype);
+  }
+}
+
+TEST_F(MusaConvolutionTest, ChannelsLastInput) {
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    run_convolution_channels_last(dtype);
+  }
 }
 
 }

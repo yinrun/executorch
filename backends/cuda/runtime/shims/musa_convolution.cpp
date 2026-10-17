@@ -156,11 +156,26 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       groups > 0,
       InvalidArgument,
       "MUSA convolution received invalid convolution parameters");
-  ET_CHECK_OR_RETURN_ERROR(
-      input->is_contiguous() && weight->is_contiguous() &&
-          (bias == nullptr || bias->is_contiguous()),
-      NotSupported,
-      "MUSA convolution currently supports contiguous tensors only");
+
+  std::unique_ptr<SlimTensor> contiguous_input;
+  std::unique_ptr<SlimTensor> contiguous_weight;
+  std::unique_ptr<SlimTensor> contiguous_bias;
+  const SlimTensor* input_for_mudnn = input;
+  const SlimTensor* weight_for_mudnn = weight;
+  const SlimTensor* bias_for_mudnn = bias;
+  if (!input->is_contiguous()) {
+    contiguous_input = std::make_unique<SlimTensor>(input->clone_contiguous());
+    input_for_mudnn = contiguous_input.get();
+  }
+  if (!weight->is_contiguous()) {
+    contiguous_weight =
+        std::make_unique<SlimTensor>(weight->clone_contiguous());
+    weight_for_mudnn = contiguous_weight.get();
+  }
+  if (bias != nullptr && !bias->is_contiguous()) {
+    contiguous_bias = std::make_unique<SlimTensor>(bias->clone_contiguous());
+    bias_for_mudnn = contiguous_bias.get();
+  }
 
   const int64_t batch = input->size(0);
   const int64_t input_channels = input->size(1);
@@ -351,6 +366,12 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
           context.convolution, static_cast<int>(groups)),
       "mudnnSetConvolutionGroupCount");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
+  if (dtype == ScalarType::Float) {
+    error = check_mudnn(
+        mudnnSetConvolutionMathType(context.convolution, MUDNN_FMA_MATH),
+        "mudnnSetConvolutionMathType");
+    ET_CHECK_OK_OR_RETURN_ERROR(error);
+  }
 
   const float alpha = 1.0f;
   const float beta = 0.0f;
@@ -380,9 +401,9 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
           context.handle,
           &alpha,
           context.input,
-          input->data_ptr(),
+          input_for_mudnn->data_ptr(),
           context.weight,
-          weight->data_ptr(),
+          weight_for_mudnn->data_ptr(),
           context.convolution,
           MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
           workspace.data,
@@ -413,7 +434,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
             context.handle,
             &alpha,
             context.bias,
-            bias->data_ptr(),
+            bias_for_mudnn->data_ptr(),
             &alpha,
             context.output,
             output->data_ptr()),

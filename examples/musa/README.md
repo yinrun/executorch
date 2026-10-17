@@ -1,28 +1,36 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for three fixed
+`aoti_model_acceptance.py` validates the complete MUSA path for four fixed
 shape models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
-- `resnet18`: ResNet-18 block topology with narrow channels and a 32x32 input.
+- `narrow_resnet18`: ResNet-18 block topology with narrow channels and a 32x32 input;
+- `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input.
 
 The script writes the PTE, external AOTI data, raw input, expected output, and
 runner output to the selected directory. It compares the `executor_runner`
 output with the MUSA eager result; no CPU execution is used as a correctness
 baseline.
 
+The MUSA backend disables TorchInductor's layout optimization so Conv1d/2d
+fallback outputs and generated kernels agree on contiguous NCHW layout. The
+eager reference disables muDNN TF32 to match the fallback's FP32 FMA math.
+
 ## Prerequisites
 
 - MUSA and `torch_musa` are available to the selected Python environment;
 - the MUSA-compatible Triton package required by TorchInductor is installed;
+- `torchvision` is available for the standard `resnet18` model;
+- `flatc` is available on `PATH` for PTE/PTD serialization;
 - an ExecuTorch `executor_runner` built with `EXECUTORCH_BUILD_MUSA=ON`.
 
 For example, from the repository root:
 
 ```bash
-export PYTHON=/home/qianfan/miniforge3/envs/apxinf-pi05/bin/python3
+export PYTHON=/usr/bin/python3.12
 export PYTHONPATH=/tmp/executorch-pydeps:$PWD/src:$PWD
+export PATH=/tmp/executorch-flatc-build:$PATH
 export RUNNER=/tmp/executorch-musa-cmake-1792075449/executor_runner
 
 $PYTHON examples/musa/aoti_model_acceptance.py \

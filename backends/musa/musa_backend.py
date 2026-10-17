@@ -71,6 +71,7 @@ class MusaBackend(AotiBackend, BackendDetails):
         cls, compile_specs: List[CompileSpec]
     ) -> Dict[str, typing.Any]:
         options: Dict[str, typing.Any] = {
+            "layout_optimization": False,
             "loop_ordering_after_fusion": False,
             "emulate_precision_casts": True,
             "aot_inductor.embed_kernel_binary": True,
