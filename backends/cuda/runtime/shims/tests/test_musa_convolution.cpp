@@ -260,6 +260,52 @@ void run_convolution_1d() {
   delete bias;
 }
 
+void run_convolution_3d(ScalarType dtype) {
+  SlimTensor* input = empty_tensor(dtype, {1, 1, 3, 3, 3}, {27, 27, 9, 3, 1});
+  SlimTensor* weight = empty_tensor(dtype, {1, 1, 2, 2, 2}, {8, 8, 4, 2, 1});
+  SlimTensor* bias = empty_tensor(dtype, {1}, {1});
+  copy_to_device(
+      input,
+      encode_values(
+          {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+           17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27},
+          dtype));
+  copy_to_device(weight, encode_values({1, 1, 1, 1, 1, 1, 1, 1}, dtype));
+  copy_to_device(bias, encode_values({1}, dtype));
+
+  const int64_t stride[] = {1, 1, 1};
+  const int64_t padding[] = {0, 0, 0};
+  const int64_t dilation[] = {1, 1, 1};
+  const int64_t output_padding[] = {0, 0, 0};
+  SlimTensor* output = nullptr;
+  EXPECT_EQ(
+      aoti_torch_musa_convolution(
+          input,
+          weight,
+          bias,
+          stride,
+          3,
+          padding,
+          3,
+          dilation,
+          3,
+          false,
+          output_padding,
+          3,
+          1,
+          &output),
+      Error::Ok);
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  expect_values(
+      copy_from_device(output, dtype), {61, 69, 85, 93, 133, 141, 157, 165});
+
+  delete output;
+  delete input;
+  delete weight;
+  delete bias;
+}
+
 void run_convolution_depthwise(ScalarType dtype) {
   SlimTensor* input = empty_tensor(dtype, {1, 2, 3, 3}, {18, 9, 3, 1});
   SlimTensor* weight = empty_tensor(dtype, {2, 1, 2, 2}, {4, 4, 2, 1});
@@ -392,6 +438,12 @@ TEST_F(MusaConvolutionTest, ForwardDtypes) {
 
 TEST_F(MusaConvolutionTest, ForwardNd) {
   run_convolution_1d();
+}
+
+TEST_F(MusaConvolutionTest, Forward3dDtypes) {
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    run_convolution_3d(dtype);
+  }
 }
 
 TEST_F(MusaConvolutionTest, DepthwiseDtypes) {

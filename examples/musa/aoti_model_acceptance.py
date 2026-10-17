@@ -65,6 +65,23 @@ class SimpleCnn(nn.Module):
         return self.classifier(self.features(x).flatten(1))
 
 
+class SimpleVideoCnn(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv3d(1, 4, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool3d(2),
+            nn.Conv3d(4, 8, 3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),
+        )
+        self.classifier = nn.Linear(8, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.features(x).flatten(1))
+
+
 class ResidualBlock(nn.Module):
     expansion = 1
 
@@ -157,6 +174,7 @@ def _torchvision_mobilenet_v2() -> nn.Module:
 MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
+    "simple_video_cnn": (SimpleVideoCnn, (1, 1, 4, 8, 8)),
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),

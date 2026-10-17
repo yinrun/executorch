@@ -133,10 +133,10 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       InvalidArgument,
       "MUSA convolution tensors must use the same device");
   ET_CHECK_OR_RETURN_ERROR(
-      input->dim() >= 3 && input->dim() <= 4 &&
+      input->dim() >= 3 && input->dim() <= 5 &&
           weight->dim() == input->dim(),
       NotSupported,
-      "MUSA convolution supports 1D and 2D convolution only");
+      "MUSA convolution supports 1D, 2D, and 3D convolution only");
   const int64_t spatial_dims = input->dim() - 2;
   ET_CHECK_OR_RETURN_ERROR(
       !transposed && stride != nullptr && padding != nullptr &&
@@ -376,19 +376,17 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   const float alpha = 1.0f;
   const float beta = 0.0f;
   size_t workspace_size = 0;
-  if (one_dim_as_two || spatial_dims == 2) {
-    error = check_mudnn(
-        mudnnGetConvolutionForwardWorkspaceSize(
-            context.handle,
-            context.input,
-            context.weight,
-            context.convolution,
-            context.output,
-            MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
-            &workspace_size),
-        "mudnnGetConvolutionForwardWorkspaceSize");
-    ET_CHECK_OK_OR_RETURN_ERROR(error);
-  }
+  error = check_mudnn(
+      mudnnGetConvolutionForwardWorkspaceSize(
+          context.handle,
+          context.input,
+          context.weight,
+          context.convolution,
+          context.output,
+          MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+          &workspace_size),
+      "mudnnGetConvolutionForwardWorkspaceSize");
+  ET_CHECK_OK_OR_RETURN_ERROR(error);
   DeviceWorkspace workspace;
   if (workspace_size != 0) {
     if (cudaMalloc(&workspace.data, workspace_size) != cudaSuccess) {
