@@ -139,12 +139,12 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       "MUSA convolution supports 1D, 2D, and 3D convolution only");
   const int64_t spatial_dims = input->dim() - 2;
   ET_CHECK_OR_RETURN_ERROR(
-      (!transposed || spatial_dims == 2) && stride != nullptr &&
+      (!transposed || spatial_dims >= 2) && stride != nullptr &&
           padding != nullptr && dilation != nullptr && output_padding != nullptr &&
           stride_len == spatial_dims && padding_len == spatial_dims &&
           dilation_len == spatial_dims && output_padding_len == spatial_dims,
       NotSupported,
-      "MUSA convolution supports non-transposed 1D/2D/3D and transposed 2D only");
+      "MUSA convolution supports transposed 2D/3D and non-transposed 1D/2D/3D only");
   for (int64_t index = 0; index < spatial_dims; ++index) {
     ET_CHECK_OR_RETURN_ERROR(
         stride[index] > 0 && dilation[index] > 0 && padding[index] >= 0 &&
