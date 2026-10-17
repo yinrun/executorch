@@ -26,6 +26,7 @@ from examples.musa.aoti_model_acceptance import (
     DilatedDecoder,
     SimpleAudioDecoder,
     SimpleVideoDecoder,
+    TinyUNet,
 )
 from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
@@ -320,6 +321,27 @@ class TestMusaAoti(unittest.TestCase):
                     module,
                     (torch.randn(shape, device="musa", dtype=torch.bfloat16),),
                     dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+                )
+                result = MusaBackend.preprocess(
+                    exported,
+                    [MusaBackend.generate_method_name_compile_spec("forward")],
+                )
+
+                self.assertGreater(len(result.processed_bytes), 0)
+                self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_tiny_unet_aoti_compile(self) -> None:
+        for dtype, dynamic_shapes in (
+            (torch.float32, None),
+            (torch.bfloat16, ({0: Dim("batch", min=1, max=3)},)),
+        ):
+            with self.subTest(dtype=dtype):
+                module = TinyUNet().eval().to(device="musa", dtype=dtype)
+                batch = 2 if dynamic_shapes is not None else 1
+                exported = export(
+                    module,
+                    (torch.randn(batch, 3, 32, 32, device="musa", dtype=dtype),),
+                    dynamic_shapes=dynamic_shapes,
                 )
                 result = MusaBackend.preprocess(
                     exported,

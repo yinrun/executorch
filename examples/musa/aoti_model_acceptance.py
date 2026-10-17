@@ -140,6 +140,31 @@ class DilatedDecoder(nn.Module):
         return self.conv(x)
 
 
+class TinyUNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1), nn.GroupNorm(4, 8), nn.SiLU()
+        )
+        self.down = nn.Sequential(
+            nn.Conv2d(8, 16, 3, stride=2, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.SiLU(),
+        )
+        self.up = nn.ConvTranspose2d(16, 8, 2, stride=2)
+        self.head = nn.Sequential(
+            nn.Conv2d(16, 8, 3, padding=1),
+            nn.GroupNorm(4, 8),
+            nn.SiLU(),
+            nn.Conv2d(8, 3, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        skip = self.stem(x)
+        encoded = self.down(skip)
+        return self.head(torch.cat((skip, self.up(encoded)), dim=1))
+
+
 class TransformerBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -313,6 +338,7 @@ MODEL_FACTORIES = {
     "dilated_audio_decoder": (partial(DilatedDecoder, 1), (1, 2, 5)),
     "dilated_image_decoder": (partial(DilatedDecoder, 2), (1, 2, 5, 4)),
     "dilated_video_decoder": (partial(DilatedDecoder, 3), (1, 2, 5, 4, 3)),
+    "tiny_unet": (TinyUNet, (1, 3, 32, 32)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
     "embedding_classifier": (EmbeddingClassifier, (1, 4)),

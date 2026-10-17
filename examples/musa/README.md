@@ -1,6 +1,6 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for seventeen models:
+`aoti_model_acceptance.py` validates the complete MUSA path for eighteen models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
@@ -9,6 +9,7 @@
 - `simple_audio_decoder`: grouped ConvTranspose1d + ReLU + ConvTranspose1d with output padding;
 - `simple_video_decoder`: ConvTranspose3d + ReLU + ConvTranspose3d with output padding;
 - `dilated_audio_decoder`, `dilated_image_decoder`, `dilated_video_decoder`: ConvTranspose1d/2d/3d with output padding smaller than dilation but not stride;
+- `tiny_unet`: Conv2d, GroupNorm, SiLU, down/up sampling, concatenated skip connection, and ConvTranspose2d;
 - `transformer_block`: torchvision-independent TransformerEncoderLayer;
 - `causal_attention`: causal grouped-query attention with Q/K/V projections;
 - `embedding_classifier`: int64 token IDs, Embedding, pooling, and Linear;
@@ -62,8 +63,10 @@ TorchMUSA export specializes attention batch dimensions, so bounded dynamic
 batch acceptance is not yet available for models containing attention.
 Boolean/additive masks, causal attention, and GQA are covered separately;
 combining a causal flag with a custom mask is not supported.
-All-masked rows are not covered: math SDPA can yield NaNs, while TorchMUSA's
-low-precision flash attention can behave differently.
+All-masked rows are not covered: on M1000, FP32 SDPA and the backend math path
+return NaNs, while low-precision TorchMUSA flash attention returned nonzero
+values for both boolean and additive masks in a 3-token probe. Silently mapping
+these cases to zeros or flash output would change masking semantics.
 
 ## Prerequisites
 
@@ -99,6 +102,11 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
 $PYTHON examples/musa/aoti_model_acceptance.py \
   --model simple_video_decoder --dtype bf16 \
   --output-dir /tmp/executorch-musa-acceptance/simple_video_decoder_bf16 \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model tiny_unet --dtype bf16 \
+  --output-dir /tmp/executorch-musa-acceptance/tiny_unet_bf16 \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -167,6 +175,7 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | Dilated audio decoder | 1x2x5 | FP32 / BF16 | Random | 5.97e-8 / 3.91e-3 |
 | Dilated image decoder | 1x2x5x4 | FP32 / BF16 | Random | 0 / 0 |
 | Dilated video decoder | 1x2x5x4x3 | FP32 / BF16 | Random | 0 / 0 |
+| Tiny U-Net | 1x3x32x32 | FP32 / FP16 / BF16 | Random | 6.56e-7 / 1.95e-3 / 1.56e-2 |
 | TransformerEncoderLayer | 1x4x16 | FP32 / FP16 / BF16 | Random | 4.77e-7 / 1.95e-3 / 7.81e-3 |
 | Causal GQA | 1x4x16 | FP32 / FP16 / BF16 | Random | 1.19e-7 / 1.22e-4 / 3.91e-3 |
 | Token encoder | 1x4 int64 | FP32 / FP16 / BF16 | Random | 5.96e-8 / 4.89e-4 / 1.96e-3 |
@@ -190,6 +199,8 @@ With a separate bounded dynamic-batch PTE for each BF16 model, batches 2/1/3
 passed for the grouped audio decoder (maximum error 1.95e-3), video decoder
 (0), dilated audio decoder (3.91e-3), dilated image decoder (0), and dilated
 video decoder (0). This checks dynamic batch only, not dynamic spatial sizes.
+The tiny U-Net also passed BF16 batches 2/1/3 with one PTE (maximum error
+1.56e-2), covering GroupNorm and the concatenated skip connection.
 The embedding classifier also passed batches 2/1/3 in FP32 with one PTE
 (maximum error 1.20e-7), confirming dynamic int64 inputs without attention.
 The token decoder matched eager token IDs `[4, 13, 56, 44]` in all three
