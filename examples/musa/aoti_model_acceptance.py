@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sysconfig
+from functools import partial
 from pathlib import Path
 from typing import Iterator
 
@@ -121,6 +122,22 @@ class SimpleVideoDecoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)
+
+
+class DilatedDecoder(nn.Module):
+    def __init__(self, dimensions: int) -> None:
+        super().__init__()
+        conv_type = {
+            1: nn.ConvTranspose1d,
+            2: nn.ConvTranspose2d,
+            3: nn.ConvTranspose3d,
+        }[dimensions]
+        self.conv = conv_type(
+            2, 3, 3, stride=1, padding=2, dilation=2, output_padding=1
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
 
 
 class TransformerBlock(nn.Module):
@@ -293,6 +310,9 @@ MODEL_FACTORIES = {
     "simple_decoder": (SimpleDecoder, (1, 3, 8, 8)),
     "simple_audio_decoder": (SimpleAudioDecoder, (1, 2, 5)),
     "simple_video_decoder": (SimpleVideoDecoder, (1, 1, 2, 3, 4)),
+    "dilated_audio_decoder": (partial(DilatedDecoder, 1), (1, 2, 5)),
+    "dilated_image_decoder": (partial(DilatedDecoder, 2), (1, 2, 5, 4)),
+    "dilated_video_decoder": (partial(DilatedDecoder, 3), (1, 2, 5, 4, 3)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
     "embedding_classifier": (EmbeddingClassifier, (1, 4)),

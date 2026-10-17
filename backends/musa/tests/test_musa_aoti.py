@@ -22,6 +22,7 @@ from examples.musa.aoti_kv_cache_acceptance import (
     GrowingCacheDecoder,
     RollingCacheDecoder,
 )
+from examples.musa.aoti_model_acceptance import DilatedDecoder
 from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
 
@@ -286,6 +287,23 @@ class TestMusaAoti(unittest.TestCase):
 
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_dilated_conv_transpose_aoti_compile(self) -> None:
+        for dimensions, shape in (
+            (1, (1, 2, 5)),
+            (2, (1, 2, 5, 4)),
+            (3, (1, 2, 5, 4, 3)),
+        ):
+            with self.subTest(dimensions=dimensions):
+                module = DilatedDecoder(dimensions).eval().to("musa")
+                exported = export(module, (torch.randn(shape, device="musa"),))
+                result = MusaBackend.preprocess(
+                    exported,
+                    [MusaBackend.generate_method_name_compile_spec("forward")],
+                )
+
+                self.assertGreater(len(result.processed_bytes), 0)
+                self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
     def test_transformer_encoder_aoti_compile(self) -> None:
         module = (

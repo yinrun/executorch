@@ -150,7 +150,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
     ET_CHECK_OR_RETURN_ERROR(
         stride[index] > 0 && dilation[index] > 0 && padding[index] >= 0 &&
             output_padding[index] >= 0 &&
-            (transposed ? output_padding[index] < stride[index]
+            (transposed ? (output_padding[index] < stride[index] ||
+                           output_padding[index] < dilation[index])
                         : output_padding[index] == 0),
         InvalidArgument,
         "MUSA convolution received invalid convolution parameters");
