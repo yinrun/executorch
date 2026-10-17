@@ -6,10 +6,10 @@
 
 """Export and execute representative models through the MUSA AOTI backend.
 
-The script deliberately uses fixed-shape, float32 inputs. It is an acceptance
+The script uses fixed-shape inputs for each export. It is an acceptance
 smoke test for the complete export path, not a benchmark. The
 ``narrow_resnet18`` model keeps the ResNet-18 block topology but uses narrow
-channels; ``resnet18`` is the standard torchvision model with random weights.
+channels; ``resnet18`` is the standard torchvision model with optional weights.
 """
 
 from __future__ import annotations
@@ -153,6 +153,8 @@ MODEL_FACTORIES = {
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
 }
+DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+TOLERANCES = {"fp32": 1e-4, "fp16": 1e-2, "bf16": 4e-2}
 
 
 @contextlib.contextmanager
@@ -177,7 +179,8 @@ def _serialization_schema() -> Iterator[None]:
 
 
 def _write_tensor(tensor: torch.Tensor, path: Path) -> None:
-    path.write_bytes(tensor.detach().cpu().contiguous().numpy().tobytes())
+    raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
+    path.write_bytes(raw.tobytes())
 
 
 def _runner_environment() -> dict[str, str]:
@@ -242,14 +245,32 @@ def _run_runner(
         ) from error
 
 
-def export_model(model_name: str, output_dir: Path) -> tuple[Path, Path, Path, torch.Tensor]:
+def export_model(
+    model_name: str,
+    output_dir: Path,
+    dtype: torch.dtype,
+    input_size: int | None,
+    weights_path: Path | None,
+) -> tuple[Path, Path, Path, torch.Tensor]:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
 
     model_type, input_shape = MODEL_FACTORIES[model_name]
+    if input_size is not None:
+        if model_name not in ("resnet18", "narrow_resnet18"):
+            raise ValueError("--input-size is only supported for ResNet models")
+        if input_size < 32:
+            raise ValueError("--input-size must be at least 32")
+        input_shape = (1, 3, input_size, input_size)
+    if weights_path is not None and model_name != "resnet18":
+        raise ValueError("--weights is only supported for torchvision resnet18")
     torch.manual_seed(0)
-    model = model_type().eval().to("musa")
-    example = torch.randn(input_shape, device="musa")
+    model = model_type()
+    if weights_path is not None:
+        state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state_dict)
+    model = model.eval().to(device="musa", dtype=dtype)
+    example = torch.randn(input_shape, device="musa", dtype=dtype)
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
         expected = model(example)
 
@@ -278,16 +299,29 @@ def main() -> None:
     parser.add_argument("--model", choices=sorted(MODEL_FACTORIES), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--runner", type=Path)
-    parser.add_argument("--atol", type=float, default=1e-4)
-    parser.add_argument("--rtol", type=float, default=1e-4)
+    parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp32")
+    parser.add_argument("--input-size", type=int)
+    parser.add_argument("--weights", type=Path)
+    parser.add_argument("--atol", type=float)
+    parser.add_argument("--rtol", type=float)
     args = parser.parse_args()
 
     pte_path, ptd_path, input_path, expected = export_model(
         args.model,
         args.output_dir,
+        DTYPES[args.dtype],
+        args.input_size,
+        args.weights,
     )
+    atol = args.atol if args.atol is not None else TOLERANCES[args.dtype]
+    rtol = args.rtol if args.rtol is not None else TOLERANCES[args.dtype]
     result = {
         "model": args.model,
+        "dtype": args.dtype,
+        "input_size": args.input_size,
+        "weights": str(args.weights) if args.weights is not None else None,
+        "atol": atol,
+        "rtol": rtol,
         "pte": str(pte_path),
         "ptd": str(ptd_path),
         "input": str(input_path),
@@ -305,17 +339,21 @@ def main() -> None:
             output_prefix,
         )
         output_path = Path(f"{output_prefix}-0.bin")
-        actual = torch.frombuffer(bytearray(output_path.read_bytes()), dtype=torch.float32)
+        actual = torch.frombuffer(
+            bytearray(output_path.read_bytes()), dtype=DTYPES[args.dtype]
+        )
         expected_flat = expected.detach().cpu().flatten()
         torch.testing.assert_close(
             actual,
             expected_flat,
-            atol=args.atol,
-            rtol=args.rtol,
+            atol=atol,
+            rtol=rtol,
         )
         result["runner"] = str(args.runner)
         result["output"] = str(output_path)
-        result["max_error"] = float((actual - expected_flat).abs().max())
+        result["max_error"] = float(
+            (actual.float() - expected_flat.float()).abs().max()
+        )
         result["runner_stdout"] = completed.stdout
         result["runner_stderr"] = completed.stderr
 
