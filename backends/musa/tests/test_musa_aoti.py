@@ -40,7 +40,11 @@ class TestMusaAoti(unittest.TestCase):
         module = PromptPrefill(decoder).eval()
         tokens = torch.tensor([[11, 7, 22]], device="musa", dtype=torch.int64)
         result = MusaBackend.preprocess(
-            export(module, (tokens,)),
+            export(
+                module,
+                (tokens,),
+                dynamic_shapes=({1: Dim("prompt", min=2, max=4)},),
+            ),
             [MusaBackend.generate_method_name_compile_spec("forward")],
         )
 

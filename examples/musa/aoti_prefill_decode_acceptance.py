@@ -131,7 +131,9 @@ def _check_outputs(
     }
 
 
-def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
+def run_acceptance(
+    output_dir: Path, runner: Path, dtype: torch.dtype, dynamic_prefill: bool = False
+) -> dict:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
     torch.manual_seed(0)
@@ -151,7 +153,11 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
         expected_prefill[0], last_token, atol=tolerance, rtol=tolerance
     )
     prefill_pte, prefill_ptd = _export_model(
-        prefill, (prompt,), output_dir / "prefill", "prompt_prefill"
+        prefill,
+        (prompt,),
+        output_dir / "prefill",
+        "prompt_prefill",
+        ({1: Dim("prompt", min=2, max=4)},) if dynamic_prefill else None,
     )
     initial_key, initial_value = expected_prefill[1:]
     dynamic_shapes = (
@@ -171,10 +177,40 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
 
     prompt_path = output_dir / "prompt.bin"
     _write_tensor(prompt, prompt_path)
+    if dynamic_prefill:
+        with prompt_path.open("ab") as prompt_file:
+            prompt_file.write(bytes((4 - prompt.shape[1]) * prompt.element_size()))
     prefill_paths = _run(
-        runner, prefill_pte, prefill_ptd, [prompt_path], output_dir / "prefill-output"
+        runner,
+        prefill_pte,
+        prefill_ptd,
+        [prompt_path],
+        output_dir / "prefill-output",
+        "1x3" if dynamic_prefill else None,
     )
     prefill_result = _check_outputs(prefill_paths, expected_prefill, tolerance)
+    dynamic_results = []
+    if dynamic_prefill:
+        for current_prompt in (prompt[:, :2], torch.cat((prompt, prompt[:, :1]), 1)):
+            length = current_prompt.shape[1]
+            with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
+                expected = prefill(current_prompt)
+            path = output_dir / f"prompt-{length}.bin"
+            _write_tensor(current_prompt, path)
+            if length < 4:
+                with path.open("ab") as prompt_file:
+                    prompt_file.write(bytes((4 - length) * prompt.element_size()))
+            paths = _run(
+                runner,
+                prefill_pte,
+                prefill_ptd,
+                [path],
+                output_dir / f"prefill-{length}-output",
+                f"1x{length}",
+            )
+            result = _check_outputs(paths, expected, tolerance)
+            result["prompt_length"] = length
+            dynamic_results.append(result)
 
     steps = []
     past_key, past_value = initial_key, initial_value
@@ -211,6 +247,7 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
         "dtype": dtype_name,
         "prompt": prompt.tolist(),
         "prefill": prefill_result,
+        "dynamic_prefill": dynamic_results,
         "decode_steps": steps,
         "prefill_pte": str(prefill_pte),
         "prefill_ptd": str(prefill_ptd),
@@ -224,8 +261,11 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--runner", type=Path, required=True)
     parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp32")
+    parser.add_argument("--dynamic-prefill", action="store_true")
     args = parser.parse_args()
-    result = run_acceptance(args.output_dir, args.runner, DTYPES[args.dtype])
+    result = run_acceptance(
+        args.output_dir, args.runner, DTYPES[args.dtype], args.dynamic_prefill
+    )
     print(json.dumps(result, indent=2))
 
 

@@ -216,6 +216,12 @@ with maximum logits errors of 2.99e-7, 1.20e-7, and 1.50e-7 respectively;
 FP16 and BF16 also passed with exact matching token IDs `[16, 40, 32]`.
 This is a randomly initialized toy model, not a pretrained LLM or general
 variable-length prefill acceptance.
+Use `--dynamic-prefill` to export one bounded-dynamic prefill PTE and run
+prompts of lengths 2, 3, and 4 against MUSA eager before decoding the
+three-token prompt. Input buffers are padded to the export bound and their
+actual shape is supplied through `--input_shapes`. On M1000, FP32, FP16, and
+BF16 passed all three prompt lengths and both subsequent decode steps with
+their respective pairs of PTEs.
 
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
