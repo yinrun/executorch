@@ -139,23 +139,31 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       "MUSA convolution supports 1D, 2D, and 3D convolution only");
   const int64_t spatial_dims = input->dim() - 2;
   ET_CHECK_OR_RETURN_ERROR(
-      !transposed && stride != nullptr && padding != nullptr &&
-          dilation != nullptr && output_padding != nullptr &&
+      (!transposed || spatial_dims == 2) && stride != nullptr &&
+          padding != nullptr && dilation != nullptr && output_padding != nullptr &&
           stride_len == spatial_dims && padding_len == spatial_dims &&
           dilation_len == spatial_dims && output_padding_len == spatial_dims,
       NotSupported,
-      "MUSA convolution supports non-transposed convolution only");
+      "MUSA convolution supports non-transposed 1D/2D/3D and transposed 2D only");
   for (int64_t index = 0; index < spatial_dims; ++index) {
     ET_CHECK_OR_RETURN_ERROR(
         stride[index] > 0 && dilation[index] > 0 && padding[index] >= 0 &&
-            output_padding[index] == 0,
+            output_padding[index] >= 0 &&
+            (transposed ? output_padding[index] < stride[index]
+                        : output_padding[index] == 0),
         InvalidArgument,
         "MUSA convolution received invalid convolution parameters");
   }
   ET_CHECK_OR_RETURN_ERROR(
-      groups > 0,
+      fits_mudnn_dimension(groups),
       InvalidArgument,
       "MUSA convolution received invalid convolution parameters");
+  ET_CHECK_OR_RETURN_ERROR(
+      !transposed ||
+          (weight->size(1) > 0 &&
+           groups <= std::numeric_limits<int64_t>::max() / weight->size(1)),
+      InvalidArgument,
+      "MUSA convolution tensor dimensions are incompatible");
 
   std::unique_ptr<SlimTensor> contiguous_input;
   std::unique_ptr<SlimTensor> contiguous_weight;
@@ -179,10 +187,12 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
 
   const int64_t batch = input->size(0);
   const int64_t input_channels = input->size(1);
-  const int64_t output_channels = weight->size(0);
+  const int64_t output_channels =
+      transposed ? weight->size(1) * groups : weight->size(0);
   ET_CHECK_OR_RETURN_ERROR(
       input_channels % groups == 0 && output_channels % groups == 0 &&
-          weight->size(1) == input_channels / groups &&
+          (transposed ? weight->size(0) == input_channels
+                      : weight->size(1) == input_channels / groups) &&
           (bias == nullptr || bias->dim() == 1) &&
           (bias == nullptr || bias->size(0) == output_channels),
       InvalidArgument,
@@ -194,11 +204,13 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   for (int64_t index = 0; index < spatial_dims; ++index) {
     const int64_t input_size = input->size(index + 2);
     const int64_t kernel_size = weight->size(index + 2);
-    output_sizes[index + 2] =
-        (input_size + 2 * padding[index] -
-         dilation[index] * (kernel_size - 1) - 1) /
-            stride[index] +
-        1;
+    output_sizes[index + 2] = transposed
+        ? (input_size - 1) * stride[index] - 2 * padding[index] +
+            dilation[index] * (kernel_size - 1) + output_padding[index] + 1
+        : (input_size + 2 * padding[index] -
+           dilation[index] * (kernel_size - 1) - 1) /
+                stride[index] +
+            1;
   }
   std::vector<int64_t> output_strides(output_sizes.size());
   output_strides.back() = 1;
@@ -376,16 +388,27 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   const float alpha = 1.0f;
   const float beta = 0.0f;
   size_t workspace_size = 0;
-  error = check_mudnn(
-      mudnnGetConvolutionForwardWorkspaceSize(
-          context.handle,
-          context.input,
-          context.weight,
-          context.convolution,
-          context.output,
-          MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
-          &workspace_size),
-      "mudnnGetConvolutionForwardWorkspaceSize");
+  error = transposed
+      ? check_mudnn(
+            mudnnGetConvolutionBackwardDataWorkspaceSize(
+                context.handle,
+                context.weight,
+                context.input,
+                context.convolution,
+                context.output,
+                MUDNN_CONVOLUTION_BWD_DATA_ALGO_IMPLICIT_GEMM,
+                &workspace_size),
+            "mudnnGetConvolutionBackwardDataWorkspaceSize")
+      : check_mudnn(
+            mudnnGetConvolutionForwardWorkspaceSize(
+                context.handle,
+                context.input,
+                context.weight,
+                context.convolution,
+                context.output,
+                MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                &workspace_size),
+            "mudnnGetConvolutionForwardWorkspaceSize");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
   DeviceWorkspace workspace;
   if (workspace_size != 0) {
@@ -394,22 +417,39 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       return Error::Internal;
     }
   }
-  error = check_mudnn(
-      mudnnConvolutionForward(
-          context.handle,
-          &alpha,
-          context.input,
-          input_for_mudnn->data_ptr(),
-          context.weight,
-          weight_for_mudnn->data_ptr(),
-          context.convolution,
-          MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
-          workspace.data,
-          workspace_size,
-          &beta,
-          context.output,
-          output->data_ptr()),
-      "mudnnConvolutionForward");
+  error = transposed
+      ? check_mudnn(
+            mudnnConvolutionBackwardData(
+                context.handle,
+                &alpha,
+                context.weight,
+                weight_for_mudnn->data_ptr(),
+                context.input,
+                input_for_mudnn->data_ptr(),
+                context.convolution,
+                MUDNN_CONVOLUTION_BWD_DATA_ALGO_IMPLICIT_GEMM,
+                workspace.data,
+                workspace_size,
+                &beta,
+                context.output,
+                output->data_ptr()),
+            "mudnnConvolutionBackwardData")
+      : check_mudnn(
+            mudnnConvolutionForward(
+                context.handle,
+                &alpha,
+                context.input,
+                input_for_mudnn->data_ptr(),
+                context.weight,
+                weight_for_mudnn->data_ptr(),
+                context.convolution,
+                MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                workspace.data,
+                workspace_size,
+                &beta,
+                context.output,
+                output->data_ptr()),
+            "mudnnConvolutionForward");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
 
   if (bias != nullptr) {

@@ -1,10 +1,11 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for six models:
+`aoti_model_acceptance.py` validates the complete MUSA path for seven models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
 - `simple_video_cnn`: Conv3d + ReLU + MaxPool3d + Conv3d + pooling + Linear;
+- `simple_decoder`: ConvTranspose2d + ReLU + ConvTranspose2d with output padding;
 - `narrow_resnet18`: ResNet-18 block topology with narrow channels and a 32x32 input;
 - `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input;
 - `mobilenet_v2`: torchvision MobileNetV2 with depthwise convolutions and a 64x64 input.
@@ -36,6 +37,9 @@ downloads weights automatically.
 The MUSA backend disables TorchInductor's layout optimization so Conv1d/2d/3d
 fallback outputs and generated kernels agree on contiguous NCHW layout. The
 eager reference disables muDNN TF32 to match the fallback's FP32 FMA math.
+The native fallback supports non-transposed Conv1d/2d/3d and ConvTranspose2d
+with output padding smaller than its stride; other transposed dimensions are
+not yet supported.
 
 ## Prerequisites
 
@@ -102,6 +106,7 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | MLP | 1x16 | FP16 / BF16 | Random | 4.88e-4 / 3.91e-3 |
 | Simple CNN | 1x3x32x32 | FP16 / BF16 | Random | 2.44e-4 / 1.95e-3 |
 | Simple 3D CNN | 1x1x4x8x8 | FP32 | Random | 7.45e-9 |
+| Simple decoder | 1x3x8x8 | FP32 | Random | 5.96e-8 |
 | ResNet18 | 1x3x224x224 | FP32 / FP16 | Official pretrained | 6.05e-6 / 3.91e-3 |
 | ResNet18 | 1x3x64x64 | BF16 | Official pretrained | 0 |
 | MobileNetV2 | 1x3x224x224 | FP32 | Official pretrained | 2.03e-6 |
@@ -115,6 +120,8 @@ passed (maximum error 4.47e-8). Batches 2/1/3 also passed for FP32 simple CNN
 (1.76e-5); both pretrained models used 64x64 inputs.
 For the simple 3D CNN, batches 2/1/3 passed with a single PTE in both FP16
 (maximum error 6.11e-5) and BF16 (4.89e-4).
+For the simple decoder, batches 2/1/3 passed with a single PTE in both FP16
+and BF16 (maximum error 0 for this test input).
 
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet

@@ -82,6 +82,19 @@ class SimpleVideoCnn(nn.Module):
         return self.classifier(self.features(x).flatten(1))
 
 
+class SimpleDecoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.ConvTranspose2d(3, 8, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(8, 4, 3, stride=2, padding=1, output_padding=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x)
+
+
 class ResidualBlock(nn.Module):
     expansion = 1
 
@@ -175,6 +188,7 @@ MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
     "simple_video_cnn": (SimpleVideoCnn, (1, 1, 4, 8, 8)),
+    "simple_decoder": (SimpleDecoder, (1, 3, 8, 8)),
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
