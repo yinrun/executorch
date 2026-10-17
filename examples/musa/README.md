@@ -266,8 +266,11 @@ graph also requires MUSA's device assertion to use the actual indexed device
 instead of the unindexed device string produced by PyTorch's device move pass.
 
 Pass `--dynamic-prefill` to export one bounded-dynamic Llama KV PTE that accepts
-one to three tokens per call. The runner processes `[11, 7, 22]` together,
-then `[5]` and `[17]` separately in the **same process**. Server requests carry
+one to seven tokens per call within its eight-position context. The runner
+processes `[11, 7, 22]` together, then `[5]` and `[17]` separately in the
+**same process**. A second, fresh runner process uses the **same PTE/PTD** to
+prefill `[11, 7, 22, 5, 17, 13, 19]` in one call and decode `[3]` at the final
+context position. Server requests carry
 `input_shapes=1xL,L` to resize the token and position inputs on each step;
 upper-bound-sized raw input files keep the storage valid. TorchMUSA currently
 lacks a fake implementation for its dynamic SDPA math operator, so this export
@@ -275,8 +278,12 @@ uses an explicit masked matmul/softmax attention module. Each step is checked
 both against that module's MUSA eager output and the original upstream SDPA
 module's eager output. On M1000, FP32/FP16/BF16 passed all three calls with
 predicted IDs `[364, 76, 464]` and maximum runner-vs-eager logit differences
-5.97e-7, 1.47e-3, and 9.77e-3, respectively. This does not yet export the
-unaltered upstream SDPA model with dynamic sequence lengths.
+5.97e-7, 1.47e-3, and 9.77e-3, respectively. The long prefill and final decode
+also passed all three dtypes with predicted IDs `[103, 344]` and maximum logit
+differences 4.77e-7, 9.77e-4, and 1.18e-2. This does not yet export the
+unaltered upstream SDPA model with dynamic sequence lengths: registering a fake
+kernel for TorchMUSA's math SDPA operator alone still causes PyTorch export to
+specialize the sequence length to its example value.
 
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet

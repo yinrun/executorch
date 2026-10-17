@@ -88,10 +88,11 @@ def run_acceptance(
     first_tokens = (11, 7) if dynamic_prefill else (11,)
     token_ids = torch.tensor([first_tokens], device="musa", dtype=torch.int64)
     input_pos = torch.arange(len(first_tokens), device="musa", dtype=torch.int64)
+    max_prefill_length = args.max_context_len - 1
     dynamic_shapes = (
         (
-            {1: Dim("sequence", min=1, max=3)},
-            {"input_pos": {0: Dim("sequence", min=1, max=3)}},
+            {1: Dim("sequence", min=1, max=max_prefill_length)},
+            {"input_pos": {0: Dim("sequence", min=1, max=max_prefill_length)}},
         )
         if dynamic_prefill
         else None
@@ -145,93 +146,112 @@ def run_acceptance(
     ]
     dtype_name = next(name for name, candidate in DTYPES.items() if candidate == dtype)
     tolerance = TOLERANCES[dtype_name]
-    steps = []
-    with subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=_runner_environment(),
-    ) as process:
-        input_steps = (
-            ((11, 7, 22), (5,), (17,))
-            if dynamic_prefill
-            else tuple((token,) for token in (11, 7, 22, 5, 17))
+    sessions = (
+        (
+            ((11, 7, 22), (5,), (17,)),
+            ((11, 7, 22, 5, 17, 13, 19), (3,)),
         )
+        if dynamic_prefill
+        else (tuple((token,) for token in (11, 7, 22, 5, 17)),)
+    )
+    session_steps = []
+    for input_steps in sessions:
+        for eager_model in (model, original_model):
+            if eager_model is not None:
+                with torch.no_grad():
+                    for layer in eager_model.layers:
+                        layer.attention.kv_cache.k_cache.zero_()
+                        layer.attention.kv_cache.v_cache.zero_()
+        steps = []
         position = 0
-        for tokens in input_steps:
-            token_ids = torch.tensor([tokens], device="musa", dtype=torch.int64)
-            input_pos = torch.arange(
-                position, position + len(tokens), device="musa", dtype=torch.int64
-            )
-            _write_tensor(token_ids, token_path)
-            _write_tensor(input_pos, position_path)
-            if dynamic_prefill:
-                padding = (3 - len(tokens)) * token_ids.element_size()
-                with token_path.open("ab") as token_file:
-                    token_file.write(bytes(padding))
-                with position_path.open("ab") as position_file:
-                    position_file.write(bytes(padding))
-            with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
-                expected = model(token_ids, {"input_pos": input_pos})
-                if original_model is not None:
-                    original = original_model(token_ids, {"input_pos": input_pos})
-            request = (
-                f"input_shapes=1x{len(tokens)},{len(tokens)}"
-                if dynamic_prefill
-                else ""
-            )
-            process.stdin.write(f"{request}\n")
-            process.stdin.flush()
-            while True:
-                line = process.stderr.readline()
-                if "SERVER MODE DONE" in line:
-                    break
-                if not line:
-                    raise RuntimeError(
-                        f"executor_runner stopped at position {position}: "
-                        f"exit code {process.poll()}"
-                    )
-            output_path = Path(f"{output_prefix}-0.bin")
-            actual = torch.frombuffer(bytearray(output_path.read_bytes()), dtype=dtype)
-            reference = expected.detach().cpu().flatten()
-            torch.testing.assert_close(
-                actual, reference, atol=tolerance, rtol=tolerance
-            )
-            if original_model is not None:
+        with subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_runner_environment(),
+        ) as process:
+            for tokens in input_steps:
+                token_ids = torch.tensor([tokens], device="musa", dtype=torch.int64)
+                input_pos = torch.arange(
+                    position, position + len(tokens), device="musa", dtype=torch.int64
+                )
+                _write_tensor(token_ids, token_path)
+                _write_tensor(input_pos, position_path)
+                if dynamic_prefill:
+                    padding = (
+                        max_prefill_length - len(tokens)
+                    ) * token_ids.element_size()
+                    with token_path.open("ab") as token_file:
+                        token_file.write(bytes(padding))
+                    with position_path.open("ab") as position_file:
+                        position_file.write(bytes(padding))
+                with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
+                    expected = model(token_ids, {"input_pos": input_pos})
+                    if original_model is not None:
+                        original = original_model(token_ids, {"input_pos": input_pos})
+                request = (
+                    f"input_shapes=1x{len(tokens)},{len(tokens)}"
+                    if dynamic_prefill
+                    else ""
+                )
+                process.stdin.write(f"{request}\n")
+                process.stdin.flush()
+                while True:
+                    line = process.stderr.readline()
+                    if "SERVER MODE DONE" in line:
+                        break
+                    if not line:
+                        raise RuntimeError(
+                            f"executor_runner stopped at position {position}: "
+                            f"exit code {process.poll()}"
+                        )
+                output_path = Path(f"{output_prefix}-0.bin")
+                actual = torch.frombuffer(
+                    bytearray(output_path.read_bytes()), dtype=dtype
+                )
+                reference = expected.detach().cpu().flatten()
                 torch.testing.assert_close(
-                    expected, original, atol=tolerance, rtol=tolerance
+                    actual, reference, atol=tolerance, rtol=tolerance
                 )
-            predicted = actual.argmax().item()
-            if predicted != reference.argmax().item():
-                raise AssertionError(
-                    f"Llama demo predicted a different token at {position}"
-                )
-            step = {
-                "position": position,
-                "input_tokens": list(tokens),
-                "predicted_token": predicted,
-                "max_error": float(
-                    (actual.float() - reference.float()).abs().max()
-                ),
-            }
-            if len(tokens) == 1:
-                step["input_token"] = tokens[0]
-            steps.append(step)
-            position += len(tokens)
-        process.stdin.close()
-        if process.wait() != 0:
-            raise RuntimeError("executor_runner failed after the final decode step")
-    return {
+                if original_model is not None:
+                    torch.testing.assert_close(
+                        expected, original, atol=tolerance, rtol=tolerance
+                    )
+                predicted = actual.argmax().item()
+                if predicted != reference.argmax().item():
+                    raise AssertionError(
+                        f"Llama demo predicted a different token at {position}"
+                    )
+                step = {
+                    "position": position,
+                    "input_tokens": list(tokens),
+                    "predicted_token": predicted,
+                    "max_error": float(
+                        (actual.float() - reference.float()).abs().max()
+                    ),
+                }
+                if len(tokens) == 1:
+                    step["input_token"] = tokens[0]
+                steps.append(step)
+                position += len(tokens)
+            process.stdin.close()
+            if process.wait() != 0:
+                raise RuntimeError("executor_runner failed after the final decode step")
+        session_steps.append(steps)
+    result = {
         "checkpoint": str(checkpoint_path),
         "dtype": dtype_name,
         "pte": str(pte_path),
         "ptd": str(ptd_path),
         "delegates": len(delegates),
         "dynamic_prefill": dynamic_prefill,
-        "steps": steps,
+        "steps": session_steps[0],
     }
+    if dynamic_prefill:
+        result["long_prefill_steps"] = session_steps[1]
+    return result
 
 
 def main() -> None:
