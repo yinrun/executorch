@@ -21,6 +21,7 @@ from examples.musa.aoti_kv_cache_acceptance import (
     GrowingCacheDecoder,
     RollingCacheDecoder,
 )
+from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
 
 class TestMusaAotiFallbacks(unittest.TestCase):
@@ -34,6 +35,18 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_prompt_prefill_aoti_compile(self) -> None:
+        decoder = GrowingCacheDecoder().eval().to("musa")
+        module = PromptPrefill(decoder).eval()
+        tokens = torch.tensor([[11, 7, 22]], device="musa", dtype=torch.int64)
+        result = MusaBackend.preprocess(
+            export(module, (tokens,)),
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_growing_kv_cache_aoti_compile(self) -> None:
         module = GrowingCacheDecoder().eval().to("musa")
         example = (

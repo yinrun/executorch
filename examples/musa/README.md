@@ -194,6 +194,29 @@ this input. All predicted token IDs matched MUSA eager. This does not establish
 arbitrary sequence lengths beyond the exported input bound (2–4), variable
 batches, or pretrained-model support.
 
+`aoti_prefill_decode_acceptance.py` exports a separate three-token causal
+prefill and bounded-dynamic decode PTE from the *same* toy decoder weights.
+The prefill runner produces logits and key/value caches; its output files are
+padded to the decode bound for the first call, whose cache outputs feed a
+second decode call without padding. Runner outputs are checked against MUSA
+eager at every step, including exact
+argmax token IDs:
+
+```bash
+python examples/musa/aoti_prefill_decode_acceptance.py \
+  --output-dir /tmp/musa-prefill-decode --runner /path/to/executor_runner \
+  --dtype fp32
+```
+
+The prefill returns transposed key/value views. The shared CUDA-compatible
+runtime now copies noncontiguous SlimTensor outputs with nonzero storage offsets
+to planned ET tensors; the decode export uses contiguous cache inputs to match
+the runner's raw file layout. On M1000, FP32 prefill and two decode calls passed
+with maximum logits errors of 2.99e-7, 1.20e-7, and 1.50e-7 respectively;
+FP16 and BF16 also passed with exact matching token IDs `[16, 40, 32]`.
+This is a randomly initialized toy model, not a pretrained LLM or general
+variable-length prefill acceptance.
+
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
 meet the default tolerance: the maximum difference is 0.140625 and 121/1000
