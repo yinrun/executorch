@@ -174,12 +174,25 @@ python examples/musa/aoti_kv_cache_acceptance.py \
   --dtype fp32
 ```
 
-This tests raw multi-input/multi-output cache roundtrips, not dynamic cache
-growth, batched decoding, a pretrained LLM, or throughput. The oldest cache
-position is discarded at each step to keep all shapes static.
+The default rolling mode tests raw multi-input/multi-output cache roundtrips,
+not dynamic cache growth, batched decoding, a pretrained LLM, or throughput.
+The oldest cache position is discarded at each step to keep all shapes static.
 On M1000, FP32/FP16/BF16 all passed both steps with eager-matching predicted
 token IDs `[3, 32]`; maximum logits differences were 2.38e-7, 9.77e-4, and
 3.91e-3 respectively. Both returned caches also matched MUSA eager at each step.
+
+Pass `--cache-mode growing` to test an append-only cache instead. One PTE with
+bounded dynamic key/value sequence dimensions runs with past lengths 3 then 4
+and returns updated cache lengths 4 then 5. The first input is padded to the
+exported upper bound and resized with `--input_shapes`; the second runner call
+reads the preceding runner output cache files directly. Pass
+`--initial-cache-length 2` to exercise past lengths 2 then 3; its second input
+is padded to the upper bound before the runner reads it. On M1000, FP32 passed
+both starting lengths with maximum logits differences 2.38e-7 (3/4) and
+1.91e-7 (2/3); FP16/BF16 passed the 3/4 case with zero output difference for
+this input. All predicted token IDs matched MUSA eager. This does not establish
+arbitrary sequence lengths beyond the exported input bound (2–4), variable
+batches, or pretrained-model support.
 
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet

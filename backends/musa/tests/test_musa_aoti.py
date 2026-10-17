@@ -17,7 +17,10 @@ from executorch.backends.musa import MusaBackend
 from executorch.backends.musa.musa_backend import (
     _decompose_scaled_dot_product_attention,
 )
-from examples.musa.aoti_kv_cache_acceptance import RollingCacheDecoder
+from examples.musa.aoti_kv_cache_acceptance import (
+    GrowingCacheDecoder,
+    RollingCacheDecoder,
+)
 
 
 class TestMusaAotiFallbacks(unittest.TestCase):
@@ -31,6 +34,26 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_growing_kv_cache_aoti_compile(self) -> None:
+        module = GrowingCacheDecoder().eval().to("musa")
+        example = (
+            torch.tensor([[5]], device="musa", dtype=torch.int64),
+            torch.randn(1, 2, 3, 8, device="musa"),
+            torch.randn(1, 2, 3, 8, device="musa"),
+        )
+        dynamic_shapes = (
+            {},
+            {2: Dim("past", min=2, max=4)},
+            {2: Dim("past", min=2, max=4)},
+        )
+        result = MusaBackend.preprocess(
+            export(module, example, dynamic_shapes=dynamic_shapes),
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_rolling_kv_cache_aoti_compile(self) -> None:
         module = RollingCacheDecoder().eval().to("musa")
         example = (

@@ -1,4 +1,4 @@
-"""Validate two incremental decode steps with a fixed-size rolling KV cache."""
+"""Validate two incremental decode steps with rolling or growing KV caches."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.export import export
+from torch.export import Dim, export
 
 from executorch.backends.musa import MusaBackend, MusaPartitioner
 from executorch.exir import to_edge_transform_and_lower
@@ -34,6 +34,11 @@ class RollingCacheDecoder(nn.Module):
         self.norm = nn.LayerNorm(16)
         self.head = nn.Linear(16, 64, bias=False)
 
+    def _update_cache(
+        self, past: torch.Tensor, current: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.cat((past[:, :, 1:, :], current), dim=2)
+
     def forward(
         self, token_ids: torch.Tensor, past_key: torch.Tensor, past_value: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -41,8 +46,8 @@ class RollingCacheDecoder(nn.Module):
         query = self.query(features).view(1, 1, 2, 8).transpose(1, 2)
         key = self.key(features).view(1, 1, 2, 8).transpose(1, 2)
         value = self.value(features).view(1, 1, 2, 8).transpose(1, 2)
-        next_key = torch.cat((past_key[:, :, 1:, :], key), dim=2)
-        next_value = torch.cat((past_value[:, :, 1:, :], value), dim=2)
+        next_key = self._update_cache(past_key, key)
+        next_value = self._update_cache(past_value, value)
         scores = torch.matmul(query, next_key.transpose(-2, -1)) * (8**-0.5)
         context = torch.matmul(scores.softmax(dim=-1), next_value)
         context = context.transpose(1, 2).reshape(1, 1, 16)
@@ -50,24 +55,53 @@ class RollingCacheDecoder(nn.Module):
         return logits, next_key, next_value
 
 
-def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
+class GrowingCacheDecoder(RollingCacheDecoder):
+    def _update_cache(
+        self, past: torch.Tensor, current: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.cat((past, current), dim=2)
+
+
+def run_acceptance(
+    output_dir: Path,
+    runner: Path,
+    dtype: torch.dtype,
+    cache_mode: str = "rolling",
+    initial_cache_length: int | None = None,
+) -> dict:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(0)
-    model = RollingCacheDecoder().eval().to(device="musa", dtype=dtype)
+    if cache_mode not in ("rolling", "growing"):
+        raise ValueError(f"Unknown cache mode: {cache_mode}")
+    if cache_mode == "growing":
+        initial_length = 3 if initial_cache_length is None else initial_cache_length
+        if initial_length not in (2, 3):
+            raise ValueError("Growing cache requires initial length 2 or 3")
+    else:
+        if initial_cache_length not in (None, 4):
+            raise ValueError("Rolling cache requires initial length 4")
+        initial_length = 4
+    model_type = GrowingCacheDecoder if cache_mode == "growing" else RollingCacheDecoder
+    model = model_type().eval().to(device="musa", dtype=dtype)
     token_ids = torch.tensor([[5]], device="musa", dtype=torch.int64)
-    past_key = torch.randn((1, 2, 4, 8), device="musa", dtype=dtype)
-    past_value = torch.randn((1, 2, 4, 8), device="musa", dtype=dtype)
+    past_key = torch.randn((1, 2, initial_length, 8), device="musa", dtype=dtype)
+    past_value = torch.randn((1, 2, initial_length, 8), device="musa", dtype=dtype)
     example = (token_ids, past_key, past_value)
-    exported = export(model, example)
+    dynamic_shapes = (
+        ({}, {2: Dim("past", min=2, max=4)}, {2: Dim("past", min=2, max=4)})
+        if cache_mode == "growing"
+        else None
+    )
+    exported = export(model, example, dynamic_shapes=dynamic_shapes)
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     with _serialization_schema():
         manager = to_edge_transform_and_lower(
             exported, partitioner=[MusaPartitioner(compile_spec)]
         ).to_executorch()
         pte_path = Path(
-            save_pte_program(manager, "rolling_cache_decoder", str(output_dir))
+            save_pte_program(manager, f"{cache_mode}_cache_decoder", str(output_dir))
         )
     ptd_path = output_dir / "aoti_musa_blob.ptd"
     if not ptd_path.exists():
@@ -86,9 +120,20 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
             for name, cache in (("key", past_key), ("value", past_value)):
                 path = output_dir / f"step-0-{name}.bin"
                 _write_tensor(cache, path)
+                if cache_mode == "growing":
+                    with path.open("ab") as cache_file:
+                        padding = (4 - initial_length) * 2 * 8 * cache.element_size()
+                        cache_file.write(bytes(padding))
                 input_paths.append(path)
         else:
-            input_paths.extend(previous_cache_paths)
+            if cache_mode == "growing" and past_key.shape[2] < 4:
+                for name, path in zip(("key", "value"), previous_cache_paths):
+                    padded_path = output_dir / f"step-{step}-{name}-input.bin"
+                    padding = (4 - past_key.shape[2]) * 2 * 8 * past_key.element_size()
+                    padded_path.write_bytes(path.read_bytes() + bytes(padding))
+                    input_paths.append(padded_path)
+            else:
+                input_paths.extend(previous_cache_paths)
         output_prefix = output_dir / f"step-{step}-output"
         command = [
             str(runner),
@@ -98,6 +143,11 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
             f"--output_file={output_prefix}",
             "--print_output=summary",
         ]
+        if cache_mode == "growing":
+            length = past_key.shape[2]
+            command.append(
+                f"--input_shapes=1x1,1x2x{length}x8,1x2x{length}x8"
+            )
         try:
             subprocess.run(
                 command,
@@ -132,6 +182,7 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
         steps.append(
             {
                 "token": token,
+                "cache_length": past_key.shape[2],
                 "predicted_token": predicted.tolist(),
                 "max_errors": [
                     float((result.float() - reference.cpu().float()).abs().max())
@@ -146,6 +197,7 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
         "pte": str(pte_path),
         "ptd": str(ptd_path),
         "dtype": dtype_name,
+        "cache_mode": cache_mode,
         "steps": steps,
     }
 
@@ -155,8 +207,18 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--runner", required=True, type=Path)
     parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp32")
+    parser.add_argument(
+        "--cache-mode", choices=("rolling", "growing"), default="rolling"
+    )
+    parser.add_argument("--initial-cache-length", type=int)
     args = parser.parse_args()
-    result = run_acceptance(args.output_dir, args.runner, DTYPES[args.dtype])
+    result = run_acceptance(
+        args.output_dir,
+        args.runner,
+        DTYPES[args.dtype],
+        args.cache_mode,
+        args.initial_cache_length,
+    )
     print(json.dumps(result, indent=2))
 
 
