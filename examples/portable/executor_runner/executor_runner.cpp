@@ -79,7 +79,8 @@ DEFINE_string(
     "bound from this runner; without it every execution uses the bound. Input "
     "files are still upper-bound sized, the surplus is ignored. Not supported "
     "for bundled programs, whose inputs and reference outputs are recorded "
-    "together.");
+    "together. In server mode, a request line starting with input_shapes= "
+    "overrides this flag for that execution.");
 DEFINE_string(
     output_file,
     "",
@@ -728,7 +729,14 @@ int main(int argc, char** argv) {
 
     std::string line;
     while (std::getline(std::cin, line)) {
-      (void)line;
+      constexpr std::string_view request_prefix = "input_shapes=";
+      const bool has_request_shapes = line.rfind(request_prefix, 0) == 0;
+      ET_CHECK_MSG(
+          !bundle_io || !has_request_shapes,
+          "Per-request input shapes are not supported for bundled programs");
+      const std::string shapes = has_request_shapes
+          ? line.substr(request_prefix.size())
+          : FLAGS_input_shapes;
 
       if (!bundle_io && !file_paths.empty()) {
         const Error load_status =
@@ -762,8 +770,8 @@ int main(int argc, char** argv) {
             (uint32_t)res.error());
         inputs.emplace(std::move(res.get()));
         ET_LOG(Debug, "Inputs prepared.");
-        if (!FLAGS_input_shapes.empty()) {
-          resize_inputs_to(*method, FLAGS_input_shapes);
+        if (!shapes.empty()) {
+          resize_inputs_to(*method, shapes);
         }
       }
 

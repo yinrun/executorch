@@ -265,6 +265,19 @@ the shared AOTI compiler now reconstructs that input tree. Its mutable cache
 graph also requires MUSA's device assertion to use the actual indexed device
 instead of the unindexed device string produced by PyTorch's device move pass.
 
+Pass `--dynamic-prefill` to export one bounded-dynamic Llama KV PTE that accepts
+one to three tokens per call. The runner processes `[11, 7, 22]` together,
+then `[5]` and `[17]` separately in the **same process**. Server requests carry
+`input_shapes=1xL,L` to resize the token and position inputs on each step;
+upper-bound-sized raw input files keep the storage valid. TorchMUSA currently
+lacks a fake implementation for its dynamic SDPA math operator, so this export
+uses an explicit masked matmul/softmax attention module. Each step is checked
+both against that module's MUSA eager output and the original upstream SDPA
+module's eager output. On M1000, FP32/FP16/BF16 passed all three calls with
+predicted IDs `[364, 76, 464]` and maximum runner-vs-eager logit differences
+5.97e-7, 1.47e-3, and 9.77e-3, respectively. This does not yet export the
+unaltered upstream SDPA model with dynamic sequence lengths.
+
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
 meet the default tolerance: the maximum difference is 0.140625 and 121/1000

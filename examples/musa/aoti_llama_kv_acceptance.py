@@ -9,7 +9,8 @@ import subprocess
 from pathlib import Path
 
 import torch
-from torch.export import export
+from torch import nn
+from torch.export import Dim, export
 
 from executorch.backends.musa import MusaBackend, MusaPartitioner
 from executorch.examples.models.llama.llama_transformer import construct_transformer
@@ -25,7 +26,36 @@ from examples.musa.aoti_model_acceptance import (
 )
 
 
-def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
+class ExportableMathSDPA(nn.Module):
+    def __init__(self, sdpa: nn.Module) -> None:
+        super().__init__()
+        self.n_rep = sdpa.n_rep
+        self.dim = sdpa.dim
+
+    def forward(
+        self,
+        input_pos: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        batch_size: int,
+        sequence: int,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        key = key.repeat_interleave(self.n_rep, dim=1)
+        value = value.repeat_interleave(self.n_rep, dim=1)
+        scores = torch.matmul(query, key.transpose(-2, -1)) * (
+            query.size(-1) ** -0.5
+        )
+        context = torch.matmul(
+            scores.masked_fill(~mask, float("-inf")).softmax(-1), value
+        )
+        return context.transpose(1, 2).reshape(batch_size, sequence, self.dim)
+
+
+def run_acceptance(
+    output_dir: Path, runner: Path, dtype: torch.dtype, dynamic_prefill: bool = False
+) -> dict:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
     params_dir = Path(__file__).parents[1] / "models/llama/params"
@@ -48,9 +78,27 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
     if set(missing) != expected_caches or set(unexpected) != expected_masks:
         raise RuntimeError(f"Demo checkpoint mismatch: {missing=}, {unexpected=}")
     model = model.eval().to(device="musa", dtype=dtype)
-    token_ids = torch.tensor([[11]], device="musa", dtype=torch.int64)
-    input_pos = torch.tensor([0], device="musa", dtype=torch.int64)
-    exported = export(model, (token_ids, {"input_pos": input_pos}))
+    original_model = None
+    if dynamic_prefill:
+        original_model = construct_transformer(args).eval()
+        original_model.load_state_dict(checkpoint, strict=False)
+        original_model = original_model.to(device="musa", dtype=dtype)
+        for layer in model.layers:
+            layer.attention.SDPA = ExportableMathSDPA(layer.attention.SDPA)
+    first_tokens = (11, 7) if dynamic_prefill else (11,)
+    token_ids = torch.tensor([first_tokens], device="musa", dtype=torch.int64)
+    input_pos = torch.arange(len(first_tokens), device="musa", dtype=torch.int64)
+    dynamic_shapes = (
+        (
+            {1: Dim("sequence", min=1, max=3)},
+            {"input_pos": {0: Dim("sequence", min=1, max=3)}},
+        )
+        if dynamic_prefill
+        else None
+    )
+    exported = export(
+        model, (token_ids, {"input_pos": input_pos}), dynamic_shapes=dynamic_shapes
+    )
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     with _serialization_schema():
         manager = to_edge_transform_and_lower(
@@ -106,14 +154,35 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
         text=True,
         env=_runner_environment(),
     ) as process:
-        for position, token in enumerate((11, 7, 22, 5, 17)):
-            token_ids = torch.tensor([[token]], device="musa", dtype=torch.int64)
-            input_pos = torch.tensor([position], device="musa", dtype=torch.int64)
+        input_steps = (
+            ((11, 7, 22), (5,), (17,))
+            if dynamic_prefill
+            else tuple((token,) for token in (11, 7, 22, 5, 17))
+        )
+        position = 0
+        for tokens in input_steps:
+            token_ids = torch.tensor([tokens], device="musa", dtype=torch.int64)
+            input_pos = torch.arange(
+                position, position + len(tokens), device="musa", dtype=torch.int64
+            )
             _write_tensor(token_ids, token_path)
             _write_tensor(input_pos, position_path)
+            if dynamic_prefill:
+                padding = (3 - len(tokens)) * token_ids.element_size()
+                with token_path.open("ab") as token_file:
+                    token_file.write(bytes(padding))
+                with position_path.open("ab") as position_file:
+                    position_file.write(bytes(padding))
             with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
                 expected = model(token_ids, {"input_pos": input_pos})
-            process.stdin.write("\n")
+                if original_model is not None:
+                    original = original_model(token_ids, {"input_pos": input_pos})
+            request = (
+                f"input_shapes=1x{len(tokens)},{len(tokens)}"
+                if dynamic_prefill
+                else ""
+            )
+            process.stdin.write(f"{request}\n")
             process.stdin.flush()
             while True:
                 line = process.stderr.readline()
@@ -130,21 +199,27 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
             torch.testing.assert_close(
                 actual, reference, atol=tolerance, rtol=tolerance
             )
+            if original_model is not None:
+                torch.testing.assert_close(
+                    expected, original, atol=tolerance, rtol=tolerance
+                )
             predicted = actual.argmax().item()
             if predicted != reference.argmax().item():
                 raise AssertionError(
                     f"Llama demo predicted a different token at {position}"
                 )
-            steps.append(
-                {
-                    "position": position,
-                    "input_token": token,
-                    "predicted_token": predicted,
-                    "max_error": float(
-                        (actual.float() - reference.float()).abs().max()
-                    ),
-                }
-            )
+            step = {
+                "position": position,
+                "input_tokens": list(tokens),
+                "predicted_token": predicted,
+                "max_error": float(
+                    (actual.float() - reference.float()).abs().max()
+                ),
+            }
+            if len(tokens) == 1:
+                step["input_token"] = tokens[0]
+            steps.append(step)
+            position += len(tokens)
         process.stdin.close()
         if process.wait() != 0:
             raise RuntimeError("executor_runner failed after the final decode step")
@@ -154,6 +229,7 @@ def run_acceptance(output_dir: Path, runner: Path, dtype: torch.dtype) -> dict:
         "pte": str(pte_path),
         "ptd": str(ptd_path),
         "delegates": len(delegates),
+        "dynamic_prefill": dynamic_prefill,
         "steps": steps,
     }
 
@@ -163,8 +239,11 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--runner", required=True, type=Path)
     parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp32")
+    parser.add_argument("--dynamic-prefill", action="store_true")
     args = parser.parse_args()
-    result = run_acceptance(args.output_dir, args.runner, DTYPES[args.dtype])
+    result = run_acceptance(
+        args.output_dir, args.runner, DTYPES[args.dtype], args.dynamic_prefill
+    )
     print(json.dumps(result, indent=2))
 
 
