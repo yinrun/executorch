@@ -99,9 +99,11 @@ class SimpleAudioDecoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.layers = nn.Sequential(
-            nn.ConvTranspose1d(2, 3, 3, stride=2, padding=1, output_padding=1),
+            nn.ConvTranspose1d(
+                2, 4, 3, stride=2, padding=1, output_padding=1, groups=2
+            ),
             nn.ReLU(),
-            nn.ConvTranspose1d(3, 1, 3, padding=1),
+            nn.ConvTranspose1d(4, 1, 3, padding=1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

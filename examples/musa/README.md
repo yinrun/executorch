@@ -6,7 +6,7 @@
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
 - `simple_video_cnn`: Conv3d + ReLU + MaxPool3d + Conv3d + pooling + Linear;
 - `simple_decoder`: ConvTranspose2d + ReLU + ConvTranspose2d with output padding;
-- `simple_audio_decoder`: ConvTranspose1d + ReLU + ConvTranspose1d with output padding;
+- `simple_audio_decoder`: grouped ConvTranspose1d + ReLU + ConvTranspose1d with output padding;
 - `simple_video_decoder`: ConvTranspose3d + ReLU + ConvTranspose3d with output padding;
 - `transformer_block`: torchvision-independent TransformerEncoderLayer;
 - `causal_attention`: causal grouped-query attention with Q/K/V projections;
