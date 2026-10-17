@@ -223,6 +223,24 @@ actual shape is supplied through `--input_shapes`. On M1000, FP32, FP16, and
 BF16 passed all three prompt lengths and both subsequent decode steps with
 their respective pairs of PTEs.
 
+`aoti_llama_acceptance.py` exercises the repository's actual five-layer Llama
+architecture (RoPE, RMSNorm, SwiGLU, and attention) using its bundled
+`demo_rand_params.pth` checkpoint and `demo_config.json`. It exports a PTE/PTD,
+runs `executor_runner` on a three-token prompt, and compares all 512 logits
+and the exact predicted token ID with MUSA eager. It also rejects unlowered
+operators outside the single MUSA delegate:
+
+```bash
+python examples/musa/aoti_llama_acceptance.py \
+  --output-dir /tmp/musa-llama-demo --runner /path/to/executor_runner
+```
+
+This checkpoint contains **random weights**, not a pretrained Llama. The
+validation covers one fixed prompt with no KV cache; it establishes neither
+useful language generation nor performance for a production model.
+On M1000, FP32/FP16/BF16 all predicted token ID `364`; maximum absolute logit
+errors against MUSA eager were 4.77e-7, 1.46e-3, and 1.17e-2, respectively.
+
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
 meet the default tolerance: the maximum difference is 0.140625 and 121/1000
