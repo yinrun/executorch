@@ -10,6 +10,7 @@ The script uses fixed-shape inputs for each export. It is an acceptance
 smoke test for the complete export path, not a benchmark. The
 ``narrow_resnet18`` model keeps the ResNet-18 block topology but uses narrow
 channels; ``resnet18`` is the standard torchvision model with optional weights.
+``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6.
 """
 
 from __future__ import annotations
@@ -147,11 +148,18 @@ def _torchvision_resnet18() -> nn.Module:
     return resnet18(weights=None)
 
 
+def _torchvision_mobilenet_v2() -> nn.Module:
+    from torchvision.models import mobilenet_v2
+
+    return mobilenet_v2(weights=None)
+
+
 MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
+    "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
 }
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 TOLERANCES = {"fp32": 1e-4, "fp16": 1e-2, "bf16": 4e-2}
@@ -257,13 +265,13 @@ def export_model(
 
     model_type, input_shape = MODEL_FACTORIES[model_name]
     if input_size is not None:
-        if model_name not in ("resnet18", "narrow_resnet18"):
-            raise ValueError("--input-size is only supported for ResNet models")
+        if model_name not in ("resnet18", "narrow_resnet18", "mobilenet_v2"):
+            raise ValueError("--input-size is only supported for CNN models")
         if input_size < 32:
             raise ValueError("--input-size must be at least 32")
         input_shape = (1, 3, input_size, input_size)
-    if weights_path is not None and model_name != "resnet18":
-        raise ValueError("--weights is only supported for torchvision resnet18")
+    if weights_path is not None and model_name not in ("resnet18", "mobilenet_v2"):
+        raise ValueError("--weights is only supported for torchvision models")
     torch.manual_seed(0)
     model = model_type()
     if weights_path is not None:

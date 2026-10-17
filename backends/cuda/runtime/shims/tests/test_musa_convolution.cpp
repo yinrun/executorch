@@ -40,6 +40,9 @@ using executorch::backends::cuda::aoti_torch_musa_convolution;
 using executorch::runtime::Error;
 
 uint16_t float_to_half_bits(float value) {
+  if (value == 0.0f) {
+    return 0;
+  }
   uint32_t bits;
   std::memcpy(&bits, &value, sizeof(bits));
   const uint32_t exponent = (bits >> 23) & 0xff;
@@ -257,6 +260,48 @@ void run_convolution_1d() {
   delete bias;
 }
 
+void run_convolution_depthwise(ScalarType dtype) {
+  SlimTensor* input = empty_tensor(dtype, {1, 2, 3, 3}, {18, 9, 3, 1});
+  SlimTensor* weight = empty_tensor(dtype, {2, 1, 2, 2}, {4, 4, 2, 1});
+  copy_to_device(
+      input,
+      encode_values(
+          {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18},
+          dtype));
+  copy_to_device(weight, encode_values({1, 0, 0, 1, 2, 0, 0, 2}, dtype));
+
+  const int64_t stride[] = {1, 1};
+  const int64_t padding[] = {0, 0};
+  const int64_t dilation[] = {1, 1};
+  const int64_t output_padding[] = {0, 0};
+  SlimTensor* output = nullptr;
+  EXPECT_EQ(
+      aoti_torch_musa_convolution(
+          input,
+          weight,
+          nullptr,
+          stride,
+          2,
+          padding,
+          2,
+          dilation,
+          2,
+          false,
+          output_padding,
+          2,
+          2,
+          &output),
+      Error::Ok);
+  ASSERT_NE(output, nullptr);
+  EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  expect_values(
+      copy_from_device(output, dtype), {6, 8, 12, 14, 48, 52, 60, 64});
+
+  delete output;
+  delete input;
+  delete weight;
+}
+
 void run_convolution_noncontiguous_input(ScalarType dtype) {
   SlimTensor* input = empty_tensor(dtype, {1, 1, 3, 3}, {9, 9, 1, 3});
   SlimTensor* weight = empty_tensor(dtype, {1, 1, 2, 2}, {4, 4, 2, 1});
@@ -347,6 +392,12 @@ TEST_F(MusaConvolutionTest, ForwardDtypes) {
 
 TEST_F(MusaConvolutionTest, ForwardNd) {
   run_convolution_1d();
+}
+
+TEST_F(MusaConvolutionTest, DepthwiseDtypes) {
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    run_convolution_depthwise(dtype);
+  }
 }
 
 TEST_F(MusaConvolutionTest, NonContiguousInput) {
