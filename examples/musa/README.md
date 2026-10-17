@@ -50,8 +50,9 @@ with output padding smaller than its stride; other transposed dimensions are
 not yet supported.
 MUSA AOTI decomposes inference-only SDPA into matmul, softmax, and masking to
 avoid an unavailable TorchMUSA AOTI fallback. Pattern matching is disabled
-only while compiling graphs containing SDPA, as it otherwise fuses those ops
-back into the unavailable fallback. Dropout is unsupported. The current
+only while compiling graphs containing SDPA or attention-like softmax/matmul
+patterns, as it otherwise fuses those ops back into the unavailable fallback.
+Dropout is unsupported. The current
 TorchMUSA export specializes attention batch dimensions, so bounded dynamic
 batch acceptance is not yet available for models containing attention.
 Boolean/additive masks, causal attention, and GQA are covered separately;
@@ -159,6 +160,26 @@ The embedding classifier also passed batches 2/1/3 in FP32 with one PTE
 The token decoder matched eager token IDs `[4, 13, 56, 44]` in all three
 precisions. It is a fixed-sequence toy model, not a pretrained LLM or a
 KV-cache/incremental decoding validation.
+
+`aoti_kv_cache_acceptance.py` separately exercises two consecutive single-token
+decode steps with a rolling four-position KV cache. The same fixed-shape PTE
+accepts int64 token IDs plus key/value tensors and returns logits plus updated
+key/value tensors; the second `executor_runner` invocation reads the first
+invocation's raw cache outputs. Every output is compared with MUSA eager and
+the predicted token IDs must match exactly:
+
+```bash
+python examples/musa/aoti_kv_cache_acceptance.py \
+  --output-dir /tmp/musa-kv-cache --runner /path/to/executor_runner \
+  --dtype fp32
+```
+
+This tests raw multi-input/multi-output cache roundtrips, not dynamic cache
+growth, batched decoding, a pretrained LLM, or throughput. The oldest cache
+position is discarded at each step to keep all shapes static.
+On M1000, FP32/FP16/BF16 all passed both steps with eager-matching predicted
+token IDs `[3, 32]`; maximum logits differences were 2.38e-7, 9.77e-4, and
+3.91e-3 respectively. Both returned caches also matched MUSA eager at each step.
 
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet

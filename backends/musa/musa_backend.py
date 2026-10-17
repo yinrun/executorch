@@ -183,9 +183,16 @@ class MusaBackend(AotiBackend, BackendDetails):
             edge_program.graph_module,
             {torch.ops.aten.scaled_dot_product_attention.default},
         )
+        has_attention_math = contains_any_call_fn_target_op(
+            edge_program.graph_module,
+            {torch.ops.aten.softmax.int, torch.ops.aten._softmax.default},
+        ) and contains_any_call_fn_target_op(
+            edge_program.graph_module,
+            {torch.ops.aten.matmul.default, torch.ops.aten.bmm.default},
+        )
         sdpa_context = (
             torch._inductor.config.patch({"pattern_matcher": False})
-            if has_sdpa
+            if has_sdpa or has_attention_math
             else contextlib.nullcontext()
         )
         with collector.capture(_aoti_device_type_for_weight) as capture, sdpa_context:

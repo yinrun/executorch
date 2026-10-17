@@ -17,6 +17,7 @@ from executorch.backends.musa import MusaBackend
 from executorch.backends.musa.musa_backend import (
     _decompose_scaled_dot_product_attention,
 )
+from examples.musa.aoti_kv_cache_acceptance import RollingCacheDecoder
 
 
 class TestMusaAotiFallbacks(unittest.TestCase):
@@ -30,6 +31,21 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_rolling_kv_cache_aoti_compile(self) -> None:
+        module = RollingCacheDecoder().eval().to("musa")
+        example = (
+            torch.tensor([[5]], device="musa", dtype=torch.int64),
+            torch.randn(1, 2, 4, 8, device="musa"),
+            torch.randn(1, 2, 4, 8, device="musa"),
+        )
+        result = MusaBackend.preprocess(
+            export(module, example),
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_pointwise_aoti_compile(self) -> None:
         class AddOne(nn.Module):
             def forward(self, x: torch.Tensor) -> torch.Tensor:
