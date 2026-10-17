@@ -10,7 +10,8 @@ The script uses fixed-shape inputs for each export. It is an acceptance
 smoke test for the complete export path, not a benchmark. The
 ``narrow_resnet18`` model keeps the ResNet-18 block topology but uses narrow
 channels; ``resnet18`` is the standard torchvision model with optional weights.
-``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6.
+``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6;
+``deeplabv3_mobilenet_v3_large`` covers a pretrained segmentation network.
 """
 
 from __future__ import annotations
@@ -190,6 +191,19 @@ class BilinearUNet(nn.Module):
         return self.head(torch.cat((skip, self.up(resized)), dim=1))
 
 
+class DeepLabV3MobileNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        from torchvision.models.segmentation import deeplabv3_mobilenet_v3_large
+
+        self.model = deeplabv3_mobilenet_v3_large(
+            weights=None, weights_backbone=None, aux_loss=True
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        return self.model(image)["out"]
+
+
 class TransformerBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -365,6 +379,7 @@ MODEL_FACTORIES = {
     "dilated_video_decoder": (partial(DilatedDecoder, 3), (1, 2, 5, 4, 3)),
     "tiny_unet": (TinyUNet, (1, 3, 32, 32)),
     "bilinear_unet": (BilinearUNet, (1, 3, 32, 40)),
+    "deeplabv3_mobilenet_v3_large": (DeepLabV3MobileNet, (1, 3, 64, 64)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
     "embedding_classifier": (EmbeddingClassifier, (1, 4)),
@@ -522,18 +537,28 @@ def export_model(
             raise ValueError("Dynamic batch and spatial dimensions cannot be combined")
     input_shape = (batch_size, *input_shape[1:])
     if input_size is not None:
-        if model_name not in ("resnet18", "narrow_resnet18", "mobilenet_v2"):
+        if model_name not in (
+            "resnet18",
+            "narrow_resnet18",
+            "mobilenet_v2",
+            "deeplabv3_mobilenet_v3_large",
+        ):
             raise ValueError("--input-size is only supported for CNN models")
         if input_size < 32:
             raise ValueError("--input-size must be at least 32")
         input_shape = (batch_size, 3, input_size, input_size)
-    if weights_path is not None and model_name not in ("resnet18", "mobilenet_v2"):
+    if weights_path is not None and model_name not in (
+        "resnet18",
+        "mobilenet_v2",
+        "deeplabv3_mobilenet_v3_large",
+    ):
         raise ValueError("--weights is only supported for torchvision models")
     torch.manual_seed(0)
     model = model_type()
     if weights_path is not None:
         state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(state_dict)
+        checkpoint_model = model.model if isinstance(model, DeepLabV3MobileNet) else model
+        checkpoint_model.load_state_dict(state_dict)
     model = model.eval().to(device="musa", dtype=dtype)
     example = _make_input(model_name, input_shape, dtype)
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
@@ -687,6 +712,16 @@ def main() -> None:
                     )
                 if current_shape == input_shape:
                     result["predicted_token_ids"] = actual_token_ids.tolist()
+            if args.model == "deeplabv3_mobilenet_v3_large":
+                expected_labels = current_expected.argmax(dim=1).cpu()
+                actual_labels = actual.reshape(current_expected.shape).argmax(dim=1)
+                if not torch.equal(actual_labels, expected_labels):
+                    mismatched = (actual_labels != expected_labels).sum().item()
+                    raise AssertionError(
+                        f"segmentation pixel labels differ at {mismatched} positions"
+                    )
+                if current_shape == input_shape:
+                    result["segmentation_pixel_labels_match"] = True
             if args.dynamic_batch_max is not None:
                 result.setdefault("dynamic_batch_results", []).append(
                     {"batch_size": current_shape[0], "max_error": max_error}

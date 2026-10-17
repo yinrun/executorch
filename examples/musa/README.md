@@ -1,6 +1,6 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for nineteen models:
+`aoti_model_acceptance.py` validates the complete MUSA path for twenty models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
@@ -19,6 +19,7 @@
 - `narrow_resnet18`: ResNet-18 block topology with narrow channels and a 32x32 input;
 - `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input;
 - `mobilenet_v2`: torchvision MobileNetV2 with depthwise convolutions and a 64x64 input.
+- `deeplabv3_mobilenet_v3_large`: torchvision DeepLabV3 segmentation with a MobileNetV3 backbone and an output of 21-class pixel logits.
 
 The script writes the PTE, external AOTI data, raw input, expected output, and
 runner output to the selected directory. It compares the `executor_runner`
@@ -30,9 +31,10 @@ the same export and runner path in lower precision. The default absolute and
 relative comparison tolerances are 1e-4 (FP32), 1e-2 (FP16), and 4e-2 (BF16);
 token models always accept raw int64 input IDs and `--dtype` selects the
 weights and output dtype. For `token_decoder`, the script also checks exact
-argmax token IDs against MUSA eager.
-override them with `--atol` and `--rtol` if needed. `--input-size 224` exports
-ResNet or MobileNet with a 224x224 input instead of its default size. Except
+argmax token IDs against MUSA eager. For DeepLabV3, it also checks exact
+per-pixel predicted labels. Override the tolerances with `--atol` and
+`--rtol` if needed. `--input-size 224` exports a supported torchvision
+image model with a 224x224 input instead of its default size. Except
 for the bounded dynamic-spatial `bilinear_unet` case below, fixed spatial
 shapes and dtypes require separate exports.
 `--batch-size 2` exports and checks a separate fixed-shape, two-input batch
@@ -78,7 +80,7 @@ these cases to zeros or flash output would change masking semantics.
 
 - MUSA and `torch_musa` are available to the selected Python environment;
 - the MUSA-compatible Triton package required by TorchInductor is installed;
-- `torchvision` is available for the standard `resnet18` model;
+- `torchvision` is available for the standard ResNet18, MobileNetV2, and DeepLabV3 models;
 - `flatc` is available on `PATH` for PTE/PTD serialization;
 - an ExecuTorch `executor_runner` built with `EXECUTORCH_BUILD_MUSA=ON`.
 
@@ -118,6 +120,19 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
 $PYTHON examples/musa/aoti_model_acceptance.py \
   --model bilinear_unet --dtype bf16 --dynamic-spatial-max 48 \
   --output-dir /tmp/executorch-musa-acceptance/bilinear_unet_dynamic \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model deeplabv3_mobilenet_v3_large \
+  --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
+  --output-dir /tmp/executorch-musa-acceptance/deeplabv3_pretrained \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model deeplabv3_mobilenet_v3_large \
+  --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
+  --batch-size 2 --dynamic-batch-max 3 \
+  --output-dir /tmp/executorch-musa-acceptance/deeplabv3_dynamic \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -171,6 +186,12 @@ accuracy or performance.
 MobileNetV2 IMAGENET1K_V2 weights are available at
 `https://download.pytorch.org/models/mobilenet_v2-7ebf99e0.pth` (SHA-256
 `7ebf99e03e254b273379b23edca7ec0da9f48273b23a332b93c1c99d49e86e8f`).
+DeepLabV3 MobileNetV3 COCO-with-VOC-labels weights are available at
+`https://download.pytorch.org/models/deeplabv3_mobilenet_v3_large-fc3c493d.pth`
+(SHA-256 `fc3c493d68e89cc31ef488c803d5d7dd2f3190fb570598faa49fef69be8e5e70`).
+DeepLabV3 loads the full checkpoint, including its auxiliary classifier, but
+exports only the primary `out` logits. The acceptance input is random, not
+normalized dataset images; no segmentation accuracy is measured.
 
 On M1000 with torch-musa 2.9.0.post1+musa5.1.2mp22, the following exports
 passed `executor_runner` versus MUSA eager (maximum absolute output error):
@@ -196,6 +217,8 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | ResNet18 | 1x3x64x64 | BF16 | Official pretrained | 0 |
 | MobileNetV2 | 1x3x224x224 | FP32 | Official pretrained | 2.03e-6 |
 | MobileNetV2 | 1x3x64x64 | FP16 | Official pretrained | 1.37e-2 (`--atol 0.02`) |
+| DeepLabV3 MobileNetV3 | 1x3x64x64 | FP32 | Official pretrained | 9.16e-5 (0/4096 differing pixel labels) |
+| DeepLabV3 MobileNetV3 | 2x3x64x64 | FP32 | Official pretrained | 1.18e-4 (0/8192 differing pixel labels) |
 | ResNet18 | 2x3x64x64 | FP32 | Official pretrained | 3.34e-5 |
 | MobileNetV2 | 2x3x64x64 | FP32 | Official pretrained | 1.76e-5 |
 
@@ -217,6 +240,17 @@ One dynamic-spatial bilinear U-Net PTE per dtype passed the 32x40, 24x30,
 48x48, and 47x39 inputs in FP32 and BF16 (maximum errors 3.58e-7 and
 7.81e-3, respectively). These are independent bounded spatial dimensions,
 not a validation of arbitrary sizes or a pretrained segmentation model.
+The official pretrained DeepLabV3 output varies spatially; all 86,016 FP32
+logits met the default 1e-4 tolerances and all 4,096 predicted pixel labels
+matched MUSA eager. Pretrained FP16 at 64x64 does **not** meet the default
+tolerance: 2,412/86,016 logits differ beyond 1e-2 absolute and relative
+tolerances (maximum error 0.03125), although the predicted labels match for
+this input. Do not count it as a passed FP16 configuration; BF16 has not been
+validated for this model.
+The same pretrained FP32 DeepLabV3 also passed batches 2/1/3 using one
+bounded-dynamic-batch PTE (maximum logit error 1.18e-4); all predicted pixel
+labels matched for each batch. This does not validate dynamic spatial sizes
+for the pretrained model.
 The embedding classifier also passed batches 2/1/3 in FP32 with one PTE
 (maximum error 1.20e-7), confirming dynamic int64 inputs without attention.
 The token decoder matched eager token IDs `[4, 13, 56, 44]` in all three
@@ -356,6 +390,10 @@ exports, the first two feature blocks match bit-for-bit. The next block's
 pointwise Conv2d also matches, but its following BatchNorm differs at 4 of
 98,304 BF16 values (maximum 0.03125); the discrepancy grows through later
 blocks. Investigate BF16 BatchNorm rounding before relaxing the tolerance.
+Applying native muDNN BatchNorm to the pointwise convolution output reproduces
+the eager prefix exactly; an explicit FP32 divide-and-cast formula reproduces
+the runner prefix exactly. The four differences occur near BF16 rounding
+boundaries, so replacing BatchNorm with that formula does not fix the mismatch.
 With the same MUSA input and BF16-rounded pretrained weights, a MUSA FP32
 reference has mean logit errors 0.0423 for the runner and 0.0324 for BF16 eager;
 both predict class 22, as does the FP32 reference. Matching top-1 alone does

@@ -24,6 +24,7 @@ from examples.musa.aoti_kv_cache_acceptance import (
 )
 from examples.musa.aoti_model_acceptance import (
     BilinearUNet,
+    DeepLabV3MobileNet,
     DilatedDecoder,
     SimpleAudioDecoder,
     SimpleVideoDecoder,
@@ -361,6 +362,17 @@ class TestMusaAoti(unittest.TestCase):
                 {2: Dim("height", min=24, max=48), 3: Dim("width", min=24, max=48)},
             ),
         )
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_deeplabv3_mobilenet_aoti_compile(self) -> None:
+        module = DeepLabV3MobileNet().eval().to("musa")
+        exported = export(module, (torch.randn(1, 3, 64, 64, device="musa"),))
         result = MusaBackend.preprocess(
             exported,
             [MusaBackend.generate_method_name_compile_spec("forward")],
