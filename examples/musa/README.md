@@ -91,7 +91,11 @@ These are single-input correctness checks, not shape-generalization or
 throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
 meet the default tolerance: the maximum difference is 0.140625 and 121/1000
 logits differ beyond `--atol 0.02 --rtol 0.04`. Do not count this configuration
-as verified until the precision difference is understood.
+as verified until the precision difference is understood. In isolated prefix
+exports, the first two feature blocks match bit-for-bit. The next block's
+pointwise Conv2d also matches, but its following BatchNorm differs at 4 of
+98,304 BF16 values (maximum 0.03125); the discrepancy grows through later
+blocks. Investigate BF16 BatchNorm rounding before relaxing the tolerance.
 
 Without `--runner`, the script only exports the PTE/PTD and writes the eager
 reference files. The runner command automatically adds the MUSA, Torch, and
