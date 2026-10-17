@@ -6,6 +6,7 @@
 
 import contextlib
 import hashlib
+import math
 import os
 import typing
 from typing import Any, Dict, List
@@ -20,6 +21,7 @@ from executorch.backends.cuda.cuda_weight_collector import (
 from executorch.exir._warnings import experimental
 from executorch.exir.backend.backend_details import BackendDetails, PreprocessResult
 from executorch.exir.backend.compile_spec_schema import CompileSpec
+from executorch.exir.graph_module import contains_any_call_fn_target_op
 
 
 def _aoti_device_type_for_weight(tensor: torch.Tensor) -> int:
@@ -28,6 +30,45 @@ def _aoti_device_type_for_weight(tensor: torch.Tensor) -> int:
     if tensor.device.type == "cpu":
         return AOTI_DEVICE_TYPE_CPU
     raise RuntimeError(f"Unsupported AOTI constant device for MUSA export: {tensor.device}")
+
+
+def _decompose_scaled_dot_product_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: torch.Tensor | None = None,
+    dropout_p: float = 0.0,
+    is_causal: bool = False,
+    *,
+    scale: float | None = None,
+    enable_gqa: bool = False,
+) -> torch.Tensor:
+    if dropout_p != 0.0:
+        raise ValueError("MUSA AOTI SDPA does not support dropout")
+    if is_causal and attn_mask is not None:
+        raise ValueError("MUSA AOTI SDPA cannot combine causal and custom masks")
+    if enable_gqa:
+        if query.size(-3) % key.size(-3) or query.size(-3) % value.size(-3):
+            raise ValueError("MUSA AOTI GQA requires divisible heads")
+        key = key.repeat_interleave(query.size(-3) // key.size(-3), dim=-3)
+        value = value.repeat_interleave(query.size(-3) // value.size(-3), dim=-3)
+
+    output_dtype = query.dtype
+    if output_dtype in (torch.float16, torch.bfloat16):
+        query, key, value = query.float(), key.float(), value.float()
+    scores = torch.matmul(query, key.transpose(-2, -1))
+    scores = scores * (scale if scale is not None else 1.0 / math.sqrt(query.size(-1)))
+    if is_causal:
+        causal_mask = torch.ones(
+            query.size(-2), key.size(-2), dtype=torch.bool, device=query.device
+        ).tril()
+        scores = scores.masked_fill(~causal_mask, float("-inf"))
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            scores = scores.masked_fill(~attn_mask, float("-inf"))
+        else:
+            scores = scores + attn_mask
+    return torch.matmul(torch.softmax(scores, dim=-1), value).to(output_dtype)
 
 
 @experimental(
@@ -56,7 +97,11 @@ class MusaBackend(AotiBackend, BackendDetails):
 
     @classmethod
     def get_decomposition_table(cls) -> Dict[Any, Any]:
-        return {}
+        return {
+            torch.ops.aten.scaled_dot_product_attention.default: (
+                _decompose_scaled_dot_product_attention
+            )
+        }
 
     @classmethod
     def get_custom_passes(cls, compile_specs: List[CompileSpec]) -> List[typing.Any]:
@@ -134,7 +179,16 @@ class MusaBackend(AotiBackend, BackendDetails):
         compile_specs: List[CompileSpec],
     ) -> PreprocessResult:
         collector = CudaWeightCollector()
-        with collector.capture(_aoti_device_type_for_weight) as capture:
+        has_sdpa = contains_any_call_fn_target_op(
+            edge_program.graph_module,
+            {torch.ops.aten.scaled_dot_product_attention.default},
+        )
+        sdpa_context = (
+            torch._inductor.config.patch({"pattern_matcher": False})
+            if has_sdpa
+            else contextlib.nullcontext()
+        )
+        with collector.capture(_aoti_device_type_for_weight) as capture, sdpa_context:
             result = AotiBackend.preprocess.__func__(cls, edge_program, compile_specs)
         if capture.artifact is None:
             raise RuntimeError("MUSA AOTI did not return a structured Weights output")

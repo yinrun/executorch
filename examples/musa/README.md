@@ -1,11 +1,13 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for seven models:
+`aoti_model_acceptance.py` validates the complete MUSA path for nine models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
 - `simple_video_cnn`: Conv3d + ReLU + MaxPool3d + Conv3d + pooling + Linear;
 - `simple_decoder`: ConvTranspose2d + ReLU + ConvTranspose2d with output padding;
+- `transformer_block`: torchvision-independent TransformerEncoderLayer;
+- `causal_attention`: causal grouped-query attention with Q/K/V projections;
 - `narrow_resnet18`: ResNet-18 block topology with narrow channels and a 32x32 input;
 - `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input;
 - `mobilenet_v2`: torchvision MobileNetV2 with depthwise convolutions and a 64x64 input.
@@ -40,6 +42,16 @@ eager reference disables muDNN TF32 to match the fallback's FP32 FMA math.
 The native fallback supports non-transposed Conv1d/2d/3d and ConvTranspose2d
 with output padding smaller than its stride; other transposed dimensions are
 not yet supported.
+MUSA AOTI decomposes inference-only SDPA into matmul, softmax, and masking to
+avoid an unavailable TorchMUSA AOTI fallback. Pattern matching is disabled
+only while compiling graphs containing SDPA, as it otherwise fuses those ops
+back into the unavailable fallback. Dropout is unsupported. The current
+TorchMUSA export specializes attention batch dimensions, so bounded dynamic
+batch acceptance is not yet available for these two attention models.
+Boolean/additive masks, causal attention, and GQA are covered separately;
+combining a causal flag with a custom mask is not supported.
+All-masked rows are not covered: math SDPA can yield NaNs, while TorchMUSA's
+low-precision flash attention can behave differently.
 
 ## Prerequisites
 
@@ -86,6 +98,11 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --model simple_cnn --batch-size 2 --dynamic-batch-max 3 \
   --output-dir /tmp/executorch-musa-acceptance/simple_cnn_dynamic \
   --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model causal_attention --dtype bf16 \
+  --output-dir /tmp/executorch-musa-acceptance/causal_attention_bf16 \
+  --runner "$RUNNER"
 ```
 
 To validate official pretrained ResNet18 weights, download
@@ -107,6 +124,8 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | Simple CNN | 1x3x32x32 | FP16 / BF16 | Random | 2.44e-4 / 1.95e-3 |
 | Simple 3D CNN | 1x1x4x8x8 | FP32 | Random | 7.45e-9 |
 | Simple decoder | 1x3x8x8 | FP32 | Random | 5.96e-8 |
+| TransformerEncoderLayer | 1x4x16 | FP32 / FP16 / BF16 | Random | 4.77e-7 / 1.95e-3 / 7.81e-3 |
+| Causal GQA | 1x4x16 | FP32 / FP16 / BF16 | Random | 1.19e-7 / 1.22e-4 / 3.91e-3 |
 | ResNet18 | 1x3x224x224 | FP32 / FP16 | Official pretrained | 6.05e-6 / 3.91e-3 |
 | ResNet18 | 1x3x64x64 | BF16 | Official pretrained | 0 |
 | MobileNetV2 | 1x3x224x224 | FP32 | Official pretrained | 2.03e-6 |

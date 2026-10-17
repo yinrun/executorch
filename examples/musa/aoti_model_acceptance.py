@@ -95,6 +95,41 @@ class SimpleDecoder(nn.Module):
         return self.layers(x)
 
 
+class TransformerBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layer = nn.TransformerEncoderLayer(
+            d_model=16,
+            nhead=4,
+            dim_feedforward=32,
+            dropout=0.0,
+            batch_first=True,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layer(x)
+
+
+class CausalAttention(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.query = nn.Linear(16, 16, bias=False)
+        self.key_value = nn.Linear(16, 16, bias=False)
+        self.output = nn.Linear(16, 16)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, sequence, _ = x.shape
+        query = self.query(x).view(batch, sequence, 4, 4).transpose(1, 2)
+        key, value = (
+            tensor.view(batch, sequence, 2, 4).transpose(1, 2)
+            for tensor in self.key_value(x).chunk(2, dim=-1)
+        )
+        attended = torch.nn.functional.scaled_dot_product_attention(
+            query, key, value, is_causal=True, enable_gqa=True
+        )
+        return self.output(attended.transpose(1, 2).reshape(batch, sequence, 16))
+
+
 class ResidualBlock(nn.Module):
     expansion = 1
 
@@ -189,6 +224,8 @@ MODEL_FACTORIES = {
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
     "simple_video_cnn": (SimpleVideoCnn, (1, 1, 4, 8, 8)),
     "simple_decoder": (SimpleDecoder, (1, 3, 8, 8)),
+    "transformer_block": (TransformerBlock, (1, 4, 16)),
+    "causal_attention": (CausalAttention, (1, 4, 16)),
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
