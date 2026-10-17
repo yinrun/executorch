@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <vector>
 
 #include <executorch/backends/aoti/export.h>
 #include <executorch/backends/aoti/slim/c10/core/Device.h>
@@ -132,19 +133,27 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       InvalidArgument,
       "MUSA convolution tensors must use the same device");
   ET_CHECK_OR_RETURN_ERROR(
-      input->dim() == 4 && weight->dim() == 4,
+      input->dim() >= 3 && input->dim() <= 4 &&
+          weight->dim() == input->dim(),
       NotSupported,
-      "MUSA convolution currently supports 2D convolution only");
+      "MUSA convolution supports 1D and 2D convolution only");
+  const int64_t spatial_dims = input->dim() - 2;
   ET_CHECK_OR_RETURN_ERROR(
       !transposed && stride != nullptr && padding != nullptr &&
-          dilation != nullptr && output_padding != nullptr && stride_len == 2 &&
-          padding_len == 2 && dilation_len == 2 && output_padding_len == 2,
+          dilation != nullptr && output_padding != nullptr &&
+          stride_len == spatial_dims && padding_len == spatial_dims &&
+          dilation_len == spatial_dims && output_padding_len == spatial_dims,
       NotSupported,
-      "MUSA convolution supports non-transposed 2D convolution only");
+      "MUSA convolution supports non-transposed convolution only");
+  for (int64_t index = 0; index < spatial_dims; ++index) {
+    ET_CHECK_OR_RETURN_ERROR(
+        stride[index] > 0 && dilation[index] > 0 && padding[index] >= 0 &&
+            output_padding[index] == 0,
+        InvalidArgument,
+        "MUSA convolution received invalid convolution parameters");
+  }
   ET_CHECK_OR_RETURN_ERROR(
-      groups > 0 && stride[0] > 0 && stride[1] > 0 && dilation[0] > 0 &&
-          dilation[1] > 0 && padding[0] >= 0 && padding[1] >= 0 &&
-          output_padding[0] == 0 && output_padding[1] == 0,
+      groups > 0,
       InvalidArgument,
       "MUSA convolution received invalid convolution parameters");
   ET_CHECK_OR_RETURN_ERROR(
@@ -155,11 +164,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
 
   const int64_t batch = input->size(0);
   const int64_t input_channels = input->size(1);
-  const int64_t input_height = input->size(2);
-  const int64_t input_width = input->size(3);
   const int64_t output_channels = weight->size(0);
-  const int64_t kernel_height = weight->size(2);
-  const int64_t kernel_width = weight->size(3);
   ET_CHECK_OR_RETURN_ERROR(
       input_channels % groups == 0 && output_channels % groups == 0 &&
           weight->size(1) == input_channels / groups &&
@@ -168,37 +173,39 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       InvalidArgument,
       "MUSA convolution tensor dimensions are incompatible");
 
-  const int64_t output_height =
-      (input_height + 2 * padding[0] -
-       dilation[0] * (kernel_height - 1) - 1) /
-          stride[0] +
-      1;
-  const int64_t output_width =
-      (input_width + 2 * padding[1] -
-       dilation[1] * (kernel_width - 1) - 1) /
-          stride[1] +
-      1;
+  std::vector<int64_t> output_sizes(input->dim());
+  output_sizes[0] = batch;
+  output_sizes[1] = output_channels;
+  for (int64_t index = 0; index < spatial_dims; ++index) {
+    const int64_t input_size = input->size(index + 2);
+    const int64_t kernel_size = weight->size(index + 2);
+    output_sizes[index + 2] =
+        (input_size + 2 * padding[index] -
+         dilation[index] * (kernel_size - 1) - 1) /
+            stride[index] +
+        1;
+  }
+  std::vector<int64_t> output_strides(output_sizes.size());
+  output_strides.back() = 1;
+  for (int64_t index = output_strides.size() - 2; index >= 0; --index) {
+    output_strides[index] = output_strides[index + 1] * output_sizes[index + 1];
+  }
   ET_CHECK_OR_RETURN_ERROR(
       fits_mudnn_dimension(batch) && fits_mudnn_dimension(input_channels) &&
-          fits_mudnn_dimension(input_height) && fits_mudnn_dimension(input_width) &&
-          fits_mudnn_dimension(output_channels) &&
-          fits_mudnn_dimension(kernel_height) && fits_mudnn_dimension(kernel_width) &&
-          fits_mudnn_dimension(output_height) && fits_mudnn_dimension(output_width),
+          fits_mudnn_dimension(output_channels),
       NotSupported,
       "MUSA convolution dimensions exceed muDNN limits");
-
-  const int64_t output_sizes[] = {
-      batch, output_channels, output_height, output_width};
-  const int64_t output_strides[] = {
-      output_channels * output_height * output_width,
-      output_height * output_width,
-      output_width,
-      1};
+  for (int64_t size : output_sizes) {
+    ET_CHECK_OR_RETURN_ERROR(
+        fits_mudnn_dimension(size),
+        NotSupported,
+        "MUSA convolution dimensions exceed muDNN limits");
+  }
   SlimTensor* raw_output = nullptr;
   auto error = aoti_torch_empty_strided(
-      4,
-      output_sizes,
-      output_strides,
+      output_sizes.size(),
+      output_sizes.data(),
+      output_strides.data(),
       static_cast<int32_t>(dtype),
       static_cast<int32_t>(DeviceType::CUDA),
       input->device_index(),
@@ -230,51 +237,114 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   ET_CHECK_OK_OR_RETURN_ERROR(error);
 
   const auto data_type = mudnn_data_type(dtype);
+  const bool one_dim_as_two = spatial_dims == 1;
+  const int descriptor_dims = one_dim_as_two ? 4 : static_cast<int>(input->dim());
+  std::vector<int> input_dims(descriptor_dims);
+  std::vector<int> output_dims(descriptor_dims);
+  std::vector<int> weight_dims(descriptor_dims);
+  if (one_dim_as_two) {
+    input_dims = {
+        static_cast<int>(input->size(0)),
+        static_cast<int>(input->size(1)),
+        static_cast<int>(input->size(2)),
+        1};
+    output_dims = {
+        static_cast<int>(output_sizes[0]),
+        static_cast<int>(output_sizes[1]),
+        static_cast<int>(output_sizes[2]),
+        1};
+    weight_dims = {
+        static_cast<int>(weight->size(0)),
+        static_cast<int>(weight->size(1)),
+        static_cast<int>(weight->size(2)),
+        1};
+  } else {
+    for (int index = 0; index < descriptor_dims; ++index) {
+      input_dims[index] = static_cast<int>(input->size(index));
+      output_dims[index] = static_cast<int>(output_sizes[index]);
+      weight_dims[index] = static_cast<int>(weight->size(index));
+    }
+  }
+  std::vector<int> padding_int(spatial_dims);
+  std::vector<int> stride_int(spatial_dims);
+  std::vector<int> dilation_int(spatial_dims);
+  for (int64_t index = 0; index < spatial_dims; ++index) {
+    padding_int[index] = static_cast<int>(padding[index]);
+    stride_int[index] = static_cast<int>(stride[index]);
+    dilation_int[index] = static_cast<int>(dilation[index]);
+  }
   error = check_mudnn(
-      mudnnSetTensor4dDescriptor(
+      mudnnSetTensorNdDescriptorEx(
           context.input,
-          MUDNN_TENSOR_NCHW,
+          one_dim_as_two || descriptor_dims == 4
+              ? MUDNN_TENSOR_NCHW
+              : MUDNN_TENSOR_NCDHW,
           data_type,
-          static_cast<int>(batch),
-          static_cast<int>(input_channels),
-          static_cast<int>(input_height),
-          static_cast<int>(input_width)),
-      "mudnnSetTensor4dDescriptor(input)");
+          descriptor_dims,
+          input_dims.data()),
+      "mudnnSetTensorNdDescriptorEx(input)");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
   error = check_mudnn(
-      mudnnSetTensor4dDescriptor(
+      mudnnSetTensorNdDescriptorEx(
           context.output,
-          MUDNN_TENSOR_NCHW,
+          one_dim_as_two || descriptor_dims == 4
+              ? MUDNN_TENSOR_NCHW
+              : MUDNN_TENSOR_NCDHW,
           data_type,
-          static_cast<int>(batch),
-          static_cast<int>(output_channels),
-          static_cast<int>(output_height),
-          static_cast<int>(output_width)),
-      "mudnnSetTensor4dDescriptor(output)");
+          descriptor_dims,
+          output_dims.data()),
+      "mudnnSetTensorNdDescriptorEx(output)");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
+  const auto tensor_format = one_dim_as_two
+      ? MUDNN_TENSOR_NCHW
+      : (descriptor_dims == 4 ? MUDNN_TENSOR_NCHW : MUDNN_TENSOR_NCDHW);
   error = check_mudnn(
-      mudnnSetFilter4dDescriptor(
+      mudnnSetFilterNdDescriptor(
           context.weight,
           data_type,
-          MUDNN_TENSOR_NCHW,
-          static_cast<int>(output_channels),
-          static_cast<int>(weight->size(1)),
-          static_cast<int>(kernel_height),
-          static_cast<int>(kernel_width)),
-      "mudnnSetFilter4dDescriptor");
+          tensor_format,
+          descriptor_dims,
+          weight_dims.data()),
+      "mudnnSetFilterNdDescriptor");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
-  error = check_mudnn(
-      mudnnSetConvolution2dDescriptor(
-          context.convolution,
-          static_cast<int>(padding[0]),
-          static_cast<int>(padding[1]),
-          static_cast<int>(stride[0]),
-          static_cast<int>(stride[1]),
-          static_cast<int>(dilation[0]),
-          static_cast<int>(dilation[1]),
-          MUDNN_CROSS_CORRELATION,
-          MUDNN_DATA_FLOAT),
-      "mudnnSetConvolution2dDescriptor");
+  if (one_dim_as_two) {
+    error = check_mudnn(
+        mudnnSetConvolution2dDescriptor(
+            context.convolution,
+            padding_int[0],
+            0,
+            stride_int[0],
+            1,
+            dilation_int[0],
+            1,
+            MUDNN_CROSS_CORRELATION,
+            MUDNN_DATA_FLOAT),
+        "mudnnSetConvolution2dDescriptor");
+  } else if (descriptor_dims == 4) {
+    error = check_mudnn(
+        mudnnSetConvolution2dDescriptor(
+            context.convolution,
+            padding_int[0],
+            padding_int[1],
+            stride_int[0],
+            stride_int[1],
+            dilation_int[0],
+            dilation_int[1],
+            MUDNN_CROSS_CORRELATION,
+            MUDNN_DATA_FLOAT),
+        "mudnnSetConvolution2dDescriptor");
+  } else {
+    error = check_mudnn(
+        mudnnSetConvolutionNdDescriptor(
+            context.convolution,
+            static_cast<int>(spatial_dims),
+            padding_int.data(),
+            stride_int.data(),
+            dilation_int.data(),
+            MUDNN_CROSS_CORRELATION,
+            MUDNN_DATA_FLOAT),
+        "mudnnSetConvolutionNdDescriptor");
+  }
   ET_CHECK_OK_OR_RETURN_ERROR(error);
   error = check_mudnn(
       mudnnSetConvolutionGroupCount(
@@ -285,17 +355,19 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   const float alpha = 1.0f;
   const float beta = 0.0f;
   size_t workspace_size = 0;
-  error = check_mudnn(
-      mudnnGetConvolutionForwardWorkspaceSize(
-          context.handle,
-          context.input,
-          context.weight,
-          context.convolution,
-          context.output,
-          MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
-          &workspace_size),
-      "mudnnGetConvolutionForwardWorkspaceSize");
-  ET_CHECK_OK_OR_RETURN_ERROR(error);
+  if (one_dim_as_two || spatial_dims == 2) {
+    error = check_mudnn(
+        mudnnGetConvolutionForwardWorkspaceSize(
+            context.handle,
+            context.input,
+            context.weight,
+            context.convolution,
+            context.output,
+            MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+            &workspace_size),
+        "mudnnGetConvolutionForwardWorkspaceSize");
+    ET_CHECK_OK_OR_RETURN_ERROR(error);
+  }
   DeviceWorkspace workspace;
   if (workspace_size != 0) {
     if (cudaMalloc(&workspace.data, workspace_size) != cudaSuccess) {
@@ -322,19 +394,19 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   ET_CHECK_OK_OR_RETURN_ERROR(error);
 
   if (bias != nullptr) {
+    std::vector<int> bias_dims(descriptor_dims, 1);
+    bias_dims[1] = static_cast<int>(output_channels);
     error = check_mudnn(
         mudnnCreateTensorDescriptor(&context.bias), "mudnnCreateTensorDescriptor");
     ET_CHECK_OK_OR_RETURN_ERROR(error);
     error = check_mudnn(
-        mudnnSetTensor4dDescriptor(
+        mudnnSetTensorNdDescriptorEx(
             context.bias,
-            MUDNN_TENSOR_NCHW,
+            tensor_format,
             data_type,
-            1,
-            static_cast<int>(output_channels),
-            1,
-            1),
-        "mudnnSetTensor4dDescriptor(bias)");
+            descriptor_dims,
+            bias_dims.data()),
+        "mudnnSetTensorNdDescriptorEx(bias)");
     ET_CHECK_OK_OR_RETURN_ERROR(error);
     error = check_mudnn(
         mudnnAddTensor(
