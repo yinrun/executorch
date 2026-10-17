@@ -8,7 +8,7 @@ import unittest
 
 import torch
 from torch import nn
-from torch.export import export
+from torch.export import Dim, export
 
 from executorch.backends.cuda.cuda_weight_collector import (
     decode_cuda_aoti_metadata,
@@ -69,6 +69,29 @@ class TestMusaAoti(unittest.TestCase):
         entries = {entry.fqn: entry for entry in metadata.entries}
         self.assertIn("linear.weight", entries)
         self.assertEqual(entries["linear.weight"].sizes, (4, 8))
+
+    def test_dynamic_embedding_aoti_compile(self) -> None:
+        class EmbeddingModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embedding = nn.Embedding(64, 16)
+                self.classifier = nn.Linear(16, 8)
+
+            def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+                return self.classifier(self.embedding(token_ids).mean(dim=1))
+
+        example = torch.randint(64, (2, 4), device="musa", dtype=torch.int64)
+        module = EmbeddingModel().eval().to("musa")
+        exported = export(
+            module, (example,), dynamic_shapes=({0: Dim("batch", min=1, max=3)},)
+        )
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
     def test_conv2d_aoti_compile(self) -> None:
         class Conv2dModel(nn.Module):

@@ -1,6 +1,6 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for nine models:
+`aoti_model_acceptance.py` validates the complete MUSA path for twelve models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
@@ -8,6 +8,9 @@
 - `simple_decoder`: ConvTranspose2d + ReLU + ConvTranspose2d with output padding;
 - `transformer_block`: torchvision-independent TransformerEncoderLayer;
 - `causal_attention`: causal grouped-query attention with Q/K/V projections;
+- `embedding_classifier`: int64 token IDs, Embedding, pooling, and Linear;
+- `token_encoder`: int64 token IDs, Embedding, TransformerEncoderLayer, and Linear;
+- `token_decoder`: int64 token IDs, Embedding, causal GQA, LayerNorm, and vocabulary projection;
 - `narrow_resnet18`: ResNet-18 block topology with narrow channels and a 32x32 input;
 - `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input;
 - `mobilenet_v2`: torchvision MobileNetV2 with depthwise convolutions and a 64x64 input.
@@ -17,9 +20,12 @@ runner output to the selected directory. It compares the `executor_runner`
 output with the MUSA eager result; no CPU execution is used as a correctness
 baseline.
 
-Inputs and weights default to FP32. `--dtype fp16` or `--dtype bf16` exercises
+Floating inputs and weights default to FP32. `--dtype fp16` or `--dtype bf16` exercises
 the same export and runner path in lower precision. The default absolute and
 relative comparison tolerances are 1e-4 (FP32), 1e-2 (FP16), and 4e-2 (BF16);
+token models always accept raw int64 input IDs and `--dtype` selects the
+weights and output dtype. For `token_decoder`, the script also checks exact
+argmax token IDs against MUSA eager.
 override them with `--atol` and `--rtol` if needed. `--input-size 224` exports
 ResNet or MobileNet with a 224x224 input instead of its default size. Fixed
 spatial shapes and dtypes require separate exports.
@@ -47,7 +53,7 @@ avoid an unavailable TorchMUSA AOTI fallback. Pattern matching is disabled
 only while compiling graphs containing SDPA, as it otherwise fuses those ops
 back into the unavailable fallback. Dropout is unsupported. The current
 TorchMUSA export specializes attention batch dimensions, so bounded dynamic
-batch acceptance is not yet available for these two attention models.
+batch acceptance is not yet available for models containing attention.
 Boolean/additive masks, causal attention, and GQA are covered separately;
 combining a causal flag with a custom mask is not supported.
 All-masked rows are not covered: math SDPA can yield NaNs, while TorchMUSA's
@@ -103,6 +109,11 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --model causal_attention --dtype bf16 \
   --output-dir /tmp/executorch-musa-acceptance/causal_attention_bf16 \
   --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model token_decoder --dtype bf16 \
+  --output-dir /tmp/executorch-musa-acceptance/token_decoder_bf16 \
+  --runner "$RUNNER"
 ```
 
 To validate official pretrained ResNet18 weights, download
@@ -126,6 +137,8 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | Simple decoder | 1x3x8x8 | FP32 | Random | 5.96e-8 |
 | TransformerEncoderLayer | 1x4x16 | FP32 / FP16 / BF16 | Random | 4.77e-7 / 1.95e-3 / 7.81e-3 |
 | Causal GQA | 1x4x16 | FP32 / FP16 / BF16 | Random | 1.19e-7 / 1.22e-4 / 3.91e-3 |
+| Token encoder | 1x4 int64 | FP32 / FP16 / BF16 | Random | 5.96e-8 / 4.89e-4 / 1.96e-3 |
+| Token decoder | 1x4 int64 | FP32 / FP16 / BF16 | Random | 1.79e-7 / 4.89e-4 / 3.91e-3 |
 | ResNet18 | 1x3x224x224 | FP32 / FP16 | Official pretrained | 6.05e-6 / 3.91e-3 |
 | ResNet18 | 1x3x64x64 | BF16 | Official pretrained | 0 |
 | MobileNetV2 | 1x3x224x224 | FP32 | Official pretrained | 2.03e-6 |
@@ -141,6 +154,11 @@ For the simple 3D CNN, batches 2/1/3 passed with a single PTE in both FP16
 (maximum error 6.11e-5) and BF16 (4.89e-4).
 For the simple decoder, batches 2/1/3 passed with a single PTE in both FP16
 and BF16 (maximum error 0 for this test input).
+The embedding classifier also passed batches 2/1/3 in FP32 with one PTE
+(maximum error 1.20e-7), confirming dynamic int64 inputs without attention.
+The token decoder matched eager token IDs `[4, 13, 56, 44]` in all three
+precisions. It is a fixed-sequence toy model, not a pretrained LLM or a
+KV-cache/incremental decoding validation.
 
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet

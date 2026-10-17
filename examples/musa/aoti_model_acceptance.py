@@ -130,6 +130,45 @@ class CausalAttention(nn.Module):
         return self.output(attended.transpose(1, 2).reshape(batch, sequence, 16))
 
 
+TOKEN_VOCAB_SIZE = 64
+
+
+class EmbeddingClassifier(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(TOKEN_VOCAB_SIZE, 16)
+        self.classifier = nn.Linear(16, 8)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.embedding(token_ids).mean(dim=1))
+
+
+class TokenEncoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(TOKEN_VOCAB_SIZE, 16)
+        self.encoder = TransformerBlock()
+        self.classifier = nn.Linear(16, 8)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        features = self.encoder(self.embedding(token_ids))
+        return self.classifier(features.mean(dim=1))
+
+
+class TokenDecoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(TOKEN_VOCAB_SIZE, 16)
+        self.attention = CausalAttention()
+        self.norm = nn.LayerNorm(16)
+        self.output = nn.Linear(16, TOKEN_VOCAB_SIZE, bias=False)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        features = self.embedding(token_ids)
+        features = self.norm(features + self.attention(features))
+        return self.output(features)
+
+
 class ResidualBlock(nn.Module):
     expansion = 1
 
@@ -226,10 +265,14 @@ MODEL_FACTORIES = {
     "simple_decoder": (SimpleDecoder, (1, 3, 8, 8)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
+    "embedding_classifier": (EmbeddingClassifier, (1, 4)),
+    "token_encoder": (TokenEncoder, (1, 4)),
+    "token_decoder": (TokenDecoder, (1, 4)),
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
 }
+TOKEN_MODEL_NAMES = {"embedding_classifier", "token_encoder", "token_decoder"}
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 TOLERANCES = {"fp32": 1e-4, "fp16": 1e-2, "bf16": 4e-2}
 
@@ -258,6 +301,16 @@ def _serialization_schema() -> Iterator[None]:
 def _write_tensor(tensor: torch.Tensor, path: Path) -> None:
     raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
     path.write_bytes(raw.tobytes())
+
+
+def _make_input(
+    model_name: str, input_shape: tuple[int, ...], dtype: torch.dtype
+) -> torch.Tensor:
+    if model_name in TOKEN_MODEL_NAMES:
+        return torch.randint(
+            TOKEN_VOCAB_SIZE, input_shape, device="musa", dtype=torch.int64
+        )
+    return torch.randn(input_shape, device="musa", dtype=dtype)
 
 
 def _write_input(tensor: torch.Tensor, path: Path, max_batch: int | None) -> None:
@@ -369,7 +422,7 @@ def export_model(
         state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict)
     model = model.eval().to(device="musa", dtype=dtype)
-    example = torch.randn(input_shape, device="musa", dtype=dtype)
+    example = _make_input(model_name, input_shape, dtype)
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
         expected = model(example)
 
@@ -426,6 +479,7 @@ def main() -> None:
     result = {
         "model": args.model,
         "dtype": args.dtype,
+        "input_dtype": "int64" if args.model in TOKEN_MODEL_NAMES else args.dtype,
         "input_size": args.input_size,
         "batch_size": args.batch_size,
         "dynamic_batch_max": args.dynamic_batch_max,
@@ -451,10 +505,8 @@ def main() -> None:
                 current_input_path = input_path
                 current_expected = expected
             else:
-                example = torch.randn(
-                    (batch_size, *input_shape[1:]),
-                    device="musa",
-                    dtype=DTYPES[args.dtype],
+                example = _make_input(
+                    args.model, (batch_size, *input_shape[1:]), DTYPES[args.dtype]
                 )
                 with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
                     current_expected = model(example)
@@ -480,6 +532,17 @@ def main() -> None:
             expected_flat = current_expected.detach().cpu().flatten()
             torch.testing.assert_close(actual, expected_flat, atol=atol, rtol=rtol)
             max_error = float((actual.float() - expected_flat.float()).abs().max())
+            if args.model == "token_decoder":
+                expected_token_ids = current_expected.argmax(dim=-1).cpu()
+                actual_token_ids = actual.reshape(current_expected.shape).argmax(dim=-1)
+                if not torch.equal(actual_token_ids, expected_token_ids):
+                    raise AssertionError(
+                        f"predicted token IDs differ for batch {batch_size}: "
+                        f"expected {expected_token_ids.tolist()}, "
+                        f"actual {actual_token_ids.tolist()}"
+                    )
+                if batch_size == args.batch_size:
+                    result["predicted_token_ids"] = actual_token_ids.tolist()
             if args.dynamic_batch_max is not None:
                 result.setdefault("dynamic_batch_results", []).append(
                     {"batch_size": batch_size, "max_error": max_error}
