@@ -22,7 +22,11 @@ from examples.musa.aoti_kv_cache_acceptance import (
     GrowingCacheDecoder,
     RollingCacheDecoder,
 )
-from examples.musa.aoti_model_acceptance import DilatedDecoder
+from examples.musa.aoti_model_acceptance import (
+    DilatedDecoder,
+    SimpleAudioDecoder,
+    SimpleVideoDecoder,
+)
 from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
 
@@ -297,6 +301,26 @@ class TestMusaAoti(unittest.TestCase):
             with self.subTest(dimensions=dimensions):
                 module = DilatedDecoder(dimensions).eval().to("musa")
                 exported = export(module, (torch.randn(shape, device="musa"),))
+                result = MusaBackend.preprocess(
+                    exported,
+                    [MusaBackend.generate_method_name_compile_spec("forward")],
+                )
+
+                self.assertGreater(len(result.processed_bytes), 0)
+                self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_dynamic_conv_transpose_batch_aoti_compile(self) -> None:
+        for model_type, shape in (
+            (SimpleAudioDecoder, (2, 2, 5)),
+            (SimpleVideoDecoder, (2, 1, 2, 3, 4)),
+        ):
+            with self.subTest(model=model_type.__name__):
+                module = model_type().eval().to(device="musa", dtype=torch.bfloat16)
+                exported = export(
+                    module,
+                    (torch.randn(shape, device="musa", dtype=torch.bfloat16),),
+                    dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+                )
                 result = MusaBackend.preprocess(
                     exported,
                     [MusaBackend.generate_method_name_compile_spec("forward")],

@@ -127,6 +127,12 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
+  --model simple_video_decoder --dtype bf16 \
+  --batch-size 2 --dynamic-batch-max 3 \
+  --output-dir /tmp/executorch-musa-acceptance/video_decoder_dynamic \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
   --model causal_attention --dtype bf16 \
   --output-dir /tmp/executorch-musa-acceptance/causal_attention_bf16 \
   --runner "$RUNNER"
@@ -180,6 +186,10 @@ For the simple 3D CNN, batches 2/1/3 passed with a single PTE in both FP16
 (maximum error 6.11e-5) and BF16 (4.89e-4).
 For the simple decoder, batches 2/1/3 passed with a single PTE in both FP16
 and BF16 (maximum error 0 for this test input).
+With a separate bounded dynamic-batch PTE for each BF16 model, batches 2/1/3
+passed for the grouped audio decoder (maximum error 1.95e-3), video decoder
+(0), dilated audio decoder (3.91e-3), dilated image decoder (0), and dilated
+video decoder (0). This checks dynamic batch only, not dynamic spatial sizes.
 The embedding classifier also passed batches 2/1/3 in FP32 with one PTE
 (maximum error 1.20e-7), confirming dynamic int64 inputs without attention.
 The token decoder matched eager token IDs `[4, 13, 56, 44]` in all three
@@ -319,6 +329,10 @@ exports, the first two feature blocks match bit-for-bit. The next block's
 pointwise Conv2d also matches, but its following BatchNorm differs at 4 of
 98,304 BF16 values (maximum 0.03125); the discrepancy grows through later
 blocks. Investigate BF16 BatchNorm rounding before relaxing the tolerance.
+With the same MUSA input and BF16-rounded pretrained weights, a MUSA FP32
+reference has mean logit errors 0.0423 for the runner and 0.0324 for BF16 eager;
+both predict class 22, as does the FP32 reference. Matching top-1 alone does
+not justify accepting the runner's larger BF16 numerical error.
 
 Without `--runner`, the script only exports the PTE/PTD and writes the eager
 reference files. The runner command automatically adds the MUSA, Torch, and
