@@ -530,11 +530,6 @@ def export_model(
         batch_size < 2 or dynamic_batch_max < batch_size
     ):
         raise ValueError("--dynamic-batch-max requires 2 <= batch-size <= max")
-    if dynamic_spatial_max is not None:
-        if model_name != "bilinear_unet" or dynamic_spatial_max < 40:
-            raise ValueError("--dynamic-spatial-max requires bilinear_unet and max >= 40")
-        if dynamic_batch_max is not None:
-            raise ValueError("Dynamic batch and spatial dimensions cannot be combined")
     input_shape = (batch_size, *input_shape[1:])
     if input_size is not None:
         if model_name not in (
@@ -547,6 +542,22 @@ def export_model(
         if input_size < 32:
             raise ValueError("--input-size must be at least 32")
         input_shape = (batch_size, 3, input_size, input_size)
+    spatial_minimum = {
+        "bilinear_unet": 24,
+        "deeplabv3_mobilenet_v3_large": 48,
+    }.get(model_name)
+    if dynamic_spatial_max is not None:
+        if (
+            spatial_minimum is None
+            or min(input_shape[2:]) < spatial_minimum
+            or dynamic_spatial_max < max(input_shape[2:])
+        ):
+            raise ValueError(
+                "--dynamic-spatial-max requires bilinear_unet (min=24) or "
+                "deeplabv3_mobilenet_v3_large (min=48), with max >= input size"
+            )
+        if dynamic_batch_max is not None:
+            raise ValueError("Dynamic batch and spatial dimensions cannot be combined")
     if weights_path is not None and model_name not in (
         "resnet18",
         "mobilenet_v2",
@@ -572,8 +583,8 @@ def export_model(
     elif dynamic_spatial_max is not None:
         dynamic_shapes = (
             {
-                2: Dim("height", min=24, max=dynamic_spatial_max),
-                3: Dim("width", min=24, max=dynamic_spatial_max),
+                2: Dim("height", min=spatial_minimum, max=dynamic_spatial_max),
+                3: Dim("width", min=spatial_minimum, max=dynamic_spatial_max),
             },
         )
         max_shape = (batch_size, 3, dynamic_spatial_max, dynamic_spatial_max)
@@ -655,10 +666,11 @@ def main() -> None:
             max_shape = (args.dynamic_batch_max, *input_shape[1:])
         elif args.dynamic_spatial_max is not None:
             max_size = args.dynamic_spatial_max
+            min_size = 48 if args.model == "deeplabv3_mobilenet_v3_large" else 24
             input_shapes = dict.fromkeys(
                 (
                     input_shape,
-                    (args.batch_size, 3, 24, 30),
+                    (args.batch_size, 3, min_size, min_size + 6),
                     (args.batch_size, 3, max_size, max_size),
                     (args.batch_size, 3, max_size - 1, max_size - 9),
                 )

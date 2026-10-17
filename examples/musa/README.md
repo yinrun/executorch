@@ -35,8 +35,8 @@ argmax token IDs against MUSA eager. For DeepLabV3, it also checks exact
 per-pixel predicted labels. Override the tolerances with `--atol` and
 `--rtol` if needed. `--input-size 224` exports a supported torchvision
 image model with a 224x224 input instead of its default size. Except
-for the bounded dynamic-spatial `bilinear_unet` case below, fixed spatial
-shapes and dtypes require separate exports.
+for the bounded dynamic-spatial `bilinear_unet` and DeepLabV3 cases below,
+fixed spatial shapes and dtypes require separate exports.
 `--batch-size 2` exports and checks a separate fixed-shape, two-input batch
 (the default batch size is one).
 
@@ -46,9 +46,12 @@ The script pads raw input files to the bound and passes the actual shape via
 `executor_runner --input_shapes`; that runner otherwise interprets the raw
 buffer as a bound-sized tensor. For `bilinear_unet` only,
 `--dynamic-spatial-max 48` exports one PTE with independent height and width
-between 24 and 48. It checks 32x40, 24x30, 48x48, and 47x39 using that PTE,
-including odd sizes. Dynamic batch and spatial dimensions cannot be combined
-by this acceptance command; other dynamic dimensions are not covered.
+between 24 and 48. It checks 32x40, 24x30, 48x48, and 47x39 using that PTE.
+For `deeplabv3_mobilenet_v3_large`, `--dynamic-spatial-max 80` checks
+64x64, 48x54, 80x80, and 79x71 using one PTE with independent height and
+width between 48 and 80. Both include odd sizes. Dynamic batch and spatial
+dimensions cannot be combined by this acceptance command; other dynamic
+dimensions are not covered.
 For torchvision models, `--weights /path/to/state_dict.pth` loads a
 local PyTorch state dictionary (for example, a cached pretrained checkpoint)
 before exporting. Without it, the model uses random weights; the script never
@@ -133,6 +136,13 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
   --batch-size 2 --dynamic-batch-max 3 \
   --output-dir /tmp/executorch-musa-acceptance/deeplabv3_dynamic \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model deeplabv3_mobilenet_v3_large \
+  --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
+  --dynamic-spatial-max 80 \
+  --output-dir /tmp/executorch-musa-acceptance/deeplabv3_dynamic_spatial \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -249,8 +259,10 @@ this input. Do not count it as a passed FP16 configuration; BF16 has not been
 validated for this model.
 The same pretrained FP32 DeepLabV3 also passed batches 2/1/3 using one
 bounded-dynamic-batch PTE (maximum logit error 1.18e-4); all predicted pixel
-labels matched for each batch. This does not validate dynamic spatial sizes
-for the pretrained model.
+labels matched for each batch. A separate bounded-dynamic-spatial PTE also
+passed 64x64, 48x54, 80x80, and 79x71 (maximum logit error 1.63e-4), with
+all predicted pixel labels matching eager. It does not validate arbitrary
+resolutions or simultaneous dynamic batch and spatial dimensions.
 The embedding classifier also passed batches 2/1/3 in FP32 with one PTE
 (maximum error 1.20e-7), confirming dynamic int64 inputs without attention.
 The token decoder matched eager token IDs `[4, 13, 56, 44]` in all three
