@@ -1,6 +1,6 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for eighteen models:
+`aoti_model_acceptance.py` validates the complete MUSA path for nineteen models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
@@ -10,6 +10,7 @@
 - `simple_video_decoder`: ConvTranspose3d + ReLU + ConvTranspose3d with output padding;
 - `dilated_audio_decoder`, `dilated_image_decoder`, `dilated_video_decoder`: ConvTranspose1d/2d/3d with output padding smaller than dilation but not stride;
 - `tiny_unet`: Conv2d, GroupNorm, SiLU, down/up sampling, concatenated skip connection, and ConvTranspose2d;
+- `bilinear_unet`: Conv2d, GroupNorm, SiLU, bilinear upsampling to the skip size, and concatenation;
 - `transformer_block`: torchvision-independent TransformerEncoderLayer;
 - `causal_attention`: causal grouped-query attention with Q/K/V projections;
 - `embedding_classifier`: int64 token IDs, Embedding, pooling, and Linear;
@@ -31,8 +32,9 @@ token models always accept raw int64 input IDs and `--dtype` selects the
 weights and output dtype. For `token_decoder`, the script also checks exact
 argmax token IDs against MUSA eager.
 override them with `--atol` and `--rtol` if needed. `--input-size 224` exports
-ResNet or MobileNet with a 224x224 input instead of its default size. Fixed
-spatial shapes and dtypes require separate exports.
+ResNet or MobileNet with a 224x224 input instead of its default size. Except
+for the bounded dynamic-spatial `bilinear_unet` case below, fixed spatial
+shapes and dtypes require separate exports.
 `--batch-size 2` exports and checks a separate fixed-shape, two-input batch
 (the default batch size is one).
 
@@ -40,7 +42,11 @@ spatial shapes and dtypes require separate exports.
 dynamic batch dimension and checks batch sizes 2, 1, and 4 against MUSA eager.
 The script pads raw input files to the bound and passes the actual shape via
 `executor_runner --input_shapes`; that runner otherwise interprets the raw
-buffer as a bound-sized tensor. Other dynamic dimensions are not covered.
+buffer as a bound-sized tensor. For `bilinear_unet` only,
+`--dynamic-spatial-max 48` exports one PTE with independent height and width
+between 24 and 48. It checks 32x40, 24x30, 48x48, and 47x39 using that PTE,
+including odd sizes. Dynamic batch and spatial dimensions cannot be combined
+by this acceptance command; other dynamic dimensions are not covered.
 For torchvision models, `--weights /path/to/state_dict.pth` loads a
 local PyTorch state dictionary (for example, a cached pretrained checkpoint)
 before exporting. Without it, the model uses random weights; the script never
@@ -110,6 +116,11 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
+  --model bilinear_unet --dtype bf16 --dynamic-spatial-max 48 \
+  --output-dir /tmp/executorch-musa-acceptance/bilinear_unet_dynamic \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
   --model dilated_video_decoder --dtype bf16 \
   --output-dir /tmp/executorch-musa-acceptance/dilated_video_decoder_bf16 \
   --runner "$RUNNER"
@@ -176,6 +187,7 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | Dilated image decoder | 1x2x5x4 | FP32 / BF16 | Random | 0 / 0 |
 | Dilated video decoder | 1x2x5x4x3 | FP32 / BF16 | Random | 0 / 0 |
 | Tiny U-Net | 1x3x32x32 | FP32 / FP16 / BF16 | Random | 6.56e-7 / 1.95e-3 / 1.56e-2 |
+| Bilinear U-Net | 1x3x32x40 | FP32 / BF16 | Random | 2.38e-7 / 7.81e-3 |
 | TransformerEncoderLayer | 1x4x16 | FP32 / FP16 / BF16 | Random | 4.77e-7 / 1.95e-3 / 7.81e-3 |
 | Causal GQA | 1x4x16 | FP32 / FP16 / BF16 | Random | 1.19e-7 / 1.22e-4 / 3.91e-3 |
 | Token encoder | 1x4 int64 | FP32 / FP16 / BF16 | Random | 5.96e-8 / 4.89e-4 / 1.96e-3 |
@@ -201,6 +213,10 @@ passed for the grouped audio decoder (maximum error 1.95e-3), video decoder
 video decoder (0). This checks dynamic batch only, not dynamic spatial sizes.
 The tiny U-Net also passed BF16 batches 2/1/3 with one PTE (maximum error
 1.56e-2), covering GroupNorm and the concatenated skip connection.
+One dynamic-spatial bilinear U-Net PTE per dtype passed the 32x40, 24x30,
+48x48, and 47x39 inputs in FP32 and BF16 (maximum errors 3.58e-7 and
+7.81e-3, respectively). These are independent bounded spatial dimensions,
+not a validation of arbitrary sizes or a pretrained segmentation model.
 The embedding classifier also passed batches 2/1/3 in FP32 with one PTE
 (maximum error 1.20e-7), confirming dynamic int64 inputs without attention.
 The token decoder matched eager token IDs `[4, 13, 56, 44]` in all three

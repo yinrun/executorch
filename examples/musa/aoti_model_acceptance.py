@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from typing import Iterator
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.export import Dim, export
 
 from executorch.backends.musa import MusaBackend, MusaPartitioner
@@ -163,6 +165,29 @@ class TinyUNet(nn.Module):
         skip = self.stem(x)
         encoded = self.down(skip)
         return self.head(torch.cat((skip, self.up(encoded)), dim=1))
+
+
+class BilinearUNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1), nn.GroupNorm(4, 8), nn.SiLU()
+        )
+        self.down = nn.Sequential(
+            nn.Conv2d(8, 16, 3, stride=2, padding=1),
+            nn.GroupNorm(4, 16),
+            nn.SiLU(),
+        )
+        self.up = nn.Conv2d(16, 8, 1)
+        self.head = nn.Conv2d(16, 3, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        skip = self.stem(x)
+        encoded = self.down(skip)
+        resized = F.interpolate(
+            encoded, size=skip.shape[-2:], mode="bilinear", align_corners=False
+        )
+        return self.head(torch.cat((skip, self.up(resized)), dim=1))
 
 
 class TransformerBlock(nn.Module):
@@ -339,6 +364,7 @@ MODEL_FACTORIES = {
     "dilated_image_decoder": (partial(DilatedDecoder, 2), (1, 2, 5, 4)),
     "dilated_video_decoder": (partial(DilatedDecoder, 3), (1, 2, 5, 4, 3)),
     "tiny_unet": (TinyUNet, (1, 3, 32, 32)),
+    "bilinear_unet": (BilinearUNet, (1, 3, 32, 40)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
     "embedding_classifier": (EmbeddingClassifier, (1, 4)),
@@ -389,12 +415,17 @@ def _make_input(
     return torch.randn(input_shape, device="musa", dtype=dtype)
 
 
-def _write_input(tensor: torch.Tensor, path: Path, max_batch: int | None) -> None:
+def _write_input(
+    tensor: torch.Tensor, path: Path, max_shape: tuple[int, ...] | None
+) -> None:
+    if max_shape is not None and (
+        len(max_shape) != tensor.ndim
+        or any(size > bound for size, bound in zip(tensor.shape, max_shape))
+    ):
+        raise ValueError("Input shape exceeds the dynamic shape bound")
     _write_tensor(tensor, path)
-    if max_batch is not None:
-        padding = (
-            (max_batch - tensor.shape[0]) * tensor[0].numel() * tensor.element_size()
-        )
+    if max_shape is not None:
+        padding = (math.prod(max_shape) - tensor.numel()) * tensor.element_size()
         with path.open("ab") as input_file:
             input_file.write(bytes(padding))
 
@@ -472,6 +503,7 @@ def export_model(
     weights_path: Path | None,
     batch_size: int = 1,
     dynamic_batch_max: int | None = None,
+    dynamic_spatial_max: int | None = None,
 ) -> tuple[Path, Path, Path, torch.Tensor, nn.Module, tuple[int, ...]]:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
@@ -483,6 +515,11 @@ def export_model(
         batch_size < 2 or dynamic_batch_max < batch_size
     ):
         raise ValueError("--dynamic-batch-max requires 2 <= batch-size <= max")
+    if dynamic_spatial_max is not None:
+        if model_name != "bilinear_unet" or dynamic_spatial_max < 40:
+            raise ValueError("--dynamic-spatial-max requires bilinear_unet and max >= 40")
+        if dynamic_batch_max is not None:
+            raise ValueError("Dynamic batch and spatial dimensions cannot be combined")
     input_shape = (batch_size, *input_shape[1:])
     if input_size is not None:
         if model_name not in ("resnet18", "narrow_resnet18", "mobilenet_v2"):
@@ -502,11 +539,19 @@ def export_model(
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
         expected = model(example)
 
-    dynamic_shapes = (
-        ({0: Dim("batch", min=1, max=dynamic_batch_max)},)
-        if dynamic_batch_max is not None
-        else None
-    )
+    dynamic_shapes = None
+    max_shape = None
+    if dynamic_batch_max is not None:
+        dynamic_shapes = ({0: Dim("batch", min=1, max=dynamic_batch_max)},)
+        max_shape = (dynamic_batch_max, *input_shape[1:])
+    elif dynamic_spatial_max is not None:
+        dynamic_shapes = (
+            {
+                2: Dim("height", min=24, max=dynamic_spatial_max),
+                3: Dim("width", min=24, max=dynamic_spatial_max),
+            },
+        )
+        max_shape = (batch_size, 3, dynamic_spatial_max, dynamic_spatial_max)
     exported = export(model, (example,), dynamic_shapes=dynamic_shapes)
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     with _serialization_schema():
@@ -519,7 +564,7 @@ def export_model(
 
     input_path = output_dir / "input-0.bin"
     expected_path = output_dir / "expected-0.bin"
-    _write_input(example, input_path, dynamic_batch_max)
+    _write_input(example, input_path, max_shape)
     _write_tensor(expected, expected_path)
     ptd_path = output_dir / "aoti_musa_blob.ptd"
     if not ptd_path.exists():
@@ -536,6 +581,7 @@ def main() -> None:
     parser.add_argument("--input-size", type=int)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--dynamic-batch-max", type=int)
+    parser.add_argument("--dynamic-spatial-max", type=int)
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--atol", type=float)
     parser.add_argument("--rtol", type=float)
@@ -549,6 +595,7 @@ def main() -> None:
         args.weights,
         args.batch_size,
         args.dynamic_batch_max,
+        args.dynamic_spatial_max,
     )
     atol = args.atol if args.atol is not None else TOLERANCES[args.dtype]
     rtol = args.rtol if args.rtol is not None else TOLERANCES[args.dtype]
@@ -559,6 +606,7 @@ def main() -> None:
         "input_size": args.input_size,
         "batch_size": args.batch_size,
         "dynamic_batch_max": args.dynamic_batch_max,
+        "dynamic_spatial_max": args.dynamic_spatial_max,
         "weights": str(args.weights) if args.weights is not None else None,
         "atol": atol,
         "rtol": rtol,
@@ -571,35 +619,55 @@ def main() -> None:
 
     if args.runner is not None:
         result["runner"] = str(args.runner)
-        batches = (
-            dict.fromkeys((args.batch_size, 1, args.dynamic_batch_max))
-            if args.dynamic_batch_max is not None
-            else (args.batch_size,)
-        )
-        for batch_size in batches:
-            if batch_size == args.batch_size:
+        if args.dynamic_batch_max is not None:
+            input_shapes = dict.fromkeys(
+                (
+                    input_shape,
+                    (1, *input_shape[1:]),
+                    (args.dynamic_batch_max, *input_shape[1:]),
+                )
+            )
+            max_shape = (args.dynamic_batch_max, *input_shape[1:])
+        elif args.dynamic_spatial_max is not None:
+            max_size = args.dynamic_spatial_max
+            input_shapes = dict.fromkeys(
+                (
+                    input_shape,
+                    (args.batch_size, 3, 24, 30),
+                    (args.batch_size, 3, max_size, max_size),
+                    (args.batch_size, 3, max_size - 1, max_size - 9),
+                )
+            )
+            max_shape = (args.batch_size, 3, max_size, max_size)
+        else:
+            input_shapes = (input_shape,)
+            max_shape = None
+        for current_shape in input_shapes:
+            label = (
+                f"{current_shape[-2]}x{current_shape[-1]}"
+                if args.dynamic_spatial_max is not None
+                else str(current_shape[0])
+            )
+            if current_shape == input_shape:
                 current_input_path = input_path
                 current_expected = expected
             else:
-                example = _make_input(
-                    args.model, (batch_size, *input_shape[1:]), DTYPES[args.dtype]
-                )
+                example = _make_input(args.model, current_shape, DTYPES[args.dtype])
                 with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
                     current_expected = model(example)
-                current_input_path = args.output_dir / f"input-{batch_size}.bin"
-                _write_input(example, current_input_path, args.dynamic_batch_max)
+                current_input_path = args.output_dir / f"input-{label}.bin"
+                _write_input(example, current_input_path, max_shape)
                 _write_tensor(
-                    current_expected, args.output_dir / f"expected-{batch_size}.bin"
+                    current_expected, args.output_dir / f"expected-{label}.bin"
                 )
-            current_shape = (batch_size, *input_shape[1:])
-            output_prefix = args.output_dir / f"runner-output-{batch_size}"
+            output_prefix = args.output_dir / f"runner-output-{label}"
             completed = _run_runner(
                 args.runner,
                 pte_path,
                 ptd_path,
                 current_input_path,
                 output_prefix,
-                current_shape if args.dynamic_batch_max is not None else None,
+                current_shape if max_shape is not None else None,
             )
             output_path = Path(f"{output_prefix}-0.bin")
             actual = torch.frombuffer(
@@ -613,17 +681,21 @@ def main() -> None:
                 actual_token_ids = actual.reshape(current_expected.shape).argmax(dim=-1)
                 if not torch.equal(actual_token_ids, expected_token_ids):
                     raise AssertionError(
-                        f"predicted token IDs differ for batch {batch_size}: "
+                        f"predicted token IDs differ for batch {current_shape[0]}: "
                         f"expected {expected_token_ids.tolist()}, "
                         f"actual {actual_token_ids.tolist()}"
                     )
-                if batch_size == args.batch_size:
+                if current_shape == input_shape:
                     result["predicted_token_ids"] = actual_token_ids.tolist()
             if args.dynamic_batch_max is not None:
                 result.setdefault("dynamic_batch_results", []).append(
-                    {"batch_size": batch_size, "max_error": max_error}
+                    {"batch_size": current_shape[0], "max_error": max_error}
                 )
-            if batch_size == args.batch_size:
+            if args.dynamic_spatial_max is not None:
+                result.setdefault("dynamic_spatial_results", []).append(
+                    {"shape": list(current_shape), "max_error": max_error}
+                )
+            if current_shape == input_shape:
                 result["output"] = str(output_path)
                 result["max_error"] = max_error
                 result["runner_stdout"] = completed.stdout

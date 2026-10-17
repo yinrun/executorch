@@ -23,6 +23,7 @@ from examples.musa.aoti_kv_cache_acceptance import (
     RollingCacheDecoder,
 )
 from examples.musa.aoti_model_acceptance import (
+    BilinearUNet,
     DilatedDecoder,
     SimpleAudioDecoder,
     SimpleVideoDecoder,
@@ -350,6 +351,23 @@ class TestMusaAoti(unittest.TestCase):
 
                 self.assertGreater(len(result.processed_bytes), 0)
                 self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_bilinear_unet_dynamic_spatial_aoti_compile(self) -> None:
+        module = BilinearUNet().eval().to(device="musa", dtype=torch.bfloat16)
+        exported = export(
+            module,
+            (torch.randn(1, 3, 32, 40, device="musa", dtype=torch.bfloat16),),
+            dynamic_shapes=(
+                {2: Dim("height", min=24, max=48), 3: Dim("width", min=24, max=48)},
+            ),
+        )
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
     def test_transformer_encoder_aoti_compile(self) -> None:
         module = (
