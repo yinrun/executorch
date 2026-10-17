@@ -16,6 +16,7 @@ from executorch.backends.cuda.cuda_weight_collector import (
 from executorch.backends.musa import MusaBackend
 from executorch.backends.musa.musa_backend import (
     _decompose_scaled_dot_product_attention,
+    _normalize_musa_assert_devices,
 )
 from examples.musa.aoti_kv_cache_acceptance import (
     GrowingCacheDecoder,
@@ -35,6 +36,35 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_normalizes_unindexed_musa_device_assertion(self) -> None:
+        graph = torch.fx.Graph()
+        tensor = graph.placeholder("tensor")
+        tensor.meta["val"] = torch.empty(1, device="musa")
+        assertion = graph.call_function(
+            torch.ops.aten._assert_tensor_metadata.default,
+            args=(tensor,),
+            kwargs={"device": "musa"},
+        )
+        graph.output(tensor)
+        module = torch.fx.GraphModule(nn.Module(), graph)
+
+        _normalize_musa_assert_devices(module)
+
+        self.assertEqual(assertion.kwargs["device"], torch.device("musa:0"))
+
+    def test_nested_input_aoti_compile(self) -> None:
+        class NestedInput(nn.Module):
+            def forward(self, tensor: torch.Tensor, options: dict) -> torch.Tensor:
+                return tensor + options["other"]
+
+        example = torch.randn(1, 8, device="musa")
+        exported = export(NestedInput().eval(), (example, {"other": example}))
+        result = MusaBackend.preprocess(
+            exported, [MusaBackend.generate_method_name_compile_spec("forward")]
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+
     def test_prompt_prefill_aoti_compile(self) -> None:
         decoder = GrowingCacheDecoder().eval().to("musa")
         module = PromptPrefill(decoder).eval()

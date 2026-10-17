@@ -268,6 +268,13 @@ class AotiBackend(ABC):
         for node in device_edge_program.graph.nodes:
             if node.op == "placeholder" and node.name in user_input_names:
                 user_input_placeholders.append(node.meta["val"])
+        input_spec = getattr(edge_program_module, "_in_spec", None)
+        if input_spec is None:
+            compile_args, compile_kwargs = tuple(user_input_placeholders), {}
+        else:
+            compile_args, compile_kwargs = torch.utils._pytree.tree_unflatten(
+                user_input_placeholders, input_spec
+            )
 
         # Track missing fallback kernels
         missing_fallback_kernels: Set[str] = set()
@@ -277,7 +284,10 @@ class AotiBackend(ABC):
             missing_fallback_kernels
         ), torch.no_grad(), cls.get_extra_aoti_compile_context_manager(compile_specs):
             paths = torch._inductor.aot_compile(
-                edge_program_module, tuple(user_input_placeholders), options=options
+                edge_program_module,
+                compile_args,
+                kwargs=compile_kwargs,
+                options=options,
             )
 
             paths = cls.materialize_weights_blob(paths, compile_specs)

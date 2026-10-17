@@ -32,6 +32,28 @@ def _aoti_device_type_for_weight(tensor: torch.Tensor) -> int:
     raise RuntimeError(f"Unsupported AOTI constant device for MUSA export: {tensor.device}")
 
 
+def _normalize_musa_assert_devices(graph_module: torch.fx.GraphModule) -> None:
+    for node in graph_module.graph.nodes:
+        if (
+            node.op != "call_function"
+            or node.target != torch.ops.aten._assert_tensor_metadata.default
+        ):
+            continue
+        expected_device = node.kwargs.get("device")
+        if isinstance(expected_device, str):
+            expected_device = torch.device(expected_device)
+        tensor_meta = node.args[0].meta.get("val")
+        if (
+            isinstance(expected_device, torch.device)
+            and expected_device.type == "musa"
+            and expected_device.index is None
+            and isinstance(tensor_meta, torch.Tensor)
+            and tensor_meta.device.type == "musa"
+            and tensor_meta.device.index is not None
+        ):
+            node.kwargs = {**node.kwargs, "device": tensor_meta.device}
+
+
 def _decompose_scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -105,7 +127,7 @@ class MusaBackend(AotiBackend, BackendDetails):
 
     @classmethod
     def get_custom_passes(cls, compile_specs: List[CompileSpec]) -> List[typing.Any]:
-        return []
+        return [_normalize_musa_assert_devices]
 
     @classmethod
     def save_data_externally(cls) -> bool:

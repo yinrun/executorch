@@ -241,6 +241,30 @@ useful language generation nor performance for a production model.
 On M1000, FP32/FP16/BF16 all predicted token ID `364`; maximum absolute logit
 errors against MUSA eager were 4.77e-7, 1.46e-3, and 1.17e-2, respectively.
 
+`aoti_llama_kv_acceptance.py` exports the same five-layer Llama demo with its
+upstream in-module KV cache enabled and runs five single-token steps through
+one `executor_runner --server_mode` process and one PTE/PTD. Positions 0–2
+prefill `[11, 7, 22]` token-by-token, and positions 3–4 decode `[5, 17]`.
+Every 512-logit output and predicted token ID is checked against a separately
+advanced MUSA eager model:
+
+```bash
+python examples/musa/aoti_llama_kv_acceptance.py \
+  --output-dir /tmp/musa-llama-kv --runner /path/to/executor_runner
+```
+
+For this export the KV buffers live inside the AOTI delegate; restarting the
+runner resets the cache, so all steps must execute in one process. The export
+uses a fixed one-token input and an eight-position context bound, rather than
+variable-length prompt prefill or externally serialized caches. On M1000,
+FP32/FP16/BF16 passed all five steps with maximum logit errors 6.56e-7,
+1.50e-3, and 1.56e-2, respectively, and predicted IDs
+`[33, 351, 364, 76, 464]`. This still uses **random**, not pretrained, weights.
+The upstream model passes its position tensor inside an `attn_options` dict;
+the shared AOTI compiler now reconstructs that input tree. Its mutable cache
+graph also requires MUSA's device assertion to use the actual indexed device
+instead of the unindexed device string produced by PyTorch's device move pass.
+
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
 meet the default tolerance: the maximum difference is 0.140625 and 121/1000
