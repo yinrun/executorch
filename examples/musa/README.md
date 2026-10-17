@@ -17,8 +17,16 @@ Inputs and weights default to FP32. `--dtype fp16` or `--dtype bf16` exercises
 the same export and runner path in lower precision. The default absolute and
 relative comparison tolerances are 1e-4 (FP32), 1e-2 (FP16), and 4e-2 (BF16);
 override them with `--atol` and `--rtol` if needed. `--input-size 224` exports
-ResNet or MobileNet with a 224x224 input instead of its default size. Each shape and
-dtype combination requires its own export; dynamic shapes are not covered.
+ResNet or MobileNet with a 224x224 input instead of its default size. Fixed
+spatial shapes and dtypes require separate exports.
+`--batch-size 2` exports and checks a separate fixed-shape, two-input batch
+(the default batch size is one).
+
+`--batch-size 2 --dynamic-batch-max 4` instead exports one PTE with a bounded
+dynamic batch dimension and checks batch sizes 2, 1, and 4 against MUSA eager.
+The script pads raw input files to the bound and passes the actual shape via
+`executor_runner --input_shapes`; that runner otherwise interprets the raw
+buffer as a bound-sized tensor. Other dynamic dimensions are not covered.
 For torchvision models, `--weights /path/to/state_dict.pth` loads a
 local PyTorch state dictionary (for example, a cached pretrained checkpoint)
 before exporting. Without it, the model uses random weights; the script never
@@ -63,6 +71,16 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --model resnet18 --input-size 224 \
   --output-dir /tmp/executorch-musa-acceptance/resnet18_224 \
   --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model mobilenet_v2 --batch-size 2 --input-size 64 \
+  --output-dir /tmp/executorch-musa-acceptance/mobilenet_v2_batch2 \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model simple_cnn --batch-size 2 --dynamic-batch-max 3 \
+  --output-dir /tmp/executorch-musa-acceptance/simple_cnn_dynamic \
+  --runner "$RUNNER"
 ```
 
 To validate official pretrained ResNet18 weights, download
@@ -86,9 +104,16 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | ResNet18 | 1x3x64x64 | BF16 | Official pretrained | 0 |
 | MobileNetV2 | 1x3x224x224 | FP32 | Official pretrained | 2.03e-6 |
 | MobileNetV2 | 1x3x64x64 | FP16 | Official pretrained | 1.37e-2 (`--atol 0.02`) |
+| ResNet18 | 2x3x64x64 | FP32 | Official pretrained | 3.34e-5 |
+| MobileNetV2 | 2x3x64x64 | FP32 | Official pretrained | 1.76e-5 |
 
-These are single-input correctness checks, not shape-generalization or
-throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
+With a single dynamic-batch PTE for each model, batches 2/1/4 of FP32 MLP
+passed (maximum error 4.47e-8). Batches 2/1/3 also passed for FP32 simple CNN
+(3.58e-7), pretrained ResNet18 (3.53e-5), and pretrained MobileNetV2
+(1.76e-5); both pretrained models used 64x64 inputs.
+
+These are random-input correctness checks, not arbitrary shape-generalization
+or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
 meet the default tolerance: the maximum difference is 0.140625 and 121/1000
 logits differ beyond `--atol 0.02 --rtol 0.04`. Do not count this configuration
 as verified until the precision difference is understood. In isolated prefix

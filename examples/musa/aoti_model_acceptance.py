@@ -27,7 +27,7 @@ from typing import Iterator
 
 import torch
 from torch import nn
-from torch.export import export
+from torch.export import Dim, export
 
 from executorch.backends.musa import MusaBackend, MusaPartitioner
 from executorch.exir import to_edge_transform_and_lower
@@ -191,6 +191,16 @@ def _write_tensor(tensor: torch.Tensor, path: Path) -> None:
     path.write_bytes(raw.tobytes())
 
 
+def _write_input(tensor: torch.Tensor, path: Path, max_batch: int | None) -> None:
+    _write_tensor(tensor, path)
+    if max_batch is not None:
+        padding = (
+            (max_batch - tensor.shape[0]) * tensor[0].numel() * tensor.element_size()
+        )
+        with path.open("ab") as input_file:
+            input_file.write(bytes(padding))
+
+
 def _runner_environment() -> dict[str, str]:
     import torch_musa
 
@@ -228,6 +238,7 @@ def _run_runner(
     ptd_path: Path,
     input_path: Path,
     output_prefix: Path,
+    input_shape: tuple[int, ...] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         str(runner),
@@ -237,6 +248,8 @@ def _run_runner(
         f"--output_file={output_prefix}",
         "--print_output=summary",
     ]
+    if input_shape is not None:
+        command.append(f"--input_shapes={'x'.join(map(str, input_shape))}")
     try:
         return subprocess.run(
             command,
@@ -259,17 +272,26 @@ def export_model(
     dtype: torch.dtype,
     input_size: int | None,
     weights_path: Path | None,
-) -> tuple[Path, Path, Path, torch.Tensor]:
+    batch_size: int = 1,
+    dynamic_batch_max: int | None = None,
+) -> tuple[Path, Path, Path, torch.Tensor, nn.Module, tuple[int, ...]]:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
 
     model_type, input_shape = MODEL_FACTORIES[model_name]
+    if batch_size < 1:
+        raise ValueError("--batch-size must be positive")
+    if dynamic_batch_max is not None and (
+        batch_size < 2 or dynamic_batch_max < batch_size
+    ):
+        raise ValueError("--dynamic-batch-max requires 2 <= batch-size <= max")
+    input_shape = (batch_size, *input_shape[1:])
     if input_size is not None:
         if model_name not in ("resnet18", "narrow_resnet18", "mobilenet_v2"):
             raise ValueError("--input-size is only supported for CNN models")
         if input_size < 32:
             raise ValueError("--input-size must be at least 32")
-        input_shape = (1, 3, input_size, input_size)
+        input_shape = (batch_size, 3, input_size, input_size)
     if weights_path is not None and model_name not in ("resnet18", "mobilenet_v2"):
         raise ValueError("--weights is only supported for torchvision models")
     torch.manual_seed(0)
@@ -282,7 +304,12 @@ def export_model(
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
         expected = model(example)
 
-    exported = export(model, (example,))
+    dynamic_shapes = (
+        ({0: Dim("batch", min=1, max=dynamic_batch_max)},)
+        if dynamic_batch_max is not None
+        else None
+    )
+    exported = export(model, (example,), dynamic_shapes=dynamic_shapes)
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     with _serialization_schema():
         manager = to_edge_transform_and_lower(
@@ -294,12 +321,12 @@ def export_model(
 
     input_path = output_dir / "input-0.bin"
     expected_path = output_dir / "expected-0.bin"
-    _write_tensor(example, input_path)
+    _write_input(example, input_path, dynamic_batch_max)
     _write_tensor(expected, expected_path)
     ptd_path = output_dir / "aoti_musa_blob.ptd"
     if not ptd_path.exists():
         raise RuntimeError(f"AOTI external data was not created: {ptd_path}")
-    return pte_path, ptd_path, input_path, expected
+    return pte_path, ptd_path, input_path, expected, model, input_shape
 
 
 def main() -> None:
@@ -309,17 +336,21 @@ def main() -> None:
     parser.add_argument("--runner", type=Path)
     parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp32")
     parser.add_argument("--input-size", type=int)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--dynamic-batch-max", type=int)
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--atol", type=float)
     parser.add_argument("--rtol", type=float)
     args = parser.parse_args()
 
-    pte_path, ptd_path, input_path, expected = export_model(
+    pte_path, ptd_path, input_path, expected, model, input_shape = export_model(
         args.model,
         args.output_dir,
         DTYPES[args.dtype],
         args.input_size,
         args.weights,
+        args.batch_size,
+        args.dynamic_batch_max,
     )
     atol = args.atol if args.atol is not None else TOLERANCES[args.dtype]
     rtol = args.rtol if args.rtol is not None else TOLERANCES[args.dtype]
@@ -327,6 +358,8 @@ def main() -> None:
         "model": args.model,
         "dtype": args.dtype,
         "input_size": args.input_size,
+        "batch_size": args.batch_size,
+        "dynamic_batch_max": args.dynamic_batch_max,
         "weights": str(args.weights) if args.weights is not None else None,
         "atol": atol,
         "rtol": rtol,
@@ -338,32 +371,55 @@ def main() -> None:
     }
 
     if args.runner is not None:
-        output_prefix = args.output_dir / "runner-output"
-        completed = _run_runner(
-            args.runner,
-            pte_path,
-            ptd_path,
-            input_path,
-            output_prefix,
-        )
-        output_path = Path(f"{output_prefix}-0.bin")
-        actual = torch.frombuffer(
-            bytearray(output_path.read_bytes()), dtype=DTYPES[args.dtype]
-        )
-        expected_flat = expected.detach().cpu().flatten()
-        torch.testing.assert_close(
-            actual,
-            expected_flat,
-            atol=atol,
-            rtol=rtol,
-        )
         result["runner"] = str(args.runner)
-        result["output"] = str(output_path)
-        result["max_error"] = float(
-            (actual.float() - expected_flat.float()).abs().max()
+        batches = (
+            dict.fromkeys((args.batch_size, 1, args.dynamic_batch_max))
+            if args.dynamic_batch_max is not None
+            else (args.batch_size,)
         )
-        result["runner_stdout"] = completed.stdout
-        result["runner_stderr"] = completed.stderr
+        for batch_size in batches:
+            if batch_size == args.batch_size:
+                current_input_path = input_path
+                current_expected = expected
+            else:
+                example = torch.randn(
+                    (batch_size, *input_shape[1:]),
+                    device="musa",
+                    dtype=DTYPES[args.dtype],
+                )
+                with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
+                    current_expected = model(example)
+                current_input_path = args.output_dir / f"input-{batch_size}.bin"
+                _write_input(example, current_input_path, args.dynamic_batch_max)
+                _write_tensor(
+                    current_expected, args.output_dir / f"expected-{batch_size}.bin"
+                )
+            current_shape = (batch_size, *input_shape[1:])
+            output_prefix = args.output_dir / f"runner-output-{batch_size}"
+            completed = _run_runner(
+                args.runner,
+                pte_path,
+                ptd_path,
+                current_input_path,
+                output_prefix,
+                current_shape if args.dynamic_batch_max is not None else None,
+            )
+            output_path = Path(f"{output_prefix}-0.bin")
+            actual = torch.frombuffer(
+                bytearray(output_path.read_bytes()), dtype=DTYPES[args.dtype]
+            )
+            expected_flat = current_expected.detach().cpu().flatten()
+            torch.testing.assert_close(actual, expected_flat, atol=atol, rtol=rtol)
+            max_error = float((actual.float() - expected_flat.float()).abs().max())
+            if args.dynamic_batch_max is not None:
+                result.setdefault("dynamic_batch_results", []).append(
+                    {"batch_size": batch_size, "max_error": max_error}
+                )
+            if batch_size == args.batch_size:
+                result["output"] = str(output_path)
+                result["max_error"] = max_error
+                result["runner_stdout"] = completed.stdout
+                result["runner_stderr"] = completed.stderr
 
     print(json.dumps(result, indent=2, sort_keys=True))
 
