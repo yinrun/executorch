@@ -402,9 +402,10 @@ def _torchvision_vit_b_16() -> nn.Module:
 
 
 class VitLayerTokens(nn.Module):
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(self, model: nn.Module, attention_stages: bool = False) -> None:
         super().__init__()
         self.model = model
+        self.attention_stages = attention_stages
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         patches = self.model._process_input(image)
@@ -417,7 +418,16 @@ class VitLayerTokens(nn.Module):
         )
         observed = [hidden[:, 0]]
         for layer in self.model.encoder.layers:
-            hidden = layer(hidden)
+            if self.attention_stages:
+                normalized = layer.ln_1(hidden)
+                attention, _ = layer.self_attention(
+                    normalized, normalized, normalized, need_weights=False
+                )
+                residual = layer.dropout(attention) + hidden
+                observed.append(residual[:, 0])
+                hidden = residual + layer.mlp(layer.ln_2(residual))
+            else:
+                hidden = layer(hidden)
             observed.append(hidden[:, 0])
         return torch.stack(observed, dim=1)
 
@@ -583,6 +593,7 @@ def export_model(
     dynamic_spatial_max: int | None = None,
     vit_blocks: int | None = None,
     vit_layer_tokens: bool = False,
+    vit_attention_stages: bool = False,
 ) -> tuple[Path, Path, Path, torch.Tensor, nn.Module, tuple[int, ...]]:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
@@ -637,6 +648,8 @@ def export_model(
         raise ValueError("--vit-blocks requires vit_b_16 and a value from 0 to 12")
     if vit_layer_tokens and model_name != "vit_b_16":
         raise ValueError("--vit-layer-tokens requires vit_b_16")
+    if vit_attention_stages and not vit_layer_tokens:
+        raise ValueError("--vit-attention-stages requires --vit-layer-tokens")
     torch.manual_seed(0)
     model = model_type()
     if weights_path is not None:
@@ -648,7 +661,7 @@ def export_model(
     if vit_blocks is not None:
         model.encoder.layers = model.encoder.layers[:vit_blocks]
     if vit_layer_tokens:
-        model = VitLayerTokens(model)
+        model = VitLayerTokens(model, vit_attention_stages)
     model = model.eval().to(device="musa", dtype=dtype)
     example = _make_input(model_name, input_shape, dtype)
     original_input = example.detach().cpu().clone()
@@ -713,6 +726,7 @@ def main() -> None:
         "--vit-blocks", type=int, help="run only the first 0-12 ViT encoder blocks"
     )
     parser.add_argument("--vit-layer-tokens", action="store_true")
+    parser.add_argument("--vit-attention-stages", action="store_true")
     parser.add_argument("--atol", type=float)
     parser.add_argument("--rtol", type=float)
     args = parser.parse_args()
@@ -730,6 +744,7 @@ def main() -> None:
         args.dynamic_spatial_max,
         args.vit_blocks,
         args.vit_layer_tokens,
+        args.vit_attention_stages,
     )
     atol = args.atol if args.atol is not None else TOLERANCES[args.dtype]
     rtol = args.rtol if args.rtol is not None else TOLERANCES[args.dtype]
@@ -744,6 +759,7 @@ def main() -> None:
         "weights": str(args.weights) if args.weights is not None else None,
         "vit_blocks": args.vit_blocks,
         "vit_layer_tokens": args.vit_layer_tokens,
+        "vit_attention_stages": args.vit_attention_stages,
         "atol": atol,
         "rtol": rtol,
         "pte": str(pte_path),

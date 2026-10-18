@@ -494,6 +494,24 @@ class TestMusaAoti(unittest.TestCase):
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
+    def test_vit_attention_stages_dynamic_batch_aoti_compile(self) -> None:
+        model = _torchvision_vit_b_16()
+        model.encoder.layers = model.encoder.layers[:1]
+        module = VitLayerTokens(model, attention_stages=True).eval().to("musa")
+        exported = export_with_musa_sdpa_decomposition(
+            module,
+            (torch.randn(2, 3, 224, 224, device="musa"),),
+            dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+        )
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertEqual(len(exported.range_constraints), 1)
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_transformer_encoder_aoti_compile(self) -> None:
         module = (
             nn.TransformerEncoderLayer(

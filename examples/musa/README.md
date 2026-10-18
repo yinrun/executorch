@@ -217,7 +217,7 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
   --model vit_b_16 --dtype fp16 --batch-size 2 --dynamic-batch-max 3 \
-  --vit-layer-tokens --runner-repeats 5 \
+  --vit-layer-tokens --vit-attention-stages --runner-repeats 5 \
   --weights /path/to/vit_b_16-c867db91.pth \
   --output-dir /tmp/executorch-musa-acceptance/vit_b_16_layer_tokens \
   --runner "$RUNNER"
@@ -371,6 +371,12 @@ encoder after loading weights to help reproduce the issue. The
 stage 0 is the class token after the positional embedding and stage `j + 1`
 is the class token after encoder block `j`. On failure, the script reports
 per-batch NaN counts at each stage without classifying them as image labels.
+`--vit-attention-stages` adds a stage after each attention residual:
+stage `2*j + 1` follows attention in block `j`, while stage `2*j + 2`
+follows its MLP. In eight runs of a 12-block FP16 diagnostic PTE, the first
+class-token NaNs in both batches appeared at odd-numbered stages, though the
+block varied across runs. This implicates the attention half of the block
+without proving which internal tensor first became invalid.
 For a full-depth FP16 PTE in layer-token mode, five replays of the same
 batch-2 input first produced NaNs at stages [none, 5], [4, 4], [6, 6],
 [none, none], and [4, 2] for its two batches. Stage 0 and stage 1 stayed
