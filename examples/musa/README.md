@@ -1,6 +1,6 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for twenty-one models:
+`aoti_model_acceptance.py` validates the complete MUSA path for twenty-two models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
@@ -20,6 +20,7 @@
 - `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input;
 - `mobilenet_v2`: torchvision MobileNetV2 with depthwise convolutions and a 64x64 input.
 - `efficientnet_b0`: torchvision EfficientNet-B0 with squeeze-and-excitation, SiLU, and depthwise convolutions;
+- `vit_b_16`: torchvision ViT-B/16 with twelve Transformer blocks, multihead attention, and LayerNorm;
 - `deeplabv3_mobilenet_v3_large`: torchvision DeepLabV3 segmentation with a MobileNetV3 backbone and an output of 21-class pixel logits.
 
 The script writes the PTE, external AOTI data, raw input, expected output, and
@@ -35,8 +36,8 @@ the same export and runner path in lower precision. The default absolute and
 relative comparison tolerances are 1e-4 (FP32), 1e-2 (FP16), and 4e-2 (BF16);
 token models always accept raw int64 input IDs and `--dtype` selects the
 weights and output dtype. For `token_decoder`, the script also checks exact
-argmax token IDs against MUSA eager. For EfficientNet-B0 it checks predicted
-class IDs, and for DeepLabV3 it checks exact per-pixel predicted labels.
+argmax token IDs against MUSA eager. For EfficientNet-B0 and ViT-B/16 it checks
+predicted class IDs, and for DeepLabV3 it checks exact per-pixel predicted labels.
 Override the tolerances with `--atol` and
 `--rtol` if needed. `--input-size 224` exports a supported torchvision
 image model with a 224x224 input instead of its default size. Except
@@ -69,6 +70,11 @@ The MUSA backend disables TorchInductor's layout optimization so Conv1d/2d/3d
 fallback outputs and generated kernels agree on contiguous NCHW layout. The
 eager reference disables muDNN TF32 to match the fallback's FP32 FMA math.
 The native fallback supports non-transposed and transposed Conv1d/2d/3d.
+The MUSA BMM fallback supports contiguous output and row-major input matrices
+even when batch-to-batch strides include padding. It also accepts contiguous
+or transposed right-hand matrices with safe batch padding. This covers the
+non-contiguous batch view of ViT attention without copying the matrices;
+arbitrary per-row strides are not yet supported.
 For transposed convolution, output padding must be smaller than either its
 stride or its dilation, as required by PyTorch. Transposed Conv1d uses muDNN's
 GEMM backward-data algorithm; its implicit-GEMM algorithm rejects the 1D
@@ -91,7 +97,7 @@ these cases to zeros or flash output would change masking semantics.
 
 - MUSA and `torch_musa` are available to the selected Python environment;
 - the MUSA-compatible Triton package required by TorchInductor is installed;
-- `torchvision` is available for the standard ResNet18, MobileNetV2, EfficientNet-B0, and DeepLabV3 models;
+- `torchvision` is available for the standard ResNet18, MobileNetV2, EfficientNet-B0, ViT-B/16, and DeepLabV3 models;
 - `flatc` is available on `PATH` for PTE/PTD serialization;
 - an ExecuTorch `executor_runner` built with `EXECUTORCH_BUILD_MUSA=ON`.
 
@@ -156,6 +162,12 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --dynamic-spatial-max 80 \
   --weights /path/to/efficientnet_b0_rwightman-7f5810bc.pth \
   --output-dir /tmp/executorch-musa-acceptance/efficientnet_b0_batch_spatial \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model vit_b_16 --dtype fp16 \
+  --weights /path/to/vit_b_16-c867db91.pth \
+  --output-dir /tmp/executorch-musa-acceptance/vit_b_16_pretrained \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -239,6 +251,11 @@ MobileNetV2 IMAGENET1K_V2 weights are available at
 EfficientNet-B0 IMAGENET1K_V1 weights are available at
 `https://download.pytorch.org/models/efficientnet_b0_rwightman-7f5810bc.pth`
 (SHA-256 `7f5810bc96def8f7552d5b7e68d53c4786f81167d28291b21c0d90e1fca14934`).
+ViT-B/16 IMAGENET1K_V1 weights are available at
+`https://download.pytorch.org/models/vit_b_16-c867db91.pth`
+(SHA-256 `c867db91d3e12c6cbadabb610d73c24a546bf82d8c03a9fea34f43a712ddb0e9`).
+ViT-B/16 requires 224x224 inputs. Its untrained classifier produces all-zero
+logits, so only the pretrained checkpoint provides a meaningful output check.
 DeepLabV3 MobileNetV3 COCO-with-VOC-labels weights are available at
 `https://download.pytorch.org/models/deeplabv3_mobilenet_v3_large-fc3c493d.pth`
 (SHA-256 `fc3c493d68e89cc31ef488c803d5d7dd2f3190fb570598faa49fef69be8e5e70`).
@@ -272,6 +289,7 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | MobileNetV2 | 1x3x64x64 | FP16 | Official pretrained | 1.37e-2 (`--atol 0.02`) |
 | EfficientNet-B0 | 1x3x64x64 | FP32 | Official pretrained | 7.39e-6 (class 644) |
 | EfficientNet-B0 | 1x3x224x224 | FP32 / FP16 / BF16 | Official pretrained | 1.79e-6 / 4.09e-3 / 2.83e-2 (class 314) |
+| ViT-B/16 | 1x3x224x224 | FP32 / FP16 / BF16 | Official pretrained | 3.81e-6 / 1.95e-3 / 3.13e-2 (class 21) |
 | DeepLabV3 MobileNetV3 | 1x3x64x64 | FP32 | Official pretrained | 9.16e-5 (0/4096 differing pixel labels) |
 | DeepLabV3 MobileNetV3 | 2x3x64x64 | FP32 | Official pretrained | 1.18e-4 (0/8192 differing pixel labels) |
 | ResNet18 | 2x3x64x64 | FP32 | Official pretrained | 3.34e-5 |

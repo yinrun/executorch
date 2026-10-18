@@ -225,27 +225,38 @@ void run_mm(ScalarType dtype) {
   delete mat2;
 }
 
-void run_bmm(ScalarType dtype, bool transposed_mat2) {
+void run_bmm(
+    ScalarType dtype,
+    bool transposed_mat2,
+    bool padded_mat1 = false,
+    bool padded_mat2 = false) {
   const std::vector<int64_t> output_sizes = {2, 2, 2};
   const std::vector<int64_t> mat1_sizes = {2, 2, 3};
   const std::vector<int64_t> mat2_sizes = {2, 3, 2};
   SlimTensor* output = empty_tensor(dtype, output_sizes, {4, 2, 1});
-  SlimTensor* mat1 = empty_tensor(dtype, mat1_sizes, {6, 3, 1});
+  SlimTensor* mat1 =
+      empty_tensor(dtype, mat1_sizes, {padded_mat1 ? 7 : 6, 3, 1});
   SlimTensor* mat2 = empty_tensor(
       dtype,
       mat2_sizes,
-      transposed_mat2 ? std::vector<int64_t>{6, 1, 3}
-                      : std::vector<int64_t>{6, 2, 1});
+      transposed_mat2
+          ? std::vector<int64_t>{padded_mat2 ? 7 : 6, 1, 3}
+          : std::vector<int64_t>{padded_mat2 ? 7 : 6, 2, 1});
   copy_to_device(
       mat1,
-      encode_values({1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 7}, dtype));
+      encode_values(
+          padded_mat1 ? std::vector<float>{1, 2, 3, 4, 5, 6, 0, 2, 3, 4, 5, 6, 7}
+                      : std::vector<float>{1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 7},
+          dtype));
+  std::vector<float> mat2_values = transposed_mat2
+      ? std::vector<float>{7, 9, 11, 8, 10, 12, 1, 3, 5, 2, 4, 6}
+      : std::vector<float>{7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6};
+  if (padded_mat2) {
+    mat2_values.insert(mat2_values.begin() + 6, 0);
+  }
   copy_to_device(
       mat2,
-      encode_values(
-          transposed_mat2
-              ? std::vector<float>{7, 9, 11, 8, 10, 12, 1, 3, 5, 2, 4, 6}
-              : std::vector<float>{7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6},
-          dtype));
+      encode_values(mat2_values, dtype));
 
   EXPECT_EQ(aoti_torch_musa_bmm_out(output, mat1, mat2), Error::Ok);
   EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -275,7 +286,22 @@ TEST_F(MusaAddmmTest, BmmDtypes) {
   for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_bmm(dtype, false);
     run_bmm(dtype, true);
+    run_bmm(dtype, false, true);
+    run_bmm(dtype, false, false, true);
+    run_bmm(dtype, true, true, true);
   }
+}
+
+TEST_F(MusaAddmmTest, BmmRejectsOverlappingBatches) {
+  SlimTensor* output = empty_tensor(ScalarType::Float, {2, 2, 2}, {4, 2, 1});
+  SlimTensor* mat1 = empty_tensor(ScalarType::Float, {2, 2, 3}, {5, 3, 1});
+  SlimTensor* mat2 = empty_tensor(ScalarType::Float, {2, 3, 2}, {6, 2, 1});
+
+  EXPECT_EQ(aoti_torch_musa_bmm_out(output, mat1, mat2), Error::NotSupported);
+
+  delete output;
+  delete mat1;
+  delete mat2;
 }
 
 }

@@ -13,6 +13,7 @@ channels; ``resnet18`` is the standard torchvision model with optional weights.
 ``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6;
 ``deeplabv3_mobilenet_v3_large`` covers a pretrained segmentation network.
 ``efficientnet_b0`` covers squeeze-and-excitation and SiLU blocks.
+``vit_b_16`` covers full-depth multihead attention and LayerNorm.
 """
 
 from __future__ import annotations
@@ -374,6 +375,12 @@ def _torchvision_efficientnet_b0() -> nn.Module:
     return efficientnet_b0(weights=None)
 
 
+def _torchvision_vit_b_16() -> nn.Module:
+    from torchvision.models import vit_b_16
+
+    return vit_b_16(weights=None)
+
+
 MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
@@ -396,6 +403,7 @@ MODEL_FACTORIES = {
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
     "efficientnet_b0": (_torchvision_efficientnet_b0, (1, 3, 64, 64)),
+    "vit_b_16": (_torchvision_vit_b_16, (1, 3, 224, 224)),
 }
 TOKEN_MODEL_NAMES = {"embedding_classifier", "token_encoder", "token_decoder"}
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
@@ -575,6 +583,7 @@ def export_model(
         "mobilenet_v2",
         "deeplabv3_mobilenet_v3_large",
         "efficientnet_b0",
+        "vit_b_16",
     ):
         raise ValueError("--weights is only supported for torchvision models")
     torch.manual_seed(0)
@@ -754,12 +763,12 @@ def main() -> None:
                     )
                 if current_shape == input_shape:
                     result["predicted_token_ids"] = actual_token_ids.tolist()
-            if args.model == "efficientnet_b0":
+            if args.model in ("efficientnet_b0", "vit_b_16"):
                 expected_classes = current_expected.argmax(dim=-1).cpu()
                 actual_classes = actual.reshape(current_expected.shape).argmax(dim=-1)
                 if not torch.equal(actual_classes, expected_classes):
                     raise AssertionError(
-                        f"EfficientNet predicted classes differ for batch {current_shape[0]}"
+                        f"{args.model} predicted classes differ for batch {current_shape[0]}"
                     )
                 if current_shape == input_shape:
                     result["predicted_classes"] = actual_classes.tolist()

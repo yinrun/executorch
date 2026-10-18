@@ -263,16 +263,27 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       InvalidArgument,
       "MUSA bmm tensor dimensions are incompatible");
   ET_CHECK_OR_RETURN_ERROR(
-      out->is_contiguous() && mat1->is_contiguous(),
+      fits_mublas_dimension(batch) && fits_mublas_dimension(m) &&
+          fits_mublas_dimension(k) && fits_mublas_dimension(n),
       NotSupported,
-      "MUSA bmm currently supports contiguous output and mat1");
+      "MUSA bmm dimensions exceed mublas limits");
+
+  const auto mat1_strides = mat1->strides();
+  const bool mat1_row_major =
+      mat1_strides[1] == k && mat1_strides[2] == 1 &&
+      (batch <= 1 || mat1_strides[0] >= m * k);
+  ET_CHECK_OR_RETURN_ERROR(
+      out->is_contiguous() && mat1_row_major,
+      NotSupported,
+      "MUSA bmm requires contiguous output and row-major mat1 batches");
 
   const auto mat2_strides = mat2->strides();
   const bool mat2_row_major =
-      mat2->is_contiguous() && mat2_strides[1] == n &&
-      mat2_strides[2] == 1;
+      mat2_strides[1] == n && mat2_strides[2] == 1 &&
+      (batch <= 1 || mat2_strides[0] >= k * n);
   const bool mat2_column_major =
-      mat2_strides[1] == 1 && mat2_strides[2] == k;
+      mat2_strides[1] == 1 && mat2_strides[2] == k &&
+      (batch <= 1 || mat2_strides[0] >= k * n);
   ET_CHECK_OR_RETURN_ERROR(
       mat2_row_major || mat2_column_major,
       NotSupported,
@@ -282,12 +293,6 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
           out->device_index() == mat2->device_index(),
       InvalidArgument,
       "MUSA bmm tensors must use the same device");
-  ET_CHECK_OR_RETURN_ERROR(
-      fits_mublas_dimension(batch) && fits_mublas_dimension(m) &&
-          fits_mublas_dimension(k) && fits_mublas_dimension(n),
-      NotSupported,
-      "MUSA bmm dimensions exceed mublas limits");
-
   auto stream_result = getCurrentCUDAStream(out->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   cudaStream_t stream = stream_result.get();
@@ -335,7 +340,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
   const long long mat2_batch_stride =
       static_cast<long long>(mat2_strides[0]);
   const long long mat1_batch_stride =
-      static_cast<long long>(mat1->strides()[0]);
+      static_cast<long long>(mat1_strides[0]);
   const long long out_batch_stride = static_cast<long long>(out->strides()[0]);
 
   error = check_mublas(
