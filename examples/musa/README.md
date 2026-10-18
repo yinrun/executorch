@@ -697,3 +697,33 @@ not justify accepting the runner's larger BF16 numerical error.
 Without `--runner`, the script only exports the PTE/PTD and writes the eager
 reference files. The runner command automatically adds the MUSA, Torch, and
 Python shared-library directories used by the current environment.
+
+## Latest MUSA AOTI validation (2026-10-18)
+
+The current branch `codex/musa-aoti-poc` includes commit
+`4c2151d066` (`stabilize Musa BF16 addmm paths`). The BF16 small-batch and
+padded-row addmm paths use muBLAS GEMM with explicit bias initialization;
+larger BF16 addmm keeps the muDNN path. A zero-row-stride `[1, 768]` input,
+transposed `[768, 1000]` weight, and padded `[2, 768]` input are covered by
+repeated C++ regressions. The 13-test shim suite passed three complete
+repetitions, and all 31 MUSA AOTI Python export tests passed.
+
+End-to-end FP32 acceptance also passed with generated PTE/PTD and
+`executor_runner`: `simple_cnn` with dynamic batches 2/1/3 (maximum error
+3.58e-7), torchvision `resnet18` at 64x64 (maximum error 3.22e-6), and
+`mobilenet_v2` at 64x64 (maximum error 1.28e-15); each model passed an
+independent runner replay. These are random-weight functional checks, not
+ImageNet accuracy or performance measurements.
+
+The remaining low-precision ViT issue is narrower than a generic Linear
+failure. A large standalone BF16 `[394, 3072] @ [3072, 768]` Linear passed
+five runner replays, and a one-block dynamic pretrained ViT passed all tested
+batches. A three-block run remained finite for batch 2, while four blocks
+showed NaNs for the largest dynamic batch and six blocks showed NaNs even for
+batch 2. Returning the complete final-block hidden tensor showed NaNs before
+final LayerNorm and classifier; changing the final classifier, adding a clone,
+using FP32 final LayerNorm, changing SlimTensor free to synchronous free, or
+routing FP32 BMM through muBLAS did not fix the full graph. Full-depth dynamic
+BF16 ViT therefore remains unsupported; the next task is to isolate the first
+invalid tensor inside the deeper attention/MLP schedule rather than extending
+the classifier shim further.
