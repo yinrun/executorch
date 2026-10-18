@@ -209,6 +209,12 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
+  --model vit_b_16 --dtype fp16 --batch-size 2 --dynamic-batch-max 3 \
+  --vit-blocks 6 --weights /path/to/vit_b_16-c867db91.pth \
+  --output-dir /tmp/executorch-musa-acceptance/vit_b_16_prefix6 \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
   --model deeplabv3_mobilenet_v3_large \
   --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
   --output-dir /tmp/executorch-musa-acceptance/deeplabv3_pretrained \
@@ -344,16 +350,22 @@ for all batches. One dynamic-batch PTE for the FP32 TransformerEncoderLayer
 also passed batches 2/1/3 (maximum error 4.77e-7). Official pretrained
 FP32 ViT-B/16 passed the same batches at 224x224 using one PTE (maximum
 error 7.15e-6); predicted class IDs matched MUSA eager for each input.
-Dynamic ViT-B/16 FP16 and BF16 do **not** pass this check: batch 2 produces
-finite outputs within tolerance, but batch 1 produces 1,000 NaN logits in
-`executor_runner` while MUSA eager stays finite. Replaying batch 1 from the
-same PTE/PTD repeats the failure. Device-wide synchronization during
-diagnostic matrix operations removes the FP16 NaNs, but the exact ordering or
-buffer-lifetime cause has not been established, so no synchronization
-workaround is enabled for production. Disabling Inductor buffer reuse still
-produces NaNs, and omitting mublas handle destruction yielded inconsistent
-results. Synchronizing only the shim's current stream after each GEMM also
-failed three repeat runs; none of these is a validated fix.
+Dynamic ViT-B/16 FP16 and BF16 do **not** pass this check: the original
+full-depth PTE produced finite batch-2 logits but 1,000 NaNs for batch 1,
+while MUSA eager stayed finite. The `--vit-blocks` option truncates the
+encoder after loading weights to help reproduce the issue. For a six-block
+FP16 PTE, one acceptance run passed batches 2/1/3; repeating its identical
+batch-2 input in fresh runner processes produced NaN counts of [0, 1000],
+[1000, 1000], and [0, 1000]. A seven-block PTE first returned 2,000 NaNs
+for batch 2, then three identical replays returned finite logits. These
+results do not establish a specific failing layer or a reliable low-precision
+dynamic path. Device-wide synchronization during some diagnostic matrix
+operations removed FP16 NaNs, but synchronizing before mublas handle
+destruction did not fix the full ViT; changing streams, retaining handles,
+or disabling Inductor buffer reuse did not validate a fix. No synchronization
+workaround is enabled for production. `MUSA_LAUNCH_BLOCKING=1` yielded five
+finite six-block replays but only one of two finite full-depth FP16 replays
+and no finite full-depth BF16 replays; it is not a validated workaround.
 These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,

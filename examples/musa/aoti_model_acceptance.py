@@ -560,6 +560,7 @@ def export_model(
     batch_size: int = 1,
     dynamic_batch_max: int | None = None,
     dynamic_spatial_max: int | None = None,
+    vit_blocks: int | None = None,
 ) -> tuple[Path, Path, Path, torch.Tensor, nn.Module, tuple[int, ...]]:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
@@ -608,6 +609,10 @@ def export_model(
         "vit_b_16",
     ):
         raise ValueError("--weights is only supported for torchvision models")
+    if vit_blocks is not None and (
+        model_name != "vit_b_16" or not 0 <= vit_blocks <= 12
+    ):
+        raise ValueError("--vit-blocks requires vit_b_16 and a value from 0 to 12")
     torch.manual_seed(0)
     model = model_type()
     if weights_path is not None:
@@ -616,6 +621,8 @@ def export_model(
             model.model if isinstance(model, DeepLabV3MobileNet) else model
         )
         checkpoint_model.load_state_dict(state_dict)
+    if vit_blocks is not None:
+        model.encoder.layers = model.encoder.layers[:vit_blocks]
     model = model.eval().to(device="musa", dtype=dtype)
     example = _make_input(model_name, input_shape, dtype)
     original_input = example.detach().cpu().clone()
@@ -675,6 +682,9 @@ def main() -> None:
     parser.add_argument("--dynamic-batch-max", type=int)
     parser.add_argument("--dynamic-spatial-max", type=int)
     parser.add_argument("--weights", type=Path)
+    parser.add_argument(
+        "--vit-blocks", type=int, help="run only the first 0-12 ViT encoder blocks"
+    )
     parser.add_argument("--atol", type=float)
     parser.add_argument("--rtol", type=float)
     args = parser.parse_args()
@@ -688,6 +698,7 @@ def main() -> None:
         args.batch_size,
         args.dynamic_batch_max,
         args.dynamic_spatial_max,
+        args.vit_blocks,
     )
     atol = args.atol if args.atol is not None else TOLERANCES[args.dtype]
     rtol = args.rtol if args.rtol is not None else TOLERANCES[args.dtype]
@@ -700,6 +711,7 @@ def main() -> None:
         "dynamic_batch_max": args.dynamic_batch_max,
         "dynamic_spatial_max": args.dynamic_spatial_max,
         "weights": str(args.weights) if args.weights is not None else None,
+        "vit_blocks": args.vit_blocks,
         "atol": atol,
         "rtol": rtol,
         "pte": str(pte_path),
