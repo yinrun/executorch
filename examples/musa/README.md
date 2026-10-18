@@ -472,7 +472,10 @@ and finite BF16 logits in 6/8 runs (maximum finite-run error 0.03125); the
 other two BF16 runs each contained 1,000 NaN logits. The earlier muBLAS
 results above describe the old shim, not this one. BF16 pretrained ViT is
 still not a reliable supported configuration, and eight successful FP16
-replays do not establish production reliability or throughput.
+replays do not establish production reliability or throughput. The original
+FP32 static PTE also produced finite logits in 3/3 fresh runs with maximum
+absolute error 1.1921e-6 after the shim change. The 13 C++ shim tests and all
+31 MUSA AOTI Python export tests passed with this implementation.
 These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,
