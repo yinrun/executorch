@@ -592,43 +592,10 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       static_cast<long long>(mat1_strides[0]);
   const long long out_batch_stride = static_cast<long long>(out->strides()[0]);
 
-  if (dtype == ScalarType::Float || dtype == ScalarType::Half ||
-      dtype == ScalarType::BFloat16 || mat1_batch_stride == 0 ||
-      mat2_batch_stride == 0) {
-    const size_t element_size = out->itemsize();
-    for (int64_t batch_index = 0; batch_index < batch; ++batch_index) {
-      error = check_mublas(
-          mublasGemmEx(
-              handle,
-              mat2_operation,
-              mat1_operation,
-              static_cast<int>(n),
-              static_cast<int>(m),
-              static_cast<int>(k),
-              alpha_ptr,
-              static_cast<const char*>(mat2->data_ptr()) +
-                  batch_index * mat2_batch_stride * element_size,
-              data_type,
-              mat2_leading_dimension,
-              static_cast<const char*>(mat1->data_ptr()) +
-                  batch_index * mat1_batch_stride * element_size,
-              data_type,
-              mat1_leading_dimension,
-              beta_ptr,
-              static_cast<char*>(out->data_ptr()) +
-                  batch_index * out_batch_stride * element_size,
-              data_type,
-              static_cast<int>(n),
-              compute_type,
-              MUBLAS_GEMM_DEFAULT),
-          "mublasGemmEx");
-      if (error != Error::Ok) {
-        break;
-      }
-    }
-  } else {
+  const size_t element_size = out->itemsize();
+  for (int64_t batch_index = 0; batch_index < batch; ++batch_index) {
     error = check_mublas(
-        mublasGemmStridedBatchedEx(
+        mublasGemmEx(
             handle,
             mat2_operation,
             mat1_operation,
@@ -636,23 +603,25 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
             static_cast<int>(m),
             static_cast<int>(k),
             alpha_ptr,
-            mat2->data_ptr(),
+            static_cast<const char*>(mat2->data_ptr()) +
+                batch_index * mat2_batch_stride * element_size,
             data_type,
             mat2_leading_dimension,
-            mat2_batch_stride,
-            mat1->data_ptr(),
+            static_cast<const char*>(mat1->data_ptr()) +
+                batch_index * mat1_batch_stride * element_size,
             data_type,
             mat1_leading_dimension,
-            mat1_batch_stride,
             beta_ptr,
-            out->data_ptr(),
+            static_cast<char*>(out->data_ptr()) +
+                batch_index * out_batch_stride * element_size,
             data_type,
             static_cast<int>(n),
-            out_batch_stride,
-            static_cast<int>(batch),
             compute_type,
             MUBLAS_GEMM_DEFAULT),
-        "mublasGemmStridedBatchedEx");
+        "mublasGemmEx");
+    if (error != Error::Ok) {
+      break;
+    }
   }
 
   const AOTITorchError destroy_error =
