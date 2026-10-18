@@ -55,6 +55,31 @@ def _normalize_musa_assert_devices(graph_module: torch.fx.GraphModule) -> None:
             node.kwargs = {**node.kwargs, "device": tensor_meta.device}
 
 
+def _make_musa_addmm_inputs_contiguous(
+    graph_module: torch.fx.GraphModule,
+) -> None:
+    graph = graph_module.graph
+    for node in list(graph.nodes):
+        if (
+            node.op != "call_function"
+            or node.target
+            not in (torch.ops.aten.addmm.default, torch.ops.aten.linear.default)
+        ):
+            continue
+        input_index = 0 if node.target == torch.ops.aten.linear.default else 1
+        with graph.inserting_before(node):
+            contiguous_mat1 = graph.call_function(
+                torch.ops.aten.clone.default,
+                (node.args[input_index],),
+                {"memory_format": torch.contiguous_format},
+            )
+        args = list(node.args)
+        args[input_index] = contiguous_mat1
+        node.args = tuple(args)
+    graph.lint()
+    graph_module.recompile()
+
+
 def _decompose_scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -92,6 +117,19 @@ def _decompose_scaled_dot_product_attention(
         else:
             scores = scores + attn_mask
     return torch.matmul(torch.softmax(scores, dim=-1), value).to(output_dtype)
+
+
+def _decompose_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    contiguous_input = input.contiguous()
+    if bias is None:
+        return torch.matmul(contiguous_input, weight.t())
+    if contiguous_input.dim() == 2:
+        return torch.addmm(bias, contiguous_input, weight.t())
+    return torch.matmul(contiguous_input, weight.t()) + bias
 
 
 def export_with_musa_sdpa_decomposition(
@@ -138,12 +176,16 @@ class MusaBackend(AotiBackend, BackendDetails):
         return {
             torch.ops.aten.scaled_dot_product_attention.default: (
                 _decompose_scaled_dot_product_attention
-            )
+            ),
+            torch.ops.aten.linear.default: _decompose_linear,
         }
 
     @classmethod
     def get_custom_passes(cls, compile_specs: List[CompileSpec]) -> List[typing.Any]:
-        return [_normalize_musa_assert_devices]
+        return [
+            _normalize_musa_assert_devices,
+            _make_musa_addmm_inputs_contiguous,
+        ]
 
     @classmethod
     def save_data_externally(cls) -> bool:
