@@ -341,7 +341,8 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | MobileNetV2 | 1x3x64x64 | FP16 | Official pretrained | 1.37e-2 (`--atol 0.02`) |
 | EfficientNet-B0 | 1x3x64x64 | FP32 | Official pretrained | 7.39e-6 (class 644) |
 | EfficientNet-B0 | 1x3x224x224 | FP32 / FP16 / BF16 | Official pretrained | 1.79e-6 / 4.09e-3 / 2.83e-2 (class 314) |
-| ViT-B/16 | 1x3x224x224 | FP32 / FP16 / BF16 | Official pretrained | 3.81e-6 / 1.95e-3 / 3.13e-2 (class 21) |
+| ViT-B/16 | 1x3x224x224 | FP32 | Official pretrained | 3.81e-6 (class 21) |
+| ViT-B/16 | 1x3x224x224 | FP16 / BF16 | Official pretrained, initial single run only | 1.95e-3 / 3.13e-2; repeated execution fails |
 | ViT-B/16 | batch 2/1/3 x3x224x224 | FP32 | Official pretrained, one dynamic PTE | <=7.15e-6 (class IDs match) |
 | DeepLabV3 MobileNetV3 | 1x3x64x64 | FP32 | Official pretrained | 9.16e-5 (0/4096 differing pixel labels) |
 | DeepLabV3 MobileNetV3 | 2x3x64x64 | FP32 | Official pretrained | 1.18e-4 (0/8192 differing pixel labels) |
@@ -388,6 +389,13 @@ or disabling Inductor buffer reuse did not validate a fix. No synchronization
 workaround is enabled for production. `MUSA_LAUNCH_BLOCKING=1` yielded five
 finite six-block replays but only one of two finite full-depth FP16 replays
 and no finite full-depth BF16 replays; it is not a validated workaround.
+The static-batch pretrained FP16/BF16 entries above are not stable either:
+their original PTE/PTD and input produced 1,000 NaN logits in each of eight
+fresh runner processes per dtype, although the recorded first runs and MUSA
+eager outputs were finite. A newly exported static FP16 PTE also returned
+1,000 NaN logits on its first run. The issue is not limited to dynamic batch;
+the original pretrained FP32 static PTE passed five identical replays with
+maximum logit error 3.81e-6.
 These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,
