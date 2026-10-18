@@ -352,6 +352,24 @@ TEST_F(MusaAddmmTest, BmmRejectsOverlappingBatches) {
   delete mat2;
 }
 
+TEST_F(MusaAddmmTest, BmmSingleRowWithZeroRowStride) {
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    SlimTensor* output = empty_tensor(dtype, {2, 1, 2}, {2, 2, 1});
+    SlimTensor* mat1 = empty_tensor(dtype, {2, 1, 3}, {3, 0, 1});
+    SlimTensor* mat2 = empty_tensor(dtype, {2, 3, 2}, {6, 2, 1});
+    copy_to_device(mat1, encode_values({1, 2, 3, 2, 3, 4}, dtype));
+    copy_to_device(mat2, encode_values({7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6}, dtype));
+
+    EXPECT_EQ(aoti_torch_musa_bmm_out(output, mat1, mat2), Error::Ok);
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    expect_values(copy_from_device(output, dtype), {58, 64, 31, 40});
+
+    delete output;
+    delete mat1;
+    delete mat2;
+  }
+}
+
 TEST_F(MusaAddmmTest, AddmmRejectsOverlappingRows) {
   SlimTensor* output = empty_tensor(ScalarType::Float, {2, 2}, {2, 1});
   SlimTensor* bias = empty_tensor(ScalarType::Float, {2}, {1});

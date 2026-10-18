@@ -74,6 +74,9 @@ The MUSA BMM fallback supports contiguous output and contiguous or transposed
 left- and right-hand matrices with safe batch padding. This covers the
 non-contiguous batch view of ViT attention without copying the matrices;
 arbitrary per-row strides are not yet supported.
+Single-row BMM operands may have a zero stride for that singleton row axis,
+as in the fixed-token upstream Llama KV-cache export; the leading batch
+stride still must not overlap distinct matrices.
 The `transposed_bmm` acceptance model exercises a transposed left-hand matrix
 through PTE/PTD export and `executor_runner` output comparison, including
 bounded dynamic batch sizes.

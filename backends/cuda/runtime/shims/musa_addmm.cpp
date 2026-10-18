@@ -286,7 +286,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
 
   const auto mat1_strides = mat1->strides();
   const bool mat1_row_major =
-      mat1_strides[1] == k && mat1_strides[2] == 1 &&
+      (m == 1 || mat1_strides[1] == k) && mat1_strides[2] == 1 &&
       (batch <= 1 || mat1_strides[0] >= m * k);
   const bool mat1_column_major =
       mat1_strides[1] == 1 && mat1_strides[2] == m &&
