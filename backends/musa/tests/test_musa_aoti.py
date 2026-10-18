@@ -490,6 +490,31 @@ class TestMusaAoti(unittest.TestCase):
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
+    def test_dynamic_causal_attention_sequence_export(self) -> None:
+        class DynamicCausalAttention(nn.Module):
+            def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+                query = tensor.reshape(1, tensor.shape[1], 4, 4).transpose(1, 2)
+                output = torch.nn.functional.scaled_dot_product_attention(
+                    query, query, query, is_causal=True
+                )
+                return output.transpose(1, 2).reshape(tensor.shape)
+
+        example = torch.randn(1, 3, 16, device="musa")
+        original_sdpa = torch.nn.functional.scaled_dot_product_attention
+        exported = export_with_musa_sdpa_decomposition(
+            DynamicCausalAttention().eval(),
+            (example,),
+            dynamic_shapes=({1: Dim("sequence", min=1, max=7)},),
+        )
+        self.assertIs(torch.nn.functional.scaled_dot_product_attention, original_sdpa)
+        self.assertEqual(len(exported.range_constraints), 1)
+        self.assertFalse(
+            any(
+                "scaled_dot_product_attention" in str(node.target)
+                for node in exported.graph.nodes
+            )
+        )
+
     def test_causal_gqa_aoti_compile(self) -> None:
         class CausalGqa(nn.Module):
             def forward(

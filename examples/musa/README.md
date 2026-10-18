@@ -329,6 +329,15 @@ for all batches. One dynamic-batch PTE for the FP32 TransformerEncoderLayer
 also passed batches 2/1/3 (maximum error 4.77e-7). Official pretrained
 FP32 ViT-B/16 passed the same batches at 224x224 using one PTE (maximum
 error 7.15e-6); predicted class IDs matched MUSA eager for each input.
+Dynamic ViT-B/16 FP16 and BF16 do **not** pass this check: batch 2 produces
+finite outputs within tolerance, but batch 1 produces 1,000 NaN logits in
+`executor_runner` while MUSA eager stays finite. Replaying batch 1 from the
+same PTE/PTD repeats the failure. Device-wide synchronization during
+diagnostic matrix operations removes the FP16 NaNs, but the exact ordering or
+buffer-lifetime cause has not been established, so no synchronization
+workaround is enabled for production. Disabling Inductor buffer reuse still
+produces NaNs, and omitting mublas handle destruction yielded inconsistent
+results; neither is a validated fix.
 These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,
