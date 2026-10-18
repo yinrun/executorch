@@ -29,6 +29,7 @@ from examples.musa.aoti_model_acceptance import (
     SimpleAudioDecoder,
     SimpleVideoDecoder,
     TinyUNet,
+    TransposedBmm,
     _torchvision_efficientnet_b0,
     _torchvision_vit_b_16,
 )
@@ -46,6 +47,20 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_transposed_bmm_aoti_compile(self) -> None:
+        example = torch.randn(2, 4, 16, device="musa")
+        exported = export(
+            TransposedBmm().eval(),
+            (example,),
+            dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+        )
+        result = MusaBackend.preprocess(
+            exported, [MusaBackend.generate_method_name_compile_spec("forward")]
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_normalizes_unindexed_musa_device_assertion(self) -> None:
         graph = torch.fx.Graph()
         tensor = graph.placeholder("tensor")

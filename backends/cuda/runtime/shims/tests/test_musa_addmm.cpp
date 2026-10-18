@@ -171,13 +171,15 @@ class MusaAddmmTest : public ::testing::Test {
   }
 };
 
-void run_addmm(ScalarType dtype, bool transposed_mat2) {
+void run_addmm(ScalarType dtype, bool transposed_mat2, bool transposed_mat1 = false) {
   const std::vector<int64_t> output_sizes = {2, 2};
   const std::vector<int64_t> output_strides = {2, 1};
   const std::vector<int64_t> bias_sizes = {2};
   const std::vector<int64_t> bias_strides = {1};
   const std::vector<int64_t> mat1_sizes = {2, 3};
-  const std::vector<int64_t> mat1_strides = {3, 1};
+  const std::vector<int64_t> mat1_strides = transposed_mat1
+      ? std::vector<int64_t>{1, 2}
+      : std::vector<int64_t>{3, 1};
   const std::vector<int64_t> mat2_sizes = {3, 2};
   const std::vector<int64_t> mat2_strides = transposed_mat2
       ? std::vector<int64_t>{1, 3}
@@ -186,7 +188,9 @@ void run_addmm(ScalarType dtype, bool transposed_mat2) {
   SlimTensor* bias = empty_tensor(dtype, bias_sizes, bias_strides);
   SlimTensor* mat1 = empty_tensor(dtype, mat1_sizes, mat1_strides);
   SlimTensor* mat2 = empty_tensor(dtype, mat2_sizes, mat2_strides);
-  const std::vector<float> mat1_values = {1, 2, 3, 4, 5, 6};
+  const std::vector<float> mat1_values = transposed_mat1
+      ? std::vector<float>{1, 4, 2, 5, 3, 6}
+      : std::vector<float>{1, 2, 3, 4, 5, 6};
   const std::vector<float> mat2_values = transposed_mat2
       ? std::vector<float>{7, 9, 11, 8, 10, 12}
       : std::vector<float>{7, 8, 9, 10, 11, 12};
@@ -206,14 +210,23 @@ void run_addmm(ScalarType dtype, bool transposed_mat2) {
   delete mat2;
 }
 
-void run_mm(ScalarType dtype) {
+void run_mm(ScalarType dtype, bool transposed_mat1 = false) {
   const std::vector<int64_t> output_sizes = {2, 2};
   const std::vector<int64_t> matrix_sizes = {2, 3};
   const std::vector<int64_t> mat2_sizes = {3, 2};
   SlimTensor* output = empty_tensor(dtype, output_sizes, {2, 1});
-  SlimTensor* mat1 = empty_tensor(dtype, matrix_sizes, {3, 1});
+  SlimTensor* mat1 = empty_tensor(
+      dtype,
+      matrix_sizes,
+      transposed_mat1 ? std::vector<int64_t>{1, 2}
+                      : std::vector<int64_t>{3, 1});
   SlimTensor* mat2 = empty_tensor(dtype, mat2_sizes, {2, 1});
-  copy_to_device(mat1, encode_values({1, 2, 3, 4, 5, 6}, dtype));
+  copy_to_device(
+      mat1,
+      encode_values(
+          transposed_mat1 ? std::vector<float>{1, 4, 2, 5, 3, 6}
+                          : std::vector<float>{1, 2, 3, 4, 5, 6},
+          dtype));
   copy_to_device(mat2, encode_values({7, 8, 9, 10, 11, 12}, dtype));
 
   EXPECT_EQ(aoti_torch_musa_mm_out(output, mat1, mat2), Error::Ok);
@@ -229,25 +242,31 @@ void run_bmm(
     ScalarType dtype,
     bool transposed_mat2,
     bool padded_mat1 = false,
-    bool padded_mat2 = false) {
+    bool padded_mat2 = false,
+    bool transposed_mat1 = false) {
   const std::vector<int64_t> output_sizes = {2, 2, 2};
   const std::vector<int64_t> mat1_sizes = {2, 2, 3};
   const std::vector<int64_t> mat2_sizes = {2, 3, 2};
   SlimTensor* output = empty_tensor(dtype, output_sizes, {4, 2, 1});
-  SlimTensor* mat1 =
-      empty_tensor(dtype, mat1_sizes, {padded_mat1 ? 7 : 6, 3, 1});
+  SlimTensor* mat1 = empty_tensor(
+      dtype,
+      mat1_sizes,
+      transposed_mat1
+          ? std::vector<int64_t>{padded_mat1 ? 7 : 6, 1, 2}
+          : std::vector<int64_t>{padded_mat1 ? 7 : 6, 3, 1});
   SlimTensor* mat2 = empty_tensor(
       dtype,
       mat2_sizes,
       transposed_mat2
           ? std::vector<int64_t>{padded_mat2 ? 7 : 6, 1, 3}
           : std::vector<int64_t>{padded_mat2 ? 7 : 6, 2, 1});
-  copy_to_device(
-      mat1,
-      encode_values(
-          padded_mat1 ? std::vector<float>{1, 2, 3, 4, 5, 6, 0, 2, 3, 4, 5, 6, 7}
-                      : std::vector<float>{1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 7},
-          dtype));
+  std::vector<float> mat1_values = transposed_mat1
+      ? std::vector<float>{1, 4, 2, 5, 3, 6, 2, 5, 3, 6, 4, 7}
+      : std::vector<float>{1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 7};
+  if (padded_mat1) {
+    mat1_values.insert(mat1_values.begin() + 6, 0);
+  }
+  copy_to_device(mat1, encode_values(mat1_values, dtype));
   std::vector<float> mat2_values = transposed_mat2
       ? std::vector<float>{7, 9, 11, 8, 10, 12, 1, 3, 5, 2, 4, 6}
       : std::vector<float>{7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6};
@@ -273,12 +292,15 @@ TEST_F(MusaAddmmTest, AddmmDtypesAndTransposedMat2) {
   for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_addmm(dtype, false);
     run_addmm(dtype, true);
+    run_addmm(dtype, false, true);
+    run_addmm(dtype, true, true);
   }
 }
 
 TEST_F(MusaAddmmTest, MmDtypes) {
   for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_mm(dtype);
+    run_mm(dtype, true);
   }
 }
 
@@ -289,6 +311,9 @@ TEST_F(MusaAddmmTest, BmmDtypes) {
     run_bmm(dtype, false, true);
     run_bmm(dtype, false, false, true);
     run_bmm(dtype, true, true, true);
+    run_bmm(dtype, false, false, false, true);
+    run_bmm(dtype, true, false, false, true);
+    run_bmm(dtype, true, true, true, true);
   }
 }
 
@@ -296,6 +321,16 @@ TEST_F(MusaAddmmTest, BmmRejectsOverlappingBatches) {
   SlimTensor* output = empty_tensor(ScalarType::Float, {2, 2, 2}, {4, 2, 1});
   SlimTensor* mat1 = empty_tensor(ScalarType::Float, {2, 2, 3}, {5, 3, 1});
   SlimTensor* mat2 = empty_tensor(ScalarType::Float, {2, 3, 2}, {6, 2, 1});
+
+  EXPECT_EQ(aoti_torch_musa_bmm_out(output, mat1, mat2), Error::NotSupported);
+
+  delete output;
+  delete mat1;
+  delete mat2;
+
+  output = empty_tensor(ScalarType::Float, {2, 2, 2}, {4, 2, 1});
+  mat1 = empty_tensor(ScalarType::Float, {2, 2, 3}, {5, 1, 2});
+  mat2 = empty_tensor(ScalarType::Float, {2, 3, 2}, {6, 2, 1});
 
   EXPECT_EQ(aoti_torch_musa_bmm_out(output, mat1, mat2), Error::NotSupported);
 

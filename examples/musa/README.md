@@ -70,11 +70,13 @@ The MUSA backend disables TorchInductor's layout optimization so Conv1d/2d/3d
 fallback outputs and generated kernels agree on contiguous NCHW layout. The
 eager reference disables muDNN TF32 to match the fallback's FP32 FMA math.
 The native fallback supports non-transposed and transposed Conv1d/2d/3d.
-The MUSA BMM fallback supports contiguous output and row-major input matrices
-even when batch-to-batch strides include padding. It also accepts contiguous
-or transposed right-hand matrices with safe batch padding. This covers the
+The MUSA BMM fallback supports contiguous output and contiguous or transposed
+left- and right-hand matrices with safe batch padding. This covers the
 non-contiguous batch view of ViT attention without copying the matrices;
 arbitrary per-row strides are not yet supported.
+The `transposed_bmm` acceptance model exercises a transposed left-hand matrix
+through PTE/PTD export and `executor_runner` output comparison, including
+bounded dynamic batch sizes.
 For transposed convolution, output padding must be smaller than either its
 stride or its dilation, as required by PyTorch. Transposed Conv1d uses muDNN's
 GEMM backward-data algorithm; its implicit-GEMM algorithm rejects the 1D
@@ -112,6 +114,11 @@ export RUNNER=/tmp/executorch-musa-cmake-1792075449/executor_runner
 $PYTHON examples/musa/aoti_model_acceptance.py \
   --model mlp \
   --output-dir /tmp/executorch-musa-acceptance/mlp \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model transposed_bmm --batch-size 2 --dynamic-batch-max 3 \
+  --output-dir /tmp/executorch-musa-acceptance/transposed_bmm \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \

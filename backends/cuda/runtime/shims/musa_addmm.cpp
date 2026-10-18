@@ -94,9 +94,18 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       "MUSA addmm tensor dimensions are incompatible");
 
   ET_CHECK_OR_RETURN_ERROR(
-      out->is_contiguous() && self->is_contiguous() && mat1->is_contiguous(),
+      out->is_contiguous() && self->is_contiguous(),
       NotSupported,
-      "MUSA addmm currently supports contiguous output, bias, and mat1");
+      "MUSA addmm currently supports contiguous output and bias");
+
+  const auto mat1_strides = mat1->strides();
+  const bool mat1_row_major = mat1->is_contiguous();
+  const bool mat1_column_major =
+      mat1_strides[0] == 1 && mat1_strides[1] == m;
+  ET_CHECK_OR_RETURN_ERROR(
+      mat1_row_major || mat1_column_major,
+      NotSupported,
+      "MUSA addmm supports contiguous or transposed mat1 only");
 
   const auto mat2_strides = mat2->strides();
   const bool mat2_row_major =
@@ -181,8 +190,12 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       : static_cast<const void*>(&beta_float);
   const mublasOperation_t mat2_operation =
       mat2_column_major ? MUBLAS_OP_T : MUBLAS_OP_N;
+  const mublasOperation_t mat1_operation =
+      mat1_row_major ? MUBLAS_OP_N : MUBLAS_OP_T;
   const int mat2_leading_dimension =
       static_cast<int>(mat2_column_major ? k : n);
+  const int mat1_leading_dimension =
+      static_cast<int>(mat1_row_major ? k : m);
   const musaDataType_t data_type =
       dtype == ScalarType::Float
       ? MUSA_R_32F
@@ -197,7 +210,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       mublasGemmEx(
           handle,
           mat2_operation,
-          MUBLAS_OP_N,
+          mat1_operation,
           static_cast<int>(n),
           static_cast<int>(m),
           static_cast<int>(k),
@@ -207,7 +220,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
           mat2_leading_dimension,
           mat1->data_ptr(),
           data_type,
-          static_cast<int>(k),
+          mat1_leading_dimension,
           beta_ptr,
           out->data_ptr(),
           data_type,
@@ -272,10 +285,13 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
   const bool mat1_row_major =
       mat1_strides[1] == k && mat1_strides[2] == 1 &&
       (batch <= 1 || mat1_strides[0] >= m * k);
+  const bool mat1_column_major =
+      mat1_strides[1] == 1 && mat1_strides[2] == m &&
+      (batch <= 1 || mat1_strides[0] >= m * k);
   ET_CHECK_OR_RETURN_ERROR(
-      out->is_contiguous() && mat1_row_major,
+      out->is_contiguous() && (mat1_row_major || mat1_column_major),
       NotSupported,
-      "MUSA bmm requires contiguous output and row-major mat1 batches");
+      "MUSA bmm requires contiguous output and contiguous or transposed mat1 batches");
 
   const auto mat2_strides = mat2->strides();
   const bool mat2_row_major =
@@ -335,8 +351,12 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       dtype == ScalarType::Half ? MUBLAS_COMPUTE_16F : MUBLAS_COMPUTE_32F;
   const mublasOperation_t mat2_operation =
       mat2_column_major ? MUBLAS_OP_T : MUBLAS_OP_N;
+  const mublasOperation_t mat1_operation =
+      mat1_row_major ? MUBLAS_OP_N : MUBLAS_OP_T;
   const int mat2_leading_dimension =
       static_cast<int>(mat2_column_major ? k : n);
+  const int mat1_leading_dimension =
+      static_cast<int>(mat1_row_major ? k : m);
   const long long mat2_batch_stride =
       static_cast<long long>(mat2_strides[0]);
   const long long mat1_batch_stride =
@@ -347,7 +367,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       mublasGemmStridedBatchedEx(
           handle,
           mat2_operation,
-          MUBLAS_OP_N,
+          mat1_operation,
           static_cast<int>(n),
           static_cast<int>(m),
           static_cast<int>(k),
@@ -358,7 +378,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
           mat2_batch_stride,
           mat1->data_ptr(),
           data_type,
-          static_cast<int>(k),
+          mat1_leading_dimension,
           mat1_batch_stride,
           beta_ptr,
           out->data_ptr(),

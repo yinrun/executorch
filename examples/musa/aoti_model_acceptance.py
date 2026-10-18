@@ -14,6 +14,7 @@ channels; ``resnet18`` is the standard torchvision model with optional weights.
 ``deeplabv3_mobilenet_v3_large`` covers a pretrained segmentation network.
 ``efficientnet_b0`` covers squeeze-and-excitation and SiLU blocks.
 ``vit_b_16`` covers full-depth multihead attention and LayerNorm.
+``transposed_bmm`` covers a non-contiguous left-hand batch matrix.
 """
 
 from __future__ import annotations
@@ -221,6 +222,11 @@ class TransformerBlock(nn.Module):
         return self.layer(x)
 
 
+class TransposedBmm(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.bmm(x.transpose(1, 2), x)
+
+
 class CausalAttention(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -395,6 +401,7 @@ MODEL_FACTORIES = {
     "bilinear_unet": (BilinearUNet, (1, 3, 32, 40)),
     "deeplabv3_mobilenet_v3_large": (DeepLabV3MobileNet, (1, 3, 64, 64)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
+    "transposed_bmm": (TransposedBmm, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
     "embedding_classifier": (EmbeddingClassifier, (1, 4)),
     "token_encoder": (TokenEncoder, (1, 4)),
