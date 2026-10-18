@@ -680,9 +680,10 @@ weights; this does not validate a production Llama model.
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. The previously recorded pretrained MobileNetV2
 BF16 discrepancy was isolated to BatchNorm rounding. The backend now routes
-inference BatchNorm1d/2d/3d through a native muDNN AOTI shim; the pretrained
-MobileNetV2 configuration still needs to be rerun with this shim before it is
-counted as verified.
+inference BatchNorm1d/2d/3d through a native muDNN AOTI shim. The official
+pretrained MobileNetV2 checkpoint now passes at 64x64 with `--atol 0.02
+--rtol 0.04`, maximum difference `7.62939453125e-06`, and two independent
+runner replays.
 
 Without `--runner`, the script only exports the PTE/PTD and writes the eager
 reference files. The runner command automatically adds the MUSA, Torch, and
@@ -726,6 +727,12 @@ The shim uses muDNN's inference API and supports rank-3/4/5 inputs. BF16
 runner acceptance now passes for `simple_audio_cnn` (maximum error
 0.0001220703125), `simple_cnn` (0.001953125), `simple_video_cnn` (0), and
 `narrow_resnet18` (0).
+
+The same commit closes the pretrained MobileNetV2 BF16 case using
+`mobilenet_v2-7ebf99e0.pth`: the 64x64 export and two runner replays pass with
+maximum error `7.62939453125e-06` under `--atol 0.02 --rtol 0.04`. The earlier
+`0.140625` maximum error was caused by AOTI's pointwise BatchNorm arithmetic,
+not by the convolution or BMM shims.
 
 The deeper BF16 ViT failure was traced to the strided-batched BMM path used by
 attention. The MUSA shim now uses one `mublasGemmEx` launch per batch for all
