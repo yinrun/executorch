@@ -8,6 +8,7 @@
 
 #include <mublas_v2.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 
@@ -163,13 +164,23 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
     if (self->dim() == 1) {
       const size_t row_bytes =
           static_cast<size_t>(n) * static_cast<size_t>(out->itemsize());
-      for (int64_t row = 0; row < m; ++row) {
+      if (m > 0) {
         ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
-            static_cast<char*>(out->data_ptr()) + row * row_bytes,
+            out->data_ptr(),
             self->data_ptr(),
             row_bytes,
             cudaMemcpyDeviceToDevice,
             stream));
+        for (int64_t copied_rows = 1; copied_rows < m;) {
+          const int64_t next_rows = std::min(copied_rows, m - copied_rows);
+          ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
+              static_cast<char*>(out->data_ptr()) + copied_rows * row_bytes,
+              out->data_ptr(),
+              next_rows * row_bytes,
+              cudaMemcpyDeviceToDevice,
+              stream));
+          copied_rows += next_rows;
+        }
       }
     } else if (out->data_ptr() != self->data_ptr()) {
       ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(

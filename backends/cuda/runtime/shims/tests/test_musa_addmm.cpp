@@ -448,7 +448,35 @@ TEST_F(MusaAddmmTest, AddmmRejectsOverlappingRows) {
   delete mat2;
 }
 
-TEST_F(MusaAddmmTest, DISABLED_VitAttentionProjection) {
+TEST_F(MusaAddmmTest, AddmmBroadcastsBiasAcrossFiveRows) {
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    SlimTensor* output = empty_tensor(dtype, {5, 3}, {3, 1});
+    SlimTensor* bias = empty_tensor(dtype, {3}, {1});
+    SlimTensor* mat1 = empty_tensor(dtype, {5, 2}, {2, 1});
+    SlimTensor* mat2 = empty_tensor(dtype, {2, 3}, {3, 1});
+    copy_to_device(mat1, encode_values(std::vector<float>(10, 1.0f), dtype));
+    copy_to_device(mat2, encode_values(std::vector<float>(6, 0.5f), dtype));
+    copy_to_device(bias, encode_values({1.0f, 2.0f, 3.0f}, dtype));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    SCOPED_TRACE(::testing::Message() << "dtype=" << static_cast<int>(dtype));
+    ASSERT_EQ(
+        aoti_torch_musa_addmm_out(output, bias, mat1, mat2, 1.0, 1.0),
+        Error::Ok);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    expect_values(
+        copy_from_device(output, dtype),
+        {2, 3, 4, 2, 3, 4, 2, 3, 4, 2, 3, 4, 2, 3, 4});
+
+    delete output;
+    delete bias;
+    delete mat1;
+    delete mat2;
+  }
+}
+
+TEST_F(MusaAddmmTest, VitAttentionProjection) {
   constexpr int64_t hidden_size = 768;
   constexpr int64_t projected_size = 3 * hidden_size;
   for (ScalarType dtype :

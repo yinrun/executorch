@@ -385,9 +385,8 @@ including FP32 and FP16 cases. One failed run read the input tensor's first
 element back as zero too; this does not distinguish an input-transfer or
 storage problem from corruption during GEMM. A device-wide synchronization
 before GEMM and synchronous host-to-device copies did not eliminate the
-intermittent failure. The projection stress test is disabled by default to
-avoid a flaky CI test; invoke it explicitly with
-`--gtest_also_run_disabled_tests --gtest_filter=MusaAddmmTest.DISABLED_VitAttentionProjection`.
+intermittent failure. The projection stress test was initially disabled to
+avoid flaky CI, and is enabled after the broadcast-copy improvement below.
 The existing small addmm and BMM tests also intermittently returned zeros
 in separate full-suite runs; the issue is not isolated to this new shape.
 The separate ViT-sized attention-score BMM regression passed 30 fresh test
@@ -395,6 +394,19 @@ processes. These standalone tests do not yet prove the cause of the pretrained
 low-precision model's NaNs: an extra QKV output inserted into a diagnostic
 model compiled into a *second* projection GEMM, not an observation of the
 original projection output.
+Replacing the one-device-copy-per-row bias broadcast in `musa_addmm.cpp`
+with non-overlapping doubling copies reduced a 197-row projection from 197
+copies to 9. The standalone projection passed 120 fresh processes after
+this change, versus intermittent failures before it; a five-row non-power-of-two
+broadcast regression also passes. This does **not** fix the pretrained
+low-precision ViT: replaying the same static PTE/PTD five times with the new
+shim still yielded 1,000 NaN logits in 4/5 FP16 and 5/5 BF16 runs. The FP32
+control passed 5/5 runs (maximum error 3.81e-6). More attention-path diagnosis
+is required before counting pretrained low precision as supported. Across 12
+full shim-test processes after this change, 7 passed and 5 still had
+intermittent zero outputs, including the pre-existing padded addmm case and
+an attention-score BMM case. The improved standalone projection is not a
+general reliability fix.
 For a full-depth FP16 PTE in layer-token mode, five replays of the same
 batch-2 input first produced NaNs at stages [none, 5], [4, 4], [6, 6],
 [none, none], and [4, 2] for its two batches. Stage 0 and stage 1 stayed
