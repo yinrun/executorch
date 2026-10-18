@@ -338,6 +338,7 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | Token decoder | 1x4 int64 | FP32 / FP16 / BF16 | Random | 1.79e-7 / 4.89e-4 / 3.91e-3 |
 | ResNet18 | 1x3x224x224 | FP32 / FP16 | Official pretrained | 6.05e-6 / 3.91e-3 |
 | ResNet18 | 1x3x64x64 | BF16 | Official pretrained | 0 |
+| ResNet18 | 1x3x224x224 | BF16 | Official pretrained | 0 |
 | MobileNetV2 | 1x3x224x224 | FP32 | Official pretrained | 2.03e-6 |
 | MobileNetV2 | 1x3x64x64 | FP16 | Official pretrained | 1.37e-2 (`--atol 0.02`) |
 | EfficientNet-B0 | 1x3x64x64 | FP32 | Official pretrained | 7.39e-6 (class 644) |
@@ -358,6 +359,10 @@ Official pretrained EfficientNet-B0 also passed batches 2/1/3 using one FP32
 PTE at 64x64 (maximum logit error 8.35e-6); predicted class IDs matched eager
 for all batches. One dynamic-batch PTE for the FP32 TransformerEncoderLayer
 also passed batches 2/1/3 (maximum error 4.77e-7). The FP16 model passed
+An official pretrained ResNet18 BF16 PTE at 224x224 also passed dynamic batches
+2/1/3 with maximum errors 0, 0, and 0.00390625, respectively.
+
+The FP16 model passed
 12 fresh-runner replays for each of batches 2/1/3 (maximum error 1.95e-3);
 BF16 passed four executions for each batch (maximum error 1.56e-2).
 `--runner-repeats` checks the same exported PTE/PTD and input against eager
