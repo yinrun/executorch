@@ -76,6 +76,22 @@ class SimpleCnn(nn.Module):
         return self.classifier(self.features(x).flatten(1))
 
 
+class SimpleAudioCnn(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv1d(2, 4, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(4, 8, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AvgPool1d(8),
+        )
+        self.classifier = nn.Linear(8, 6)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.features(x).flatten(1))
+
+
 class SimpleVideoCnn(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -435,6 +451,7 @@ class VitLayerTokens(nn.Module):
 MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
+    "simple_audio_cnn": (SimpleAudioCnn, (1, 2, 16)),
     "simple_video_cnn": (SimpleVideoCnn, (1, 1, 4, 8, 8)),
     "simple_decoder": (SimpleDecoder, (1, 3, 8, 8)),
     "simple_audio_decoder": (SimpleAudioDecoder, (1, 2, 5)),

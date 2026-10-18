@@ -1,9 +1,10 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for twenty-two models:
+`aoti_model_acceptance.py` validates the complete MUSA path for twenty-three models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
+- `simple_audio_cnn`: Conv1d + ReLU + strided Conv1d + AvgPool1d + Linear;
 - `simple_video_cnn`: Conv3d + ReLU + MaxPool3d + Conv3d + pooling + Linear;
 - `simple_decoder`: ConvTranspose2d + ReLU + ConvTranspose2d with output padding;
 - `simple_audio_decoder`: grouped ConvTranspose1d + ReLU + ConvTranspose1d with output padding;
@@ -723,6 +724,11 @@ random-weight `resnet18` and `mobilenet_v2` at 64x64 (maximum error 0.0 in
 both cases). These checks cover the same SlimTensor/AOTI path but do not
 establish pretrained-model accuracy. In particular, the previously recorded
 pretrained MobileNetV2 BF16 BatchNorm rounding discrepancy remains open.
+
+The new `simple_audio_cnn` model exercises Conv1d, strided Conv1d, AvgPool1d,
+and Linear end to end. Its dynamic batch 2/1/3 acceptance passes in FP32 with
+maximum error 1.49e-8 and in BF16 with maximum error 0.00048828125, including
+an independent runner replay for each batch size.
 
 The deeper BF16 ViT failure was traced to the strided-batched BMM path used by
 attention. The MUSA shim now uses one `mublasGemmEx` launch per batch for all
