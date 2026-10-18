@@ -85,9 +85,14 @@ MUSA AOTI decomposes inference-only SDPA into matmul, softmax, and masking to
 avoid an unavailable TorchMUSA AOTI fallback. Pattern matching is disabled
 only while compiling graphs containing SDPA or attention-like softmax/matmul
 patterns, as it otherwise fuses those ops back into the unavailable fallback.
-Dropout is unsupported. The current
-TorchMUSA export specializes attention batch dimensions, so bounded dynamic
-batch acceptance is not yet available for models containing attention.
+Dropout is unsupported. TorchMUSA's native attention export specializes batch
+dimensions. For `transformer_block`, `causal_attention`, and `vit_b_16` with
+bounded dynamic batch, the acceptance script instead expands calls through
+`torch.nn.functional.scaled_dot_product_attention` into the backend's math
+implementation before export. Other callers can explicitly use
+`export_with_musa_sdpa_decomposition` from `executorch.backends.musa`. This
+temporarily replaces a process-global Python function during export, so do not
+run concurrent exports, and calls bound to a separate SDPA alias are not covered.
 Boolean/additive masks, causal attention, and GQA are covered separately;
 combining a causal flag with a custom mask is not supported.
 All-masked rows are not covered: on M1000, FP32 SDPA and the backend math path
@@ -119,6 +124,11 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
 $PYTHON examples/musa/aoti_model_acceptance.py \
   --model transposed_bmm --batch-size 2 --dynamic-batch-max 3 \
   --output-dir /tmp/executorch-musa-acceptance/transposed_bmm \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model transformer_block --batch-size 2 --dynamic-batch-max 3 \
+  --output-dir /tmp/executorch-musa-acceptance/transformer_block_dynamic \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -175,6 +185,12 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --model vit_b_16 --dtype fp16 \
   --weights /path/to/vit_b_16-c867db91.pth \
   --output-dir /tmp/executorch-musa-acceptance/vit_b_16_pretrained \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model vit_b_16 --batch-size 2 --dynamic-batch-max 3 \
+  --weights /path/to/vit_b_16-c867db91.pth \
+  --output-dir /tmp/executorch-musa-acceptance/vit_b_16_dynamic \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -297,6 +313,7 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | EfficientNet-B0 | 1x3x64x64 | FP32 | Official pretrained | 7.39e-6 (class 644) |
 | EfficientNet-B0 | 1x3x224x224 | FP32 / FP16 / BF16 | Official pretrained | 1.79e-6 / 4.09e-3 / 2.83e-2 (class 314) |
 | ViT-B/16 | 1x3x224x224 | FP32 / FP16 / BF16 | Official pretrained | 3.81e-6 / 1.95e-3 / 3.13e-2 (class 21) |
+| ViT-B/16 | batch 2/1/3 x3x224x224 | FP32 | Official pretrained, one dynamic PTE | <=7.15e-6 (class IDs match) |
 | DeepLabV3 MobileNetV3 | 1x3x64x64 | FP32 | Official pretrained | 9.16e-5 (0/4096 differing pixel labels) |
 | DeepLabV3 MobileNetV3 | 2x3x64x64 | FP32 | Official pretrained | 1.18e-4 (0/8192 differing pixel labels) |
 | ResNet18 | 2x3x64x64 | FP32 | Official pretrained | 3.34e-5 |
@@ -308,7 +325,11 @@ passed (maximum error 4.47e-8). Batches 2/1/3 also passed for FP32 simple CNN
 (1.76e-5); both pretrained models used 64x64 inputs.
 Official pretrained EfficientNet-B0 also passed batches 2/1/3 using one FP32
 PTE at 64x64 (maximum logit error 8.35e-6); predicted class IDs matched eager
-for all batches. These checks use random inputs, not ImageNet accuracy or
+for all batches. One dynamic-batch PTE for the FP32 TransformerEncoderLayer
+also passed batches 2/1/3 (maximum error 4.77e-7). Official pretrained
+FP32 ViT-B/16 passed the same batches at 224x224 using one PTE (maximum
+error 7.15e-6); predicted class IDs matched MUSA eager for each input.
+These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,
 80x80, and 79x71 (maximum logit error 5.96e-6). Another FP32 PTE with jointly

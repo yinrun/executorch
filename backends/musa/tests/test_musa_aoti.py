@@ -13,7 +13,7 @@ from torch.export import Dim, export
 from executorch.backends.cuda.cuda_weight_collector import (
     decode_cuda_aoti_metadata,
 )
-from executorch.backends.musa import MusaBackend
+from executorch.backends.musa import MusaBackend, export_with_musa_sdpa_decomposition
 from executorch.backends.musa.musa_backend import (
     _decompose_scaled_dot_product_attention,
     _normalize_musa_assert_devices,
@@ -457,6 +457,34 @@ class TestMusaAoti(unittest.TestCase):
         result = MusaBackend.preprocess(
             exported,
             [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_dynamic_transformer_encoder_aoti_compile(self) -> None:
+        module = (
+            nn.TransformerEncoderLayer(
+                d_model=16,
+                nhead=4,
+                dim_feedforward=32,
+                dropout=0.0,
+                batch_first=True,
+            )
+            .eval()
+            .to("musa")
+        )
+        example = torch.randn(2, 4, 16, device="musa")
+        original_sdpa = torch.nn.functional.scaled_dot_product_attention
+        exported = export_with_musa_sdpa_decomposition(
+            module,
+            (example,),
+            dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+        )
+        self.assertIs(torch.nn.functional.scaled_dot_product_attention, original_sdpa)
+        self.assertEqual(len(exported.range_constraints), 1)
+        result = MusaBackend.preprocess(
+            exported, [MusaBackend.generate_method_name_compile_spec("forward")]
         )
 
         self.assertGreater(len(result.processed_bytes), 0)

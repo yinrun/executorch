@@ -171,15 +171,19 @@ class MusaAddmmTest : public ::testing::Test {
   }
 };
 
-void run_addmm(ScalarType dtype, bool transposed_mat2, bool transposed_mat1 = false) {
+void run_addmm(
+    ScalarType dtype,
+    bool transposed_mat2,
+    bool transposed_mat1 = false,
+    bool padded_mat1 = false) {
   const std::vector<int64_t> output_sizes = {2, 2};
   const std::vector<int64_t> output_strides = {2, 1};
   const std::vector<int64_t> bias_sizes = {2};
   const std::vector<int64_t> bias_strides = {1};
   const std::vector<int64_t> mat1_sizes = {2, 3};
-  const std::vector<int64_t> mat1_strides = transposed_mat1
-      ? std::vector<int64_t>{1, 2}
-      : std::vector<int64_t>{3, 1};
+  const std::vector<int64_t> mat1_strides =
+      transposed_mat1 ? std::vector<int64_t>{1, 2}
+      : std::vector<int64_t>{padded_mat1 ? 4 : 3, 1};
   const std::vector<int64_t> mat2_sizes = {3, 2};
   const std::vector<int64_t> mat2_strides = transposed_mat2
       ? std::vector<int64_t>{1, 3}
@@ -188,20 +192,27 @@ void run_addmm(ScalarType dtype, bool transposed_mat2, bool transposed_mat1 = fa
   SlimTensor* bias = empty_tensor(dtype, bias_sizes, bias_strides);
   SlimTensor* mat1 = empty_tensor(dtype, mat1_sizes, mat1_strides);
   SlimTensor* mat2 = empty_tensor(dtype, mat2_sizes, mat2_strides);
-  const std::vector<float> mat1_values = transposed_mat1
-      ? std::vector<float>{1, 4, 2, 5, 3, 6}
-      : std::vector<float>{1, 2, 3, 4, 5, 6};
+  const std::vector<float> mat1_values =
+      transposed_mat1 ? std::vector<float>{1, 4, 2, 5, 3, 6}
+      : (padded_mat1 ? std::vector<float>{1, 2, 3, 0, 4, 5, 6}
+                     : std::vector<float>{1, 2, 3, 4, 5, 6});
   const std::vector<float> mat2_values = transposed_mat2
       ? std::vector<float>{7, 9, 11, 8, 10, 12}
       : std::vector<float>{7, 8, 9, 10, 11, 12};
   copy_to_device(mat1, encode_values(mat1_values, dtype));
   copy_to_device(mat2, encode_values(mat2_values, dtype));
   copy_to_device(bias, encode_values({1, 2}, dtype));
+  EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_EQ(
       aoti_torch_musa_addmm_out(output, bias, mat1, mat2, 1.0, 1.0),
       Error::Ok);
   EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  SCOPED_TRACE(::testing::Message()
+               << "dtype=" << static_cast<int>(dtype)
+               << " transposed_mat2=" << transposed_mat2
+               << " transposed_mat1=" << transposed_mat1
+               << " padded_mat1=" << padded_mat1);
   expect_values(copy_from_device(output, dtype), {59, 66, 140, 156});
 
   delete output;
@@ -294,6 +305,8 @@ TEST_F(MusaAddmmTest, AddmmDtypesAndTransposedMat2) {
     run_addmm(dtype, true);
     run_addmm(dtype, false, true);
     run_addmm(dtype, true, true);
+    run_addmm(dtype, false, false, true);
+    run_addmm(dtype, true, false, true);
   }
 }
 
@@ -335,6 +348,22 @@ TEST_F(MusaAddmmTest, BmmRejectsOverlappingBatches) {
   EXPECT_EQ(aoti_torch_musa_bmm_out(output, mat1, mat2), Error::NotSupported);
 
   delete output;
+  delete mat1;
+  delete mat2;
+}
+
+TEST_F(MusaAddmmTest, AddmmRejectsOverlappingRows) {
+  SlimTensor* output = empty_tensor(ScalarType::Float, {2, 2}, {2, 1});
+  SlimTensor* bias = empty_tensor(ScalarType::Float, {2}, {1});
+  SlimTensor* mat1 = empty_tensor(ScalarType::Float, {2, 3}, {2, 1});
+  SlimTensor* mat2 = empty_tensor(ScalarType::Float, {3, 2}, {2, 1});
+
+  EXPECT_EQ(
+      aoti_torch_musa_addmm_out(output, bias, mat1, mat2, 1.0, 1.0),
+      Error::NotSupported);
+
+  delete output;
+  delete bias;
   delete mat1;
   delete mat2;
 }

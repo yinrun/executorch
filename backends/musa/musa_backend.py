@@ -9,6 +9,7 @@ import hashlib
 import math
 import os
 import typing
+from unittest import mock
 from typing import Any, Dict, List
 
 import torch
@@ -91,6 +92,21 @@ def _decompose_scaled_dot_product_attention(
         else:
             scores = scores + attn_mask
     return torch.matmul(torch.softmax(scores, dim=-1), value).to(output_dtype)
+
+
+def export_with_musa_sdpa_decomposition(
+    module: torch.nn.Module, args: tuple[Any, ...], **kwargs: Any
+) -> torch.export.ExportedProgram:
+    """Export functional SDPA without invoking TorchMUSA's shape-specializing path.
+
+    Export calls must run sequentially because the functional replacement is global.
+    """
+    with mock.patch.object(
+        torch.nn.functional,
+        "scaled_dot_product_attention",
+        _decompose_scaled_dot_product_attention,
+    ):
+        return torch.export.export(module, args, **kwargs)
 
 
 @experimental(

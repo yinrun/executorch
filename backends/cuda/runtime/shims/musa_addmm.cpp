@@ -100,12 +100,15 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
 
   const auto mat1_strides = mat1->strides();
   const bool mat1_row_major = mat1->is_contiguous();
+  const bool mat1_padded_rows =
+      mat1_strides[1] == 1 && mat1_strides[0] >= k &&
+      fits_mublas_dimension(mat1_strides[0]);
   const bool mat1_column_major =
       mat1_strides[0] == 1 && mat1_strides[1] == m;
   ET_CHECK_OR_RETURN_ERROR(
-      mat1_row_major || mat1_column_major,
+      mat1_row_major || mat1_padded_rows || mat1_column_major,
       NotSupported,
-      "MUSA addmm supports contiguous or transposed mat1 only");
+      "MUSA addmm supports contiguous, padded-row, or transposed mat1 only");
 
   const auto mat2_strides = mat2->strides();
   const bool mat2_row_major =
@@ -191,11 +194,11 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
   const mublasOperation_t mat2_operation =
       mat2_column_major ? MUBLAS_OP_T : MUBLAS_OP_N;
   const mublasOperation_t mat1_operation =
-      mat1_row_major ? MUBLAS_OP_N : MUBLAS_OP_T;
+      (mat1_row_major || mat1_padded_rows) ? MUBLAS_OP_N : MUBLAS_OP_T;
   const int mat2_leading_dimension =
       static_cast<int>(mat2_column_major ? k : n);
   const int mat1_leading_dimension =
-      static_cast<int>(mat1_row_major ? k : m);
+      static_cast<int>(mat1_row_major ? k : (mat1_padded_rows ? mat1_strides[0] : m));
   const musaDataType_t data_type =
       dtype == ScalarType::Float
       ? MUSA_R_32F

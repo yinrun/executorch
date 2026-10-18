@@ -36,7 +36,11 @@ from torch import nn
 from torch.nn import functional as F
 from torch.export import Dim, export
 
-from executorch.backends.musa import MusaBackend, MusaPartitioner
+from executorch.backends.musa import (
+    MusaBackend,
+    MusaPartitioner,
+    export_with_musa_sdpa_decomposition,
+)
 from executorch.exir import to_edge_transform_and_lower
 from executorch.extension.export_util.utils import save_pte_program
 
@@ -621,7 +625,13 @@ def export_model(
         )
         max_shape[2:] = [dynamic_spatial_max, dynamic_spatial_max]
     dynamic_shapes = (dynamic_dimensions,) if dynamic_dimensions else None
-    exported = export(model, (example,), dynamic_shapes=dynamic_shapes)
+    export_model_graph = (
+        export_with_musa_sdpa_decomposition
+        if dynamic_batch_max is not None
+        and model_name in ("transformer_block", "causal_attention", "vit_b_16")
+        else export
+    )
+    exported = export_model_graph(model, (example,), dynamic_shapes=dynamic_shapes)
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     with _serialization_schema():
         manager = to_edge_transform_and_lower(
