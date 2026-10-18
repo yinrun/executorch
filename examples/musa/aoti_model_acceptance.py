@@ -676,6 +676,7 @@ def main() -> None:
     parser.add_argument("--model", choices=sorted(MODEL_FACTORIES), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--runner", type=Path)
+    parser.add_argument("--runner-repeats", type=int, default=1)
     parser.add_argument("--dtype", choices=sorted(DTYPES), default="fp32")
     parser.add_argument("--input-size", type=int)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -688,6 +689,8 @@ def main() -> None:
     parser.add_argument("--atol", type=float)
     parser.add_argument("--rtol", type=float)
     args = parser.parse_args()
+    if args.runner_repeats < 1 or (args.runner_repeats > 1 and args.runner is None):
+        parser.error("--runner-repeats requires a runner and a positive count")
 
     pte_path, ptd_path, input_path, expected, model, input_shape = export_model(
         args.model,
@@ -719,6 +722,7 @@ def main() -> None:
         "input": str(input_path),
         "expected_shape": list(expected.shape),
         "runner": None,
+        "runner_repeats": args.runner_repeats,
     }
 
     if args.runner is not None:
@@ -842,6 +846,36 @@ def main() -> None:
                 result["max_error"] = max_error
                 result["runner_stdout"] = completed.stdout
                 result["runner_stderr"] = completed.stderr
+            for repeat in range(1, args.runner_repeats):
+                repeat_prefix = args.output_dir / f"runner-output-{label}-repeat-{repeat}"
+                _run_runner(
+                    args.runner,
+                    pte_path,
+                    ptd_path,
+                    current_input_path,
+                    repeat_prefix,
+                    current_shape if max_shape is not None else None,
+                )
+                repeated = torch.frombuffer(
+                    bytearray(Path(f"{repeat_prefix}-0.bin").read_bytes()),
+                    dtype=DTYPES[args.dtype],
+                )
+                torch.testing.assert_close(
+                    repeated,
+                    expected_flat,
+                    atol=atol,
+                    rtol=rtol,
+                    msg=f"{args.model} shape {current_shape} repeat {repeat}",
+                )
+                result.setdefault("runner_repeat_results", []).append(
+                    {
+                        "shape": list(current_shape),
+                        "repeat": repeat,
+                        "max_error": float(
+                            (repeated.float() - expected_flat.float()).abs().max()
+                        ),
+                    }
+                )
 
     print(json.dumps(result, indent=2, sort_keys=True))
 

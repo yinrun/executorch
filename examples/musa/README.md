@@ -142,7 +142,8 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
-  --model transformer_block --batch-size 2 --dynamic-batch-max 3 \
+  --model transformer_block --dtype fp16 \
+  --batch-size 2 --dynamic-batch-max 3 --runner-repeats 4 \
   --output-dir /tmp/executorch-musa-acceptance/transformer_block_dynamic \
   --runner "$RUNNER"
 
@@ -347,7 +348,11 @@ passed (maximum error 4.47e-8). Batches 2/1/3 also passed for FP32 simple CNN
 Official pretrained EfficientNet-B0 also passed batches 2/1/3 using one FP32
 PTE at 64x64 (maximum logit error 8.35e-6); predicted class IDs matched eager
 for all batches. One dynamic-batch PTE for the FP32 TransformerEncoderLayer
-also passed batches 2/1/3 (maximum error 4.77e-7). Official pretrained
+also passed batches 2/1/3 (maximum error 4.77e-7). The FP16 model passed
+12 fresh-runner replays for each of batches 2/1/3 (maximum error 1.95e-3);
+BF16 passed four executions for each batch (maximum error 1.56e-2).
+`--runner-repeats` checks the same exported PTE/PTD and input against eager
+on every execution, rather than relying on a single run. Official pretrained
 FP32 ViT-B/16 passed the same batches at 224x224 using one PTE (maximum
 error 7.15e-6); predicted class IDs matched MUSA eager for each input.
 Dynamic ViT-B/16 FP16 and BF16 do **not** pass this check: the original
@@ -359,7 +364,9 @@ batch-2 input in fresh runner processes produced NaN counts of [0, 1000],
 [1000, 1000], and [0, 1000]. A seven-block PTE first returned 2,000 NaNs
 for batch 2, then three identical replays returned finite logits. These
 results do not establish a specific failing layer or a reliable low-precision
-dynamic path. Device-wide synchronization during some diagnostic matrix
+dynamic path. Synchronizing after the full AOTI run also left all 2,000
+six-block FP16 logits as NaNs in two separate replays. Device-wide
+synchronization during some diagnostic matrix
 operations removed FP16 NaNs, but synchronizing before mublas handle
 destruction did not fix the full ViT; changing streams, retaining handles,
 or disabling Inductor buffer reuse did not validate a fix. No synchronization
