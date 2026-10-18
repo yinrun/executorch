@@ -706,7 +706,7 @@ The current branch `codex/musa-aoti-poc` includes commits
 padded-row addmm paths use muBLAS GEMM with explicit bias initialization;
 larger BF16 addmm keeps the muDNN path. A zero-row-stride `[1, 768]` input,
 transposed `[768, 1000]` weight, and padded `[2, 768]` input are covered by
-repeated C++ regressions. The 13-test shim suite passed three complete
+repeated C++ regressions. The 13-test shim suite passed five complete
 repetitions, and all 31 MUSA AOTI Python export tests passed.
 
 End-to-end FP32 acceptance also passed with generated PTE/PTD and
