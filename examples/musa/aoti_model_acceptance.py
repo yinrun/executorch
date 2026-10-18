@@ -557,6 +557,7 @@ def export_model(
     spatial_minimum = {
         "bilinear_unet": 24,
         "deeplabv3_mobilenet_v3_large": 48,
+        "efficientnet_b0": 48,
     }.get(model_name)
     if dynamic_spatial_max is not None:
         if (
@@ -566,7 +567,8 @@ def export_model(
         ):
             raise ValueError(
                 "--dynamic-spatial-max requires bilinear_unet (min=24) or "
-                "deeplabv3_mobilenet_v3_large (min=48), with max >= input size"
+                "deeplabv3_mobilenet_v3_large/efficientnet_b0 (min=48), "
+                "with max >= input size"
             )
     if weights_path is not None and model_name not in (
         "resnet18",
@@ -674,7 +676,7 @@ def main() -> None:
         result["runner"] = str(args.runner)
         if args.dynamic_spatial_max is not None:
             max_size = args.dynamic_spatial_max
-            min_size = 48 if args.model == "deeplabv3_mobilenet_v3_large" else 24
+            min_size = 24 if args.model == "bilinear_unet" else 48
             max_batch = args.dynamic_batch_max or args.batch_size
             input_shapes = dict.fromkeys(
                 (

@@ -52,7 +52,8 @@ The script pads raw input files to the bound and passes the actual shape via
 buffer as a bound-sized tensor. For `bilinear_unet` only,
 `--dynamic-spatial-max 48` exports one PTE with independent height and width
 between 24 and 48. It checks 32x40, 24x30, 48x48, and 47x39 using that PTE.
-For `deeplabv3_mobilenet_v3_large`, `--dynamic-spatial-max 80` checks
+For `deeplabv3_mobilenet_v3_large` and `efficientnet_b0`,
+`--dynamic-spatial-max 80` checks
 64x64, 48x54, 80x80, and 79x71 using one PTE with independent height and
 width between 48 and 80. Both include odd sizes. Dynamic batch and spatial
 dimensions can also be combined for either supported model using
@@ -148,6 +149,13 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --model efficientnet_b0 --batch-size 2 --dynamic-batch-max 3 \
   --weights /path/to/efficientnet_b0_rwightman-7f5810bc.pth \
   --output-dir /tmp/executorch-musa-acceptance/efficientnet_b0_dynamic \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model efficientnet_b0 --batch-size 2 --dynamic-batch-max 3 \
+  --dynamic-spatial-max 80 \
+  --weights /path/to/efficientnet_b0_rwightman-7f5810bc.pth \
+  --output-dir /tmp/executorch-musa-acceptance/efficientnet_b0_batch_spatial \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -277,6 +285,16 @@ Official pretrained EfficientNet-B0 also passed batches 2/1/3 using one FP32
 PTE at 64x64 (maximum logit error 8.35e-6); predicted class IDs matched eager
 for all batches. These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
+A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,
+80x80, and 79x71 (maximum logit error 5.96e-6). Another FP32 PTE with jointly
+dynamic batch and spatial dimensions passed 2x64x64, 1x48x54, 3x80x80, and
+2x79x71 (maximum logit error 5.96e-6); predicted class IDs matched eager in
+each case. This does not validate arbitrary combinations within the bounds.
+For the jointly dynamic PTE at 2x64x64, pretrained FP16 and BF16 do **not**
+meet their default tolerances: 5/2,000 and 7/2,000 logits exceed tolerance,
+respectively (maximum differences 0.021484375 and 0.0703125). Both predicted
+class IDs remain correct for this input, but neither dtype counts as passed
+for combined dynamic shapes. Static 224x224 FP16/BF16 remain separately verified.
 For the simple 3D CNN, batches 2/1/3 passed with a single PTE in both FP16
 (maximum error 6.11e-5) and BF16 (4.89e-4).
 For the simple decoder, batches 2/1/3 passed with a single PTE in both FP16
