@@ -492,17 +492,17 @@ prefill `[11, 7, 22, 5, 17, 13, 19]` in one call and decode `[3]` at the final
 context position. Server requests carry
 `input_shapes=1xL,L` to resize the token and position inputs on each step;
 upper-bound-sized raw input files keep the storage valid. TorchMUSA currently
-lacks a fake implementation for its dynamic SDPA math operator, so this export
-uses an explicit masked matmul/softmax attention module. Each step is checked
-both against that module's MUSA eager output and the original upstream SDPA
-module's eager output. On M1000, FP32/FP16/BF16 passed all three calls with
-predicted IDs `[364, 76, 464]` and maximum runner-vs-eager logit differences
-5.97e-7, 1.47e-3, and 9.77e-3, respectively. The long prefill and final decode
-also passed all three dtypes with predicted IDs `[103, 344]` and maximum logit
-differences 4.77e-7, 9.77e-4, and 1.18e-2. This does not yet export the
-unaltered upstream SDPA model with dynamic sequence lengths: registering a fake
-kernel for TorchMUSA's math SDPA operator alone still causes PyTorch export to
-specialize the sequence length to its example value.
+lacks a fake implementation for its dynamic SDPA math operator, and a fake
+kernel alone still specializes sequence length. This export retains the
+unaltered upstream SDPA module and uses
+`export_with_musa_sdpa_decomposition` to expand functional SDPA before
+TorchMUSA selects its native attention operator. Each runner step is checked
+against upstream MUSA eager. On M1000, FP32/FP16/BF16 passed all three calls
+with predicted IDs `[364, 76, 464]` and maximum logit differences 5.96e-7,
+1.50e-3, and 9.77e-3, respectively. The long prefill and final decode also
+passed all three dtypes with predicted IDs `[103, 344]` and maximum logit
+differences 4.77e-7, 1.34e-3, and 7.81e-3. The checkpoint still has random
+weights; this does not validate a production Llama model.
 
 These are random-input correctness checks, not arbitrary shape-generalization
 or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet

@@ -9,10 +9,13 @@ import subprocess
 from pathlib import Path
 
 import torch
-from torch import nn
 from torch.export import Dim, export
 
-from executorch.backends.musa import MusaBackend, MusaPartitioner
+from executorch.backends.musa import (
+    MusaBackend,
+    MusaPartitioner,
+    export_with_musa_sdpa_decomposition,
+)
 from executorch.examples.models.llama.llama_transformer import construct_transformer
 from executorch.examples.models.llama.model_args import ModelArgs
 from executorch.exir import to_edge_transform_and_lower
@@ -24,33 +27,6 @@ from examples.musa.aoti_model_acceptance import (
     _serialization_schema,
     _write_tensor,
 )
-
-
-class ExportableMathSDPA(nn.Module):
-    def __init__(self, sdpa: nn.Module) -> None:
-        super().__init__()
-        self.n_rep = sdpa.n_rep
-        self.dim = sdpa.dim
-
-    def forward(
-        self,
-        input_pos: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        batch_size: int,
-        sequence: int,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
-        key = key.repeat_interleave(self.n_rep, dim=1)
-        value = value.repeat_interleave(self.n_rep, dim=1)
-        scores = torch.matmul(query, key.transpose(-2, -1)) * (
-            query.size(-1) ** -0.5
-        )
-        context = torch.matmul(
-            scores.masked_fill(~mask, float("-inf")).softmax(-1), value
-        )
-        return context.transpose(1, 2).reshape(batch_size, sequence, self.dim)
 
 
 def run_acceptance(
@@ -78,13 +54,6 @@ def run_acceptance(
     if set(missing) != expected_caches or set(unexpected) != expected_masks:
         raise RuntimeError(f"Demo checkpoint mismatch: {missing=}, {unexpected=}")
     model = model.eval().to(device="musa", dtype=dtype)
-    original_model = None
-    if dynamic_prefill:
-        original_model = construct_transformer(args).eval()
-        original_model.load_state_dict(checkpoint, strict=False)
-        original_model = original_model.to(device="musa", dtype=dtype)
-        for layer in model.layers:
-            layer.attention.SDPA = ExportableMathSDPA(layer.attention.SDPA)
     first_tokens = (11, 7) if dynamic_prefill else (11,)
     token_ids = torch.tensor([first_tokens], device="musa", dtype=torch.int64)
     input_pos = torch.arange(len(first_tokens), device="musa", dtype=torch.int64)
@@ -97,7 +66,10 @@ def run_acceptance(
         if dynamic_prefill
         else None
     )
-    exported = export(
+    export_model_graph = (
+        export_with_musa_sdpa_decomposition if dynamic_prefill else export
+    )
+    exported = export_model_graph(
         model, (token_ids, {"input_pos": input_pos}), dynamic_shapes=dynamic_shapes
     )
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
@@ -156,12 +128,10 @@ def run_acceptance(
     )
     session_steps = []
     for input_steps in sessions:
-        for eager_model in (model, original_model):
-            if eager_model is not None:
-                with torch.no_grad():
-                    for layer in eager_model.layers:
-                        layer.attention.kv_cache.k_cache.zero_()
-                        layer.attention.kv_cache.v_cache.zero_()
+        with torch.no_grad():
+            for layer in model.layers:
+                layer.attention.kv_cache.k_cache.zero_()
+                layer.attention.kv_cache.v_cache.zero_()
         steps = []
         position = 0
         with subprocess.Popen(
@@ -189,8 +159,6 @@ def run_acceptance(
                         position_file.write(bytes(padding))
                 with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
                     expected = model(token_ids, {"input_pos": input_pos})
-                    if original_model is not None:
-                        original = original_model(token_ids, {"input_pos": input_pos})
                 request = (
                     f"input_shapes=1x{len(tokens)},{len(tokens)}"
                     if dynamic_prefill
@@ -215,10 +183,6 @@ def run_acceptance(
                 torch.testing.assert_close(
                     actual, reference, atol=tolerance, rtol=tolerance
                 )
-                if original_model is not None:
-                    torch.testing.assert_close(
-                        expected, original, atol=tolerance, rtol=tolerance
-                    )
                 predicted = actual.argmax().item()
                 if predicted != reference.argmax().item():
                     raise AssertionError(
