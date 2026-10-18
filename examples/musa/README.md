@@ -716,6 +716,14 @@ End-to-end FP32 acceptance also passed with generated PTE/PTD and
 independent runner replay. These are random-weight functional checks, not
 ImageNet accuracy or performance measurements.
 
+Additional BF16 functional checks now pass with generated PTE/PTD and the
+runner: `mlp` with dynamic batches 2/1/3 (maximum error 0.00390625),
+`simple_cnn` with dynamic batches 2/1/3 (maximum error 0.001953125), and
+random-weight `resnet18` and `mobilenet_v2` at 64x64 (maximum error 0.0 in
+both cases). These checks cover the same SlimTensor/AOTI path but do not
+establish pretrained-model accuracy. In particular, the previously recorded
+pretrained MobileNetV2 BF16 BatchNorm rounding discrepancy remains open.
+
 The deeper BF16 ViT failure was traced to the strided-batched BMM path used by
 attention. The MUSA shim now uses one `mublasGemmEx` launch per batch for all
 supported BMM dtypes in the fallback path, avoiding the unstable
