@@ -104,11 +104,14 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
   *ret_output = nullptr;
 
   const auto dtype = input->dtype();
+  const auto parameter_dtype = weight->dtype();
   ET_CHECK_OR_RETURN_ERROR(
       (dtype == ScalarType::Float || dtype == ScalarType::Half ||
        dtype == ScalarType::BFloat16) &&
-          weight->dtype() == dtype && bias->dtype() == dtype &&
-          running_mean->dtype() == dtype && running_var->dtype() == dtype,
+          (parameter_dtype == dtype || parameter_dtype == ScalarType::Float) &&
+          bias->dtype() == parameter_dtype &&
+          running_mean->dtype() == parameter_dtype &&
+          running_var->dtype() == parameter_dtype,
       NotSupported,
       "MUSA batch norm supports float32, float16, and bfloat16 tensors only");
   ET_CHECK_OR_RETURN_ERROR(
@@ -149,6 +152,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
   const int64_t channel_count = input->size(1);
   const int64_t descriptor_dims = input->dim() == 3 ? 4 : input->dim();
   const auto data_type = mudnn_data_type(dtype);
+  const auto parameter_data_type = mudnn_data_type(parameter_dtype);
   const auto tensor_format = descriptor_dims == 4 ? MUDNN_TENSOR_NCHW
                                                   : MUDNN_TENSOR_NCDHW;
 
@@ -226,7 +230,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
         mudnnSetTensorNdDescriptorEx(
             descriptor,
             tensor_format,
-            data_type,
+            parameter_data_type,
             static_cast<int>(descriptor_dims),
             parameter_dims.data()),
         "mudnnSetTensorNdDescriptorEx(parameter)");
