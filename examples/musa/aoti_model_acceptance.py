@@ -64,6 +64,7 @@ class SimpleCnn(nn.Module):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(3, 8, 3, padding=1),
+            nn.BatchNorm2d(8),
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(8, 16, 3, padding=1),
@@ -81,6 +82,7 @@ class SimpleAudioCnn(nn.Module):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv1d(2, 4, 3, padding=1),
+            nn.BatchNorm1d(4),
             nn.ReLU(),
             nn.Conv1d(4, 8, 3, stride=2, padding=1),
             nn.ReLU(),
@@ -97,6 +99,7 @@ class SimpleVideoCnn(nn.Module):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv3d(1, 4, 3, padding=1),
+            nn.BatchNorm3d(4),
             nn.ReLU(),
             nn.MaxPool3d(2),
             nn.Conv3d(4, 8, 3, padding=1),

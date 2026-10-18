@@ -13,6 +13,7 @@ from unittest import mock
 from typing import Any, Dict, List
 
 import torch
+from torch._inductor import ir, lowering
 from executorch.backends.aoti.aoti_backend import AotiBackend
 from executorch.backends.cuda.cuda_weight_collector import (
     AOTI_DEVICE_TYPE_CPU,
@@ -78,6 +79,129 @@ def _make_musa_addmm_inputs_contiguous(
         node.args = tuple(args)
     graph.lint()
     graph_module.recompile()
+
+
+_musa_batch_norm_library = torch.library.Library("executorch_musa", "DEF")
+_musa_batch_norm_library.define(
+    "batch_norm(Tensor input, Tensor weight, Tensor bias, "
+    "Tensor running_mean, Tensor running_var, float eps) -> Tensor"
+)
+
+
+def _musa_batch_norm_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return torch.nn.functional.batch_norm(
+        input, running_mean, running_var, weight, bias, False, 0.1, eps
+    )
+
+
+def _musa_batch_norm_meta(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return torch.empty_like(input)
+
+
+_musa_batch_norm_library.impl(
+    "batch_norm", _musa_batch_norm_impl, "PrivateUse1"
+)
+_musa_batch_norm_library.impl("batch_norm", _musa_batch_norm_meta, "Meta")
+_MUSA_BATCH_NORM = torch.ops.executorch_musa.batch_norm.default
+_MUSA_BATCH_NORM_HEADER = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "..",
+        "..",
+        "backends",
+        "cuda",
+        "runtime",
+        "shims",
+        "musa_batch_norm.h",
+    )
+)
+
+
+def _decompose_musa_batch_norm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    momentum: float,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+        _MUSA_BATCH_NORM(
+            input, weight, bias, running_mean, running_var, eps
+        ),
+        running_mean,
+        running_var,
+    )
+
+
+def _lower_musa_batch_norm(
+    input: Any,
+    weight: Any,
+    bias: Any,
+    running_mean: Any,
+    running_var: Any,
+    eps: float,
+) -> Any:
+    for tensor in (input, weight, bias, running_mean, running_var):
+        tensor.realize()
+    layout = ir.FixedLayout(
+        input.get_device(),
+        input.get_dtype(),
+        input.get_size(),
+        ir.FlexibleLayout.contiguous_strides(input.get_size()),
+    )
+    return ir.TensorBox.create(
+        ir.ExternKernelAlloc(
+            layout=layout,
+            inputs=[input, weight, bias, running_mean, running_var],
+            constant_args=[eps],
+            python_kernel_name="executorch_musa.batch_norm",
+            cpp_kernel_name="aoti_torch_musa_batch_norm",
+            op_overload=_MUSA_BATCH_NORM,
+        )
+    )
+
+
+lowering.register_lowering(_MUSA_BATCH_NORM, type_promotion_kind=None)(
+    _lower_musa_batch_norm
+)
+
+
+@contextlib.contextmanager
+def _musa_aoti_compile_context():
+    from torch._inductor.codegen.cpp_wrapper_cpu import CppWrapperCpu
+
+    original_add_device_include = CppWrapperCpu.add_device_include
+
+    def add_device_include_with_musa_shims(self: Any, device: str) -> None:
+        original_add_device_include(self, device)
+        if device == "musa":
+            self.header.splice(
+                f'#include "{_MUSA_BATCH_NORM_HEADER}"'
+            )
+
+    CppWrapperCpu.add_device_include = add_device_include_with_musa_shims
+    try:
+        yield
+    finally:
+        CppWrapperCpu.add_device_include = original_add_device_include
 
 
 def _decompose_scaled_dot_product_attention(
@@ -169,6 +293,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_mm_out": None,
             "aoti_torch_musa_bmm_out": None,
             "aoti_torch_musa_convolution": None,
+            "aoti_torch_musa_batch_norm": None,
         }
 
     @classmethod
@@ -178,6 +303,10 @@ class MusaBackend(AotiBackend, BackendDetails):
                 _decompose_scaled_dot_product_attention
             ),
             torch.ops.aten.linear.default: _decompose_linear,
+            torch.ops.aten.batch_norm.default: _decompose_musa_batch_norm,
+            torch.ops.aten._native_batch_norm_legit_no_training.default: (
+                _decompose_musa_batch_norm
+            ),
         }
 
     @classmethod
@@ -212,7 +341,7 @@ class MusaBackend(AotiBackend, BackendDetails):
     def get_extra_aoti_compile_context_manager(
         cls, compile_specs: List[CompileSpec] | None = None
     ):
-        return contextlib.nullcontext()
+        return _musa_aoti_compile_context()
 
     @classmethod
     def materialize_weights_blob(

@@ -275,7 +275,7 @@ endif()
 
 if(EXECUTORCH_BUILD_MUSA)
   list(APPEND _aoti_cuda_shim_sources runtime/shims/musa_addmm.cpp
-       runtime/shims/musa_convolution.cpp
+       runtime/shims/musa_convolution.cpp runtime/shims/musa_batch_norm.cpp
   )
   find_library(MUSA_MUDNN_LIBRARY mudnn HINTS ${MUSAToolkit_LIBRARY_DIR} REQUIRED)
   find_library(MUSA_MUDNN_CXX_LIBRARY mudnncxx
