@@ -81,11 +81,7 @@ def _make_musa_addmm_inputs_contiguous(
     graph_module.recompile()
 
 
-_musa_batch_norm_library = torch.library.Library("executorch_musa", "DEF")
-_musa_batch_norm_library.define(
-    "batch_norm(Tensor input, Tensor weight, Tensor bias, "
-    "Tensor running_mean, Tensor running_var, float eps) -> Tensor"
-)
+_musa_batch_norm_library = torch.library.Library("executorch_musa", "FRAGMENT")
 
 
 def _musa_batch_norm_impl(
@@ -112,11 +108,18 @@ def _musa_batch_norm_meta(
     return torch.empty_like(input)
 
 
-_musa_batch_norm_library.impl(
-    "batch_norm", _musa_batch_norm_impl, "PrivateUse1"
-)
-_musa_batch_norm_library.impl("batch_norm", _musa_batch_norm_meta, "Meta")
-_MUSA_BATCH_NORM = torch.ops.executorch_musa.batch_norm.default
+try:
+    _MUSA_BATCH_NORM = torch.ops.executorch_musa.batch_norm.default
+except AttributeError:
+    _musa_batch_norm_library.define(
+        "batch_norm(Tensor input, Tensor weight, Tensor bias, "
+        "Tensor running_mean, Tensor running_var, float eps) -> Tensor"
+    )
+    _musa_batch_norm_library.impl(
+        "batch_norm", _musa_batch_norm_impl, "PrivateUse1"
+    )
+    _musa_batch_norm_library.impl("batch_norm", _musa_batch_norm_meta, "Meta")
+    _MUSA_BATCH_NORM = torch.ops.executorch_musa.batch_norm.default
 _MUSA_BATCH_NORM_HEADER = os.path.abspath(
     os.path.join(
         os.path.dirname(__file__),

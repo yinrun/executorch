@@ -45,6 +45,7 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertIn("aoti_torch_musa_mm_out", fallbacks)
         self.assertIn("aoti_torch_musa_bmm_out", fallbacks)
         self.assertIn("aoti_torch_musa_convolution", fallbacks)
+        self.assertIn("aoti_torch_musa_batch_norm", fallbacks)
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
@@ -236,6 +237,19 @@ class TestMusaAoti(unittest.TestCase):
         exported = export(module, (example,))
         result = MusaBackend.preprocess(
             exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_batch_norm2d_aoti_compile(self) -> None:
+        module = nn.BatchNorm2d(4).eval().to("musa", dtype=torch.bfloat16)
+        example = torch.randn(
+            1, 4, 8, 8, device="musa", dtype=torch.bfloat16
+        )
+        result = MusaBackend.preprocess(
+            export(module, (example,)),
             [MusaBackend.generate_method_name_compile_spec("forward")],
         )
 
