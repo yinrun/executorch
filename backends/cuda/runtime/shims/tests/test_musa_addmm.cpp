@@ -584,6 +584,55 @@ TEST_F(MusaAddmmTest, VitAttentionProjection) {
   }
 }
 
+TEST_F(MusaAddmmTest, VitClassifierProjection) {
+  constexpr int64_t hidden_size = 768;
+  constexpr int64_t classes = 1000;
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    SlimTensor* output = empty_tensor(dtype, {1, classes}, {classes, 1});
+    SlimTensor* bias = empty_tensor(dtype, {classes}, {1});
+    SlimTensor* mat1 = empty_tensor(dtype, {1, hidden_size}, {0, 1});
+    SlimTensor* mat2 =
+        empty_tensor(dtype, {hidden_size, classes}, {1, hidden_size});
+    copy_to_device(
+        mat1, encode_values(std::vector<float>(hidden_size, 0.125f), dtype));
+    copy_to_device(
+        mat2,
+        encode_values(
+            std::vector<float>(hidden_size * classes, 0.015625f), dtype));
+    copy_to_device(bias, encode_values(std::vector<float>(classes, 1.0f), dtype));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    for (int repeat = 0; repeat < 4; ++repeat) {
+      SCOPED_TRACE(::testing::Message()
+                   << "dtype=" << static_cast<int>(dtype)
+                   << " repeat=" << repeat);
+      ASSERT_EQ(
+          aoti_torch_musa_addmm_out(output, bias, mat1, mat2, 1.0, 1.0),
+          Error::Ok);
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+      const auto actual = copy_from_device(output, dtype);
+      ASSERT_EQ(actual.size(), classes);
+      size_t incorrect = 0;
+      for (size_t index = 0; index < actual.size(); ++index) {
+        if (!std::isfinite(actual[index]) ||
+            std::abs(actual[index] - 2.5f) > 0.01f) {
+          if (incorrect < 8) {
+            ADD_FAILURE() << "mismatch at " << index << ": " << actual[index];
+          }
+          ++incorrect;
+        }
+      }
+      EXPECT_EQ(incorrect, 0);
+    }
+
+    delete output;
+    delete bias;
+    delete mat1;
+    delete mat2;
+  }
+}
+
 TEST_F(MusaAddmmTest, VitAttentionScores) {
   constexpr int64_t tokens = 197;
   constexpr int64_t head_size = 64;

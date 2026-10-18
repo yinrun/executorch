@@ -476,6 +476,22 @@ replays do not establish production reliability or throughput. The original
 FP32 static PTE also produced finite logits in 3/3 fresh runs with maximum
 absolute error 1.1921e-6 after the shim change. The 13 C++ shim tests and all
 31 MUSA AOTI Python export tests passed with this implementation.
+
+To narrow down the remaining BF16 NaNs, a new classifier-shaped shim regression
+covers `[1, 768] @ [768, 1000]` with a zero first-row stride, transposed
+weights, and one-dimensional bias. All three dtypes passed four calls each in
+30 fresh processes, and the full shim suite (including the explicitly enabled
+padded regression) passed 13/13. A diagnostic BF16 pretrained ViT PTE that
+returns class tokens before and after each attention residual passed 12/12
+fresh replays with no NaNs; its input matched the original PTE's input
+byte-for-byte. Separately, a BF16 PTE containing the *actual pretrained*
+final LayerNorm and classifier, fed the eager last-stage class token, matched
+MUSA eager exactly in 16/16 fresh runs. Neither experiment preserves the
+original full model's allocation and execution schedule, so these results do
+not prove that its classifier or attention is sound. Switching the MUSA
+SlimTensor free path from `cudaFreeAsync` to synchronous `cudaFree` still
+produced 1,000 NaN logits in one of five original BF16 full-model replays;
+the change was reverted. The intermittent full-model BF16 failure remains.
 These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,
