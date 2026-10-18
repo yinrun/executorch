@@ -424,10 +424,13 @@ def _make_input(
     model_name: str, input_shape: tuple[int, ...], dtype: torch.dtype
 ) -> torch.Tensor:
     if model_name in TOKEN_MODEL_NAMES:
-        return torch.randint(
+        result = torch.randint(
             TOKEN_VOCAB_SIZE, input_shape, device="musa", dtype=torch.int64
         )
-    return torch.randn(input_shape, device="musa", dtype=dtype)
+    else:
+        result = torch.randn(input_shape, device="musa", dtype=dtype)
+    torch.musa.synchronize()
+    return result
 
 
 def _write_input(
@@ -556,8 +559,6 @@ def export_model(
                 "--dynamic-spatial-max requires bilinear_unet (min=24) or "
                 "deeplabv3_mobilenet_v3_large (min=48), with max >= input size"
             )
-        if dynamic_batch_max is not None:
-            raise ValueError("Dynamic batch and spatial dimensions cannot be combined")
     if weights_path is not None and model_name not in (
         "resnet18",
         "mobilenet_v2",
@@ -568,26 +569,30 @@ def export_model(
     model = model_type()
     if weights_path is not None:
         state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
-        checkpoint_model = model.model if isinstance(model, DeepLabV3MobileNet) else model
+        checkpoint_model = (
+            model.model if isinstance(model, DeepLabV3MobileNet) else model
+        )
         checkpoint_model.load_state_dict(state_dict)
     model = model.eval().to(device="musa", dtype=dtype)
     example = _make_input(model_name, input_shape, dtype)
+    original_input = example.detach().cpu().clone()
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
         expected = model(example)
 
-    dynamic_shapes = None
-    max_shape = None
+    dynamic_dimensions = {}
+    max_shape = list(input_shape)
     if dynamic_batch_max is not None:
-        dynamic_shapes = ({0: Dim("batch", min=1, max=dynamic_batch_max)},)
-        max_shape = (dynamic_batch_max, *input_shape[1:])
-    elif dynamic_spatial_max is not None:
-        dynamic_shapes = (
-            {
-                2: Dim("height", min=spatial_minimum, max=dynamic_spatial_max),
-                3: Dim("width", min=spatial_minimum, max=dynamic_spatial_max),
-            },
+        dynamic_dimensions[0] = Dim("batch", min=1, max=dynamic_batch_max)
+        max_shape[0] = dynamic_batch_max
+    if dynamic_spatial_max is not None:
+        dynamic_dimensions[2] = Dim(
+            "height", min=spatial_minimum, max=dynamic_spatial_max
         )
-        max_shape = (batch_size, 3, dynamic_spatial_max, dynamic_spatial_max)
+        dynamic_dimensions[3] = Dim(
+            "width", min=spatial_minimum, max=dynamic_spatial_max
+        )
+        max_shape[2:] = [dynamic_spatial_max, dynamic_spatial_max]
+    dynamic_shapes = (dynamic_dimensions,) if dynamic_dimensions else None
     exported = export(model, (example,), dynamic_shapes=dynamic_shapes)
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     with _serialization_schema():
@@ -600,7 +605,9 @@ def export_model(
 
     input_path = output_dir / "input-0.bin"
     expected_path = output_dir / "expected-0.bin"
-    _write_input(example, input_path, max_shape)
+    _write_input(
+        original_input, input_path, tuple(max_shape) if dynamic_shapes else None
+    )
     _write_tensor(expected, expected_path)
     ptd_path = output_dir / "aoti_musa_blob.ptd"
     if not ptd_path.exists():
@@ -655,7 +662,25 @@ def main() -> None:
 
     if args.runner is not None:
         result["runner"] = str(args.runner)
-        if args.dynamic_batch_max is not None:
+        if args.dynamic_spatial_max is not None:
+            max_size = args.dynamic_spatial_max
+            min_size = 48 if args.model == "deeplabv3_mobilenet_v3_large" else 24
+            max_batch = args.dynamic_batch_max or args.batch_size
+            input_shapes = dict.fromkeys(
+                (
+                    input_shape,
+                    (
+                        1 if args.dynamic_batch_max else args.batch_size,
+                        3,
+                        min_size,
+                        min_size + 6,
+                    ),
+                    (max_batch, 3, max_size, max_size),
+                    (args.batch_size, 3, max_size - 1, max_size - 9),
+                )
+            )
+            max_shape = (max_batch, 3, max_size, max_size)
+        elif args.dynamic_batch_max is not None:
             input_shapes = dict.fromkeys(
                 (
                     input_shape,
@@ -664,24 +689,16 @@ def main() -> None:
                 )
             )
             max_shape = (args.dynamic_batch_max, *input_shape[1:])
-        elif args.dynamic_spatial_max is not None:
-            max_size = args.dynamic_spatial_max
-            min_size = 48 if args.model == "deeplabv3_mobilenet_v3_large" else 24
-            input_shapes = dict.fromkeys(
-                (
-                    input_shape,
-                    (args.batch_size, 3, min_size, min_size + 6),
-                    (args.batch_size, 3, max_size, max_size),
-                    (args.batch_size, 3, max_size - 1, max_size - 9),
-                )
-            )
-            max_shape = (args.batch_size, 3, max_size, max_size)
         else:
             input_shapes = (input_shape,)
             max_shape = None
         for current_shape in input_shapes:
             label = (
-                f"{current_shape[-2]}x{current_shape[-1]}"
+                (
+                    f"{current_shape[0]}-{current_shape[-2]}x{current_shape[-1]}"
+                    if args.dynamic_batch_max is not None
+                    else f"{current_shape[-2]}x{current_shape[-1]}"
+                )
                 if args.dynamic_spatial_max is not None
                 else str(current_shape[0])
             )
@@ -690,10 +707,11 @@ def main() -> None:
                 current_expected = expected
             else:
                 example = _make_input(args.model, current_shape, DTYPES[args.dtype])
+                original_input = example.detach().cpu().clone()
                 with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
                     current_expected = model(example)
                 current_input_path = args.output_dir / f"input-{label}.bin"
-                _write_input(example, current_input_path, max_shape)
+                _write_input(original_input, current_input_path, max_shape)
                 _write_tensor(
                     current_expected, args.output_dir / f"expected-{label}.bin"
                 )
@@ -734,11 +752,18 @@ def main() -> None:
                     )
                 if current_shape == input_shape:
                     result["segmentation_pixel_labels_match"] = True
-            if args.dynamic_batch_max is not None:
+            if (
+                args.dynamic_batch_max is not None
+                and args.dynamic_spatial_max is not None
+            ):
+                result.setdefault("dynamic_shape_results", []).append(
+                    {"shape": list(current_shape), "max_error": max_error}
+                )
+            elif args.dynamic_batch_max is not None:
                 result.setdefault("dynamic_batch_results", []).append(
                     {"batch_size": current_shape[0], "max_error": max_error}
                 )
-            if args.dynamic_spatial_max is not None:
+            elif args.dynamic_spatial_max is not None:
                 result.setdefault("dynamic_spatial_results", []).append(
                     {"shape": list(current_shape), "max_error": max_error}
                 )

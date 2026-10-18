@@ -370,13 +370,17 @@ class TestMusaAoti(unittest.TestCase):
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
-    def test_deeplabv3_mobilenet_dynamic_spatial_aoti_compile(self) -> None:
+    def test_deeplabv3_mobilenet_combined_dynamic_aoti_compile(self) -> None:
         module = DeepLabV3MobileNet().eval().to("musa")
         exported = export(
             module,
-            (torch.randn(1, 3, 64, 64, device="musa"),),
+            (torch.randn(2, 3, 64, 64, device="musa"),),
             dynamic_shapes=(
-                {2: Dim("height", min=48, max=80), 3: Dim("width", min=48, max=80)},
+                {
+                    0: Dim("batch", min=1, max=3),
+                    2: Dim("height", min=48, max=80),
+                    3: Dim("width", min=48, max=80),
+                },
             ),
         )
         result = MusaBackend.preprocess(
