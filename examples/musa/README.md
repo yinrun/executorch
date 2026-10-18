@@ -454,6 +454,25 @@ eager outputs were finite. A newly exported static FP16 PTE also returned
 1,000 NaN logits on its first run. The issue is not limited to dynamic batch;
 the original pretrained FP32 static PTE passed five identical replays with
 maximum logit error 3.81e-6.
+
+A subsequent MUSA-only shim change uses the same muDNN `MatMul` and
+`BatchMatMul` classes as PyTorch MUSA eager for addmm/mm and packed,
+non-broadcast BMM, including fused one-dimensional bias. Padded addmm input
+rows are packed first; broadcast or padded BMM batches retain the existing
+muBLAS path. SlimTensor's MUSA allocations use synchronous `cudaMalloc`
+instead of stream-ordered allocation because the latter still gave intermittent
+zero outputs in the focused matrix tests. This is not a measured performance
+improvement and its allocation overhead and graph-capture compatibility need
+evaluation. All 13 C++ shim tests, including the explicitly enabled padded
+no-bias regression, passed in one fresh process; the focused addmm/BMM tests
+passed in five more fresh processes. Replaying the *unchanged* static pretrained
+ViT PTE/PTD and input eight times per dtype gave finite FP16 logits in 8/8
+runs (maximum absolute error 0.001953125 versus recorded MUSA eager output)
+and finite BF16 logits in 6/8 runs (maximum finite-run error 0.03125); the
+other two BF16 runs each contained 1,000 NaN logits. The earlier muBLAS
+results above describe the old shim, not this one. BF16 pretrained ViT is
+still not a reliable supported configuration, and eight successful FP16
+replays do not establish production reliability or throughput.
 These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,

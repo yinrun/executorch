@@ -7,15 +7,18 @@
  */
 
 #include <mublas_v2.h>
+#include <mudnncxx/mudnn.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <optional>
 
 #include <executorch/backends/aoti/export.h>
 #include <executorch/backends/aoti/slim/core/slim_tensor.h>
 #include <executorch/backends/aoti/slim/c10/cuda/Exception.h>
 #include <executorch/backends/aoti/slim/cuda/guard.h>
+#include <executorch/backends/aoti/slim/factory/empty.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/core/portable_type/half.h>
 #include <executorch/runtime/platform/assert.h>
@@ -40,6 +43,72 @@ AOTITorchError check_mublas(mublasStatus status, const char* operation) {
       operation,
       static_cast<int>(status));
   return Error::Internal;
+}
+
+AOTITorchError check_mudnn(
+    ::musa::dnn::Status status,
+    const char* operation) {
+  if (status == ::musa::dnn::Status::SUCCESS) {
+    return Error::Ok;
+  }
+  ET_LOG(
+      Error,
+      "MUSA matrix operation: %s failed with mudnn status %d",
+      operation,
+      static_cast<int>(status));
+  return Error::Internal;
+}
+
+::musa::dnn::Tensor::Type mudnn_type(ScalarType dtype) {
+  if (dtype == ScalarType::Float) {
+    return ::musa::dnn::Tensor::Type::FLOAT;
+  }
+  return dtype == ScalarType::Half
+      ? ::musa::dnn::Tensor::Type::HALF
+      : ::musa::dnn::Tensor::Type::BFLOAT16;
+}
+
+AOTITorchError set_mudnn_tensor(
+    ::musa::dnn::Tensor& descriptor,
+    const SlimTensor* tensor,
+    bool transpose = false) {
+  AOTITorchError error =
+      check_mudnn(descriptor.SetAddr(tensor->data_ptr()), "Tensor.SetAddr");
+  if (error != Error::Ok) {
+    return error;
+  }
+  error = check_mudnn(
+      descriptor.SetType(mudnn_type(tensor->dtype())), "Tensor.SetType");
+  if (error != Error::Ok) {
+    return error;
+  }
+  if (transpose) {
+    if (tensor->dim() == 3) {
+      const int64_t sizes[] = {
+          tensor->size(0), tensor->size(2), tensor->size(1)};
+      const int64_t strides[] = {
+          tensor->stride(0), tensor->stride(2), tensor->stride(1)};
+      return check_mudnn(
+          descriptor.SetNdInfo(3, sizes, strides), "Tensor.SetNdInfo");
+    }
+    const int64_t sizes[] = {tensor->size(1), tensor->size(0)};
+    const int64_t strides[] = {tensor->stride(1), tensor->stride(0)};
+    return check_mudnn(
+        descriptor.SetNdInfo(2, sizes, strides), "Tensor.SetNdInfo");
+  }
+  if (tensor->dim() == 2 && tensor->size(0) == 1 &&
+      tensor->stride(0) == 0) {
+    const int64_t sizes[] = {1, tensor->size(1)};
+    const int64_t strides[] = {tensor->size(1), tensor->stride(1)};
+    return check_mudnn(
+        descriptor.SetNdInfo(2, sizes, strides), "Tensor.SetNdInfo");
+  }
+  return check_mudnn(
+      descriptor.SetNdInfo(
+          static_cast<int64_t>(tensor->dim()),
+          tensor->sizes().data(),
+          tensor->strides().data()),
+      "Tensor.SetNdInfo");
 }
 
 bool fits_mublas_dimension(int64_t value) {
@@ -138,51 +207,87 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   cudaStream_t stream = stream_result.get();
 
-  mublasHandle_t handle = nullptr;
-  AOTITorchError error = check_mublas(mublasCreate(&handle), "mublasCreate");
+  std::optional<SlimTensor> packed_mat1;
+  if (mat1_padded_rows && !mat1_row_major) {
+    const int64_t packed_strides[] = {k, 1};
+    packed_mat1.emplace(executorch::backends::aoti::slim::empty_strided(
+        mat1->sizes(),
+        executorch::backends::aoti::slim::IntArrayRef(packed_strides, 2),
+        dtype,
+        mat1->device()));
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpy2DAsync(
+        packed_mat1->data_ptr(),
+        static_cast<size_t>(k) * out->itemsize(),
+        mat1->data_ptr(),
+        static_cast<size_t>(mat1_strides[0]) * out->itemsize(),
+        static_cast<size_t>(k) * out->itemsize(),
+        static_cast<size_t>(m),
+        cudaMemcpyDeviceToDevice,
+        stream));
+  }
+
+  ::musa::dnn::Handle handle(out->device_index());
+  AOTITorchError error =
+      check_mudnn(handle.SetStream(stream), "Handle.SetStream");
   if (error != Error::Ok) {
     return error;
   }
-
-  error = check_mublas(
-      mublasSetStream(handle, reinterpret_cast<MUstream>(stream)),
-      "mublasSetStream");
+  error = check_mudnn(handle.SetAllowTF32(false), "Handle.SetAllowTF32");
   if (error != Error::Ok) {
-    mublasDestroy(handle);
     return error;
   }
-
-  error = check_mublas(
-      mublasSetPointerMode(handle, MUBLAS_POINTER_MODE_HOST),
-      "mublasSetPointerMode");
+  ::musa::dnn::Tensor left;
+  ::musa::dnn::Tensor right;
+  ::musa::dnn::Tensor output;
+  error = set_mudnn_tensor(
+      left, packed_mat1 ? &*packed_mat1 : mat1, mat1_column_major);
   if (error != Error::Ok) {
-    mublasDestroy(handle);
     return error;
   }
-
+  error = set_mudnn_tensor(right, mat2, mat2_column_major);
+  if (error != Error::Ok) {
+    return error;
+  }
+  error = set_mudnn_tensor(output, out);
+  if (error != Error::Ok) {
+    return error;
+  }
+  ::musa::dnn::MatMul operation;
+  error = check_mudnn(
+      operation.SetComputeMode(
+          dtype == ScalarType::Float
+              ? ::musa::dnn::MatMul::ComputeMode::SCALAR
+              : ::musa::dnn::MatMul::ComputeMode::TENSOR),
+      "MatMul.SetComputeMode");
+  if (error != Error::Ok) {
+    return error;
+  }
+  error = check_mudnn(
+      operation.SetTranspose(mat1_column_major, mat2_column_major),
+      "MatMul.SetTranspose");
+  if (error != Error::Ok) {
+    return error;
+  }
+  error = check_mudnn(operation.SetAlpha(alpha), "MatMul.SetAlpha");
+  if (error != Error::Ok) {
+    return error;
+  }
+  if (beta != 0.0 && self->dim() == 1) {
+    ::musa::dnn::Tensor bias;
+    error = set_mudnn_tensor(bias, self);
+    if (error != Error::Ok) {
+      return error;
+    }
+    error = check_mudnn(operation.SetGamma(beta), "MatMul.SetGamma");
+    if (error != Error::Ok) {
+      return error;
+    }
+    return check_mudnn(
+        operation.RunWithBiasAdd(handle, output, left, right, bias),
+        "MatMul.RunWithBiasAdd");
+  }
   if (beta != 0.0) {
-    if (self->dim() == 1) {
-      const size_t row_bytes =
-          static_cast<size_t>(n) * static_cast<size_t>(out->itemsize());
-      if (m > 0) {
-        ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
-            out->data_ptr(),
-            self->data_ptr(),
-            row_bytes,
-            cudaMemcpyDeviceToDevice,
-            stream));
-        for (int64_t copied_rows = 1; copied_rows < m;) {
-          const int64_t next_rows = std::min(copied_rows, m - copied_rows);
-          ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
-              static_cast<char*>(out->data_ptr()) + copied_rows * row_bytes,
-              out->data_ptr(),
-              next_rows * row_bytes,
-              cudaMemcpyDeviceToDevice,
-              stream));
-          copied_rows += next_rows;
-        }
-      }
-    } else if (out->data_ptr() != self->data_ptr()) {
+    if (out->data_ptr() != self->data_ptr()) {
       ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
           out->data_ptr(),
           self->data_ptr(),
@@ -190,62 +295,12 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
           cudaMemcpyDeviceToDevice,
           stream));
     }
+    error = check_mudnn(operation.SetBeta(beta), "MatMul.SetBeta");
+    if (error != Error::Ok) {
+      return error;
+    }
   }
-
-  const float alpha_float = static_cast<float>(alpha);
-  const float beta_float = static_cast<float>(beta);
-  const executorch::runtime::etensor::Half alpha_half(alpha_float);
-  const executorch::runtime::etensor::Half beta_half(beta_float);
-  const void* alpha_ptr = dtype == ScalarType::Half
-      ? static_cast<const void*>(&alpha_half)
-      : static_cast<const void*>(&alpha_float);
-  const void* beta_ptr = dtype == ScalarType::Half
-      ? static_cast<const void*>(&beta_half)
-      : static_cast<const void*>(&beta_float);
-  const mublasOperation_t mat2_operation =
-      mat2_column_major ? MUBLAS_OP_T : MUBLAS_OP_N;
-  const mublasOperation_t mat1_operation =
-      (mat1_row_major || mat1_padded_rows) ? MUBLAS_OP_N : MUBLAS_OP_T;
-  const int mat2_leading_dimension =
-      static_cast<int>(mat2_column_major ? k : n);
-  const int mat1_leading_dimension =
-      static_cast<int>(mat1_row_major ? k : (mat1_padded_rows ? mat1_strides[0] : m));
-  const musaDataType_t data_type =
-      dtype == ScalarType::Float
-      ? MUSA_R_32F
-      : (dtype == ScalarType::Half ? MUSA_R_16F : MUSA_R_16BF);
-  const mublasComputeType_t compute_type =
-      dtype == ScalarType::Half ? MUBLAS_COMPUTE_16F : MUBLAS_COMPUTE_32F;
-
-  // mublas uses column-major matrices. Swapping the row-major operands and
-  // dimensions computes the same row-major mat1 @ mat2 result in-place. A
-  // transposed row-major weight is already column-major for the logical mat2.
-  error = check_mublas(
-      mublasGemmEx(
-          handle,
-          mat2_operation,
-          mat1_operation,
-          static_cast<int>(n),
-          static_cast<int>(m),
-          static_cast<int>(k),
-          alpha_ptr,
-          mat2->data_ptr(),
-          data_type,
-          mat2_leading_dimension,
-          mat1->data_ptr(),
-          data_type,
-          mat1_leading_dimension,
-          beta_ptr,
-          out->data_ptr(),
-          data_type,
-          static_cast<int>(n),
-          compute_type,
-          MUBLAS_GEMM_DEFAULT),
-      "mublasGemmEx");
-
-  const AOTITorchError destroy_error =
-      check_mublas(mublasDestroy(handle), "mublasDestroy");
-  return error == Error::Ok ? destroy_error : error;
+  return check_mudnn(operation.Run(handle, output, left, right), "MatMul.Run");
 }
 
 AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_mm_out(
@@ -326,6 +381,63 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
   auto stream_result = getCurrentCUDAStream(out->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   cudaStream_t stream = stream_result.get();
+
+  if (batch > 0 && m > 0 && k > 0 && n > 0 &&
+      mat1_strides[1] > 0 && mat2_strides[1] > 0 &&
+      mat1_strides[0] == m * k && mat2_strides[0] == k * n &&
+      out->strides()[0] == m * n) {
+    ::musa::dnn::Handle handle(out->device_index());
+    AOTITorchError error =
+        check_mudnn(handle.SetStream(stream), "Handle.SetStream");
+    if (error != Error::Ok) {
+      return error;
+    }
+    error = check_mudnn(handle.SetAllowTF32(false), "Handle.SetAllowTF32");
+    if (error != Error::Ok) {
+      return error;
+    }
+    ::musa::dnn::Tensor left;
+    ::musa::dnn::Tensor right;
+    ::musa::dnn::Tensor output;
+    error = set_mudnn_tensor(left, mat1, mat1_column_major);
+    if (error != Error::Ok) {
+      return error;
+    }
+    error = set_mudnn_tensor(right, mat2, mat2_column_major);
+    if (error != Error::Ok) {
+      return error;
+    }
+    error = set_mudnn_tensor(output, out);
+    if (error != Error::Ok) {
+      return error;
+    }
+    ::musa::dnn::BatchMatMul operation;
+    error = check_mudnn(
+        operation.SetComputeMode(
+            dtype == ScalarType::Float
+                ? ::musa::dnn::BatchMatMul::ComputeMode::SCALAR
+                : ::musa::dnn::BatchMatMul::ComputeMode::TENSOR),
+        "BatchMatMul.SetComputeMode");
+    if (error != Error::Ok) {
+      return error;
+    }
+    error = check_mudnn(
+        operation.SetTranspose(mat1_column_major, mat2_column_major),
+        "BatchMatMul.SetTranspose");
+    if (error != Error::Ok) {
+      return error;
+    }
+    error = check_mudnn(operation.SetAlpha(1.0), "BatchMatMul.SetAlpha");
+    if (error != Error::Ok) {
+      return error;
+    }
+    error = check_mudnn(operation.SetBeta(0.0), "BatchMatMul.SetBeta");
+    if (error != Error::Ok) {
+      return error;
+    }
+    return check_mudnn(
+        operation.Run(handle, output, left, right), "BatchMatMul.Run");
+  }
 
   mublasHandle_t handle = nullptr;
   AOTITorchError error = check_mublas(mublasCreate(&handle), "mublasCreate");

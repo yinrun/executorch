@@ -117,11 +117,16 @@ struct DeviceTraits<c10::DeviceType::CUDA> {
         static_cast<int>(device.index()));
 
     cudaStream_t stream = stream_result.get();
+#if defined(EXECUTORCH_USE_MUSA)
+    auto result = executorch::backends::cuda::CudaAllocator::instance().allocate(
+        nbytes, device.index());
+#else
     auto result = executorch::backends::cuda::CudaAllocator::allocate_async(
         nbytes, device.index(), stream);
+#endif
     ET_CHECK_MSG(
         result.ok(),
-        "CudaAllocator::allocate_async failed for %zu bytes on device %d",
+        "CudaAllocator allocation failed for %zu bytes on device %d",
         nbytes,
         static_cast<int>(device.index()));
     return result.get();

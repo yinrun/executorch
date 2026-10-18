@@ -278,6 +278,8 @@ if(EXECUTORCH_BUILD_MUSA)
        runtime/shims/musa_convolution.cpp
   )
   find_library(MUSA_MUDNN_LIBRARY mudnn HINTS ${MUSAToolkit_LIBRARY_DIR} REQUIRED)
+  find_library(MUSA_MUDNN_CXX_LIBRARY mudnncxx
+               HINTS ${MUSAToolkit_LIBRARY_DIR} REQUIRED)
 endif()
 
 add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
@@ -345,7 +347,9 @@ else()
 endif()
 
 if(EXECUTORCH_BUILD_MUSA)
-  target_link_libraries(aoti_cuda_shims PUBLIC MUSA::mublas ${MUSA_MUDNN_LIBRARY})
+  target_link_libraries(aoti_cuda_shims PUBLIC MUSA::mublas
+                                              ${MUSA_MUDNN_LIBRARY}
+                                              ${MUSA_MUDNN_CXX_LIBRARY})
 endif()
 
 if(NOT _cuda_is_msvc_toolchain)
