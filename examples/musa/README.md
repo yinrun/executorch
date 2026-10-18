@@ -422,6 +422,13 @@ normal CI because it is intentionally intermittent; run it explicitly with
 `--gtest_also_run_disabled_tests --gtest_filter=MusaAddmmTest.DISABLED_PaddedMat1WithoutBias`.
 These observations implicate the GEMM execution or its ordering but do not
 identify a validated runtime or SDK fix.
+For comparison, PyTorch MUSA eager `torch.addmm` with the same padded
+`[2, 3]` input, `[3, 2]` weight, 1-D bias, three dtypes, and `beta=0/1`
+matched exact hand-calculated results in 20 fresh processes, with ten
+allocations per dtype per process (1,200 addmm calls total). Eager may use a
+different algorithm, handle lifetime, or input layout; this contrast does
+not establish which shim or SDK step fails. The next useful comparison is
+the two paths' actual GEMM arguments, stream ordering, and input packing.
 For a full-depth FP16 PTE in layer-token mode, five replays of the same
 batch-2 input first produced NaNs at stages [none, 5], [4, 4], [6, 6],
 [none, none], and [4, 2] for its two batches. Stage 0 and stage 1 stayed
