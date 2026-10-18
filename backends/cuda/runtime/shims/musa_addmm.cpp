@@ -592,7 +592,9 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       static_cast<long long>(mat1_strides[0]);
   const long long out_batch_stride = static_cast<long long>(out->strides()[0]);
 
-  if (mat1_batch_stride == 0 || mat2_batch_stride == 0) {
+  if (dtype == ScalarType::Float || dtype == ScalarType::Half ||
+      dtype == ScalarType::BFloat16 || mat1_batch_stride == 0 ||
+      mat2_batch_stride == 0) {
     const size_t element_size = out->itemsize();
     for (int64_t batch_index = 0; batch_index < batch; ++batch_index) {
       error = check_mublas(
