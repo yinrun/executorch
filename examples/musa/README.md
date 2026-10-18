@@ -1,6 +1,6 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for twenty models:
+`aoti_model_acceptance.py` validates the complete MUSA path for twenty-one models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
@@ -19,6 +19,7 @@
 - `narrow_resnet18`: ResNet-18 block topology with narrow channels and a 32x32 input;
 - `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input;
 - `mobilenet_v2`: torchvision MobileNetV2 with depthwise convolutions and a 64x64 input.
+- `efficientnet_b0`: torchvision EfficientNet-B0 with squeeze-and-excitation, SiLU, and depthwise convolutions;
 - `deeplabv3_mobilenet_v3_large`: torchvision DeepLabV3 segmentation with a MobileNetV3 backbone and an output of 21-class pixel logits.
 
 The script writes the PTE, external AOTI data, raw input, expected output, and
@@ -34,8 +35,9 @@ the same export and runner path in lower precision. The default absolute and
 relative comparison tolerances are 1e-4 (FP32), 1e-2 (FP16), and 4e-2 (BF16);
 token models always accept raw int64 input IDs and `--dtype` selects the
 weights and output dtype. For `token_decoder`, the script also checks exact
-argmax token IDs against MUSA eager. For DeepLabV3, it also checks exact
-per-pixel predicted labels. Override the tolerances with `--atol` and
+argmax token IDs against MUSA eager. For EfficientNet-B0 it checks predicted
+class IDs, and for DeepLabV3 it checks exact per-pixel predicted labels.
+Override the tolerances with `--atol` and
 `--rtol` if needed. `--input-size 224` exports a supported torchvision
 image model with a 224x224 input instead of its default size. Except
 for the bounded dynamic-spatial `bilinear_unet` and DeepLabV3 cases below,
@@ -88,7 +90,7 @@ these cases to zeros or flash output would change masking semantics.
 
 - MUSA and `torch_musa` are available to the selected Python environment;
 - the MUSA-compatible Triton package required by TorchInductor is installed;
-- `torchvision` is available for the standard ResNet18, MobileNetV2, and DeepLabV3 models;
+- `torchvision` is available for the standard ResNet18, MobileNetV2, EfficientNet-B0, and DeepLabV3 models;
 - `flatc` is available on `PATH` for PTE/PTD serialization;
 - an ExecuTorch `executor_runner` built with `EXECUTORCH_BUILD_MUSA=ON`.
 
@@ -134,6 +136,18 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --model bilinear_unet \
   --batch-size 2 --dynamic-batch-max 3 --dynamic-spatial-max 48 \
   --output-dir /tmp/executorch-musa-acceptance/bilinear_unet_batch_spatial \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model efficientnet_b0 --input-size 224 --dtype bf16 \
+  --weights /path/to/efficientnet_b0_rwightman-7f5810bc.pth \
+  --output-dir /tmp/executorch-musa-acceptance/efficientnet_b0_pretrained \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model efficientnet_b0 --batch-size 2 --dynamic-batch-max 3 \
+  --weights /path/to/efficientnet_b0_rwightman-7f5810bc.pth \
+  --output-dir /tmp/executorch-musa-acceptance/efficientnet_b0_dynamic \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
@@ -214,6 +228,9 @@ accuracy or performance.
 MobileNetV2 IMAGENET1K_V2 weights are available at
 `https://download.pytorch.org/models/mobilenet_v2-7ebf99e0.pth` (SHA-256
 `7ebf99e03e254b273379b23edca7ec0da9f48273b23a332b93c1c99d49e86e8f`).
+EfficientNet-B0 IMAGENET1K_V1 weights are available at
+`https://download.pytorch.org/models/efficientnet_b0_rwightman-7f5810bc.pth`
+(SHA-256 `7f5810bc96def8f7552d5b7e68d53c4786f81167d28291b21c0d90e1fca14934`).
 DeepLabV3 MobileNetV3 COCO-with-VOC-labels weights are available at
 `https://download.pytorch.org/models/deeplabv3_mobilenet_v3_large-fc3c493d.pth`
 (SHA-256 `fc3c493d68e89cc31ef488c803d5d7dd2f3190fb570598faa49fef69be8e5e70`).
@@ -245,6 +262,8 @@ passed `executor_runner` versus MUSA eager (maximum absolute output error):
 | ResNet18 | 1x3x64x64 | BF16 | Official pretrained | 0 |
 | MobileNetV2 | 1x3x224x224 | FP32 | Official pretrained | 2.03e-6 |
 | MobileNetV2 | 1x3x64x64 | FP16 | Official pretrained | 1.37e-2 (`--atol 0.02`) |
+| EfficientNet-B0 | 1x3x64x64 | FP32 | Official pretrained | 7.39e-6 (class 644) |
+| EfficientNet-B0 | 1x3x224x224 | FP32 / FP16 / BF16 | Official pretrained | 1.79e-6 / 4.09e-3 / 2.83e-2 (class 314) |
 | DeepLabV3 MobileNetV3 | 1x3x64x64 | FP32 | Official pretrained | 9.16e-5 (0/4096 differing pixel labels) |
 | DeepLabV3 MobileNetV3 | 2x3x64x64 | FP32 | Official pretrained | 1.18e-4 (0/8192 differing pixel labels) |
 | ResNet18 | 2x3x64x64 | FP32 | Official pretrained | 3.34e-5 |
@@ -254,6 +273,10 @@ With a single dynamic-batch PTE for each model, batches 2/1/4 of FP32 MLP
 passed (maximum error 4.47e-8). Batches 2/1/3 also passed for FP32 simple CNN
 (3.58e-7), pretrained ResNet18 (3.53e-5), and pretrained MobileNetV2
 (1.76e-5); both pretrained models used 64x64 inputs.
+Official pretrained EfficientNet-B0 also passed batches 2/1/3 using one FP32
+PTE at 64x64 (maximum logit error 8.35e-6); predicted class IDs matched eager
+for all batches. These checks use random inputs, not ImageNet accuracy or
+throughput measurements.
 For the simple 3D CNN, batches 2/1/3 passed with a single PTE in both FP16
 (maximum error 6.11e-5) and BF16 (4.89e-4).
 For the simple decoder, batches 2/1/3 passed with a single PTE in both FP16

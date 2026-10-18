@@ -12,6 +12,7 @@ smoke test for the complete export path, not a benchmark. The
 channels; ``resnet18`` is the standard torchvision model with optional weights.
 ``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6;
 ``deeplabv3_mobilenet_v3_large`` covers a pretrained segmentation network.
+``efficientnet_b0`` covers squeeze-and-excitation and SiLU blocks.
 """
 
 from __future__ import annotations
@@ -367,6 +368,12 @@ def _torchvision_mobilenet_v2() -> nn.Module:
     return mobilenet_v2(weights=None)
 
 
+def _torchvision_efficientnet_b0() -> nn.Module:
+    from torchvision.models import efficientnet_b0
+
+    return efficientnet_b0(weights=None)
+
+
 MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
@@ -388,6 +395,7 @@ MODEL_FACTORIES = {
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
+    "efficientnet_b0": (_torchvision_efficientnet_b0, (1, 3, 64, 64)),
 }
 TOKEN_MODEL_NAMES = {"embedding_classifier", "token_encoder", "token_decoder"}
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
@@ -540,6 +548,7 @@ def export_model(
             "narrow_resnet18",
             "mobilenet_v2",
             "deeplabv3_mobilenet_v3_large",
+            "efficientnet_b0",
         ):
             raise ValueError("--input-size is only supported for CNN models")
         if input_size < 32:
@@ -563,6 +572,7 @@ def export_model(
         "resnet18",
         "mobilenet_v2",
         "deeplabv3_mobilenet_v3_large",
+        "efficientnet_b0",
     ):
         raise ValueError("--weights is only supported for torchvision models")
     torch.manual_seed(0)
@@ -742,6 +752,15 @@ def main() -> None:
                     )
                 if current_shape == input_shape:
                     result["predicted_token_ids"] = actual_token_ids.tolist()
+            if args.model == "efficientnet_b0":
+                expected_classes = current_expected.argmax(dim=-1).cpu()
+                actual_classes = actual.reshape(current_expected.shape).argmax(dim=-1)
+                if not torch.equal(actual_classes, expected_classes):
+                    raise AssertionError(
+                        f"EfficientNet predicted classes differ for batch {current_shape[0]}"
+                    )
+                if current_shape == input_shape:
+                    result["predicted_classes"] = actual_classes.tolist()
             if args.model == "deeplabv3_mobilenet_v3_large":
                 expected_labels = current_expected.argmax(dim=1).cpu()
                 actual_labels = actual.reshape(current_expected.shape).argmax(dim=1)

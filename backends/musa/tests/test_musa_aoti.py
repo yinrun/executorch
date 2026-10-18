@@ -29,6 +29,7 @@ from examples.musa.aoti_model_acceptance import (
     SimpleAudioDecoder,
     SimpleVideoDecoder,
     TinyUNet,
+    _torchvision_efficientnet_b0,
 )
 from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
@@ -383,6 +384,17 @@ class TestMusaAoti(unittest.TestCase):
                 },
             ),
         )
+        result = MusaBackend.preprocess(
+            exported,
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
+    def test_efficientnet_b0_aoti_compile(self) -> None:
+        module = _torchvision_efficientnet_b0().eval().to("musa")
+        exported = export(module, (torch.randn(1, 3, 64, 64, device="musa"),))
         result = MusaBackend.preprocess(
             exported,
             [MusaBackend.generate_method_name_compile_spec("forward")],
