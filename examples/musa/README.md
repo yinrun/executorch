@@ -407,6 +407,21 @@ full shim-test processes after this change, 7 passed and 5 still had
 intermittent zero outputs, including the pre-existing padded addmm case and
 an attention-score BMM case. The improved standalone projection is not a
 general reliability fix.
+A focused padded-mat1 check now compares transfers with and without GEMM:
+three independent input allocations, including all seven physical elements
+of a padded row layout, survived 100 fresh transfer-only processes. The
+same layout with `beta=0` (no bias broadcast) returned second-row NaNs by
+the third fresh process. A failing biased run returned the same NaNs on
+repeated readback even though the original mat1, mat2, and bias read back
+correctly afterward from distinct allocations. Thus neither bias broadcast
+nor pageable device-to-host copies alone explains the remaining failure.
+Packing padded mat1 into a contiguous scratch buffer still failed in an
+isolated replay, as did synchronization before destroying the mublas handle;
+both experiments were reverted. The no-bias stress check is disabled for
+normal CI because it is intentionally intermittent; run it explicitly with
+`--gtest_also_run_disabled_tests --gtest_filter=MusaAddmmTest.DISABLED_PaddedMat1WithoutBias`.
+These observations implicate the GEMM execution or its ordering but do not
+identify a validated runtime or SDK fix.
 For a full-depth FP16 PTE in layer-token mode, five replays of the same
 batch-2 input first produced NaNs at stages [none, 5], [4, 4], [6, 6],
 [none, none], and [4, 2] for its two batches. Stage 0 and stage 1 stayed

@@ -155,8 +155,12 @@ void copy_to_device(SlimTensor* tensor, const std::vector<uint8_t>& values) {
   EXPECT_EQ(cudaStreamSynchronize(stream.get()), cudaSuccess);
 }
 
-std::vector<float> copy_from_device(SlimTensor* tensor, ScalarType dtype) {
-  std::vector<uint8_t> encoded(tensor->nbytes());
+std::vector<float> copy_from_device(
+    SlimTensor* tensor,
+    ScalarType dtype,
+    size_t physical_elements = 0) {
+  std::vector<uint8_t> encoded(
+      physical_elements ? physical_elements * itemsize(dtype) : tensor->nbytes());
   auto stream = getCurrentCUDAStream(tensor->device_index());
   EXPECT_TRUE(stream.ok());
   if (!stream.ok()) {
@@ -198,7 +202,8 @@ void run_addmm(
     ScalarType dtype,
     bool transposed_mat2,
     bool transposed_mat1 = false,
-    bool padded_mat1 = false) {
+    bool padded_mat1 = false,
+    double beta = 1.0) {
   const std::vector<int64_t> output_sizes = {2, 2};
   const std::vector<int64_t> output_strides = {2, 1};
   const std::vector<int64_t> bias_sizes = {2};
@@ -228,15 +233,36 @@ void run_addmm(
   EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_EQ(
-      aoti_torch_musa_addmm_out(output, bias, mat1, mat2, 1.0, 1.0),
+      aoti_torch_musa_addmm_out(output, bias, mat1, mat2, beta, 1.0),
       Error::Ok);
   EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   SCOPED_TRACE(::testing::Message()
                << "dtype=" << static_cast<int>(dtype)
                << " transposed_mat2=" << transposed_mat2
                << " transposed_mat1=" << transposed_mat1
-               << " padded_mat1=" << padded_mat1);
-  expect_values(copy_from_device(output, dtype), {59, 66, 140, 156});
+               << " padded_mat1=" << padded_mat1 << " beta=" << beta);
+  const auto actual = copy_from_device(output, dtype);
+  const float last_expected = beta == 0.0 ? 154.0f : 156.0f;
+  if (padded_mat1 && actual.size() == 4 &&
+      (!std::isfinite(actual[3]) ||
+       std::abs(actual[3] - last_expected) > 0.01f)) {
+    const auto repeated = copy_from_device(output, dtype);
+    const auto input = copy_from_device(mat1, dtype, 7);
+    const auto weights = copy_from_device(mat2, dtype);
+    const auto offsets = copy_from_device(bias, dtype);
+    ADD_FAILURE() << "output=" << actual[0] << "," << actual[3]
+                  << " repeated=" << repeated[0] << "," << repeated[3]
+                  << " input=" << input[0] << "," << input[4] << ","
+                  << input[5] << "," << input[6]
+                  << " weights=" << weights[0]
+                  << " bias=" << offsets[0]
+                  << " pointers=" << output->data_ptr() << ","
+                  << mat1->data_ptr() << "," << mat2->data_ptr() << ","
+                  << bias->data_ptr();
+  }
+  expect_values(
+      actual, beta == 0.0 ? std::vector<float>{58, 64, 139, 154}
+                          : std::vector<float>{59, 66, 140, 156});
 
   delete output;
   delete bias;
@@ -330,6 +356,14 @@ TEST_F(MusaAddmmTest, AddmmDtypesAndTransposedMat2) {
     run_addmm(dtype, true, true);
     run_addmm(dtype, false, false, true);
     run_addmm(dtype, true, false, true);
+  }
+}
+
+TEST_F(MusaAddmmTest, DISABLED_PaddedMat1WithoutBias) {
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    run_addmm(dtype, false, false, true, 0.0);
+    run_addmm(dtype, true, false, true, 0.0);
   }
 }
 
@@ -473,6 +507,26 @@ TEST_F(MusaAddmmTest, AddmmBroadcastsBiasAcrossFiveRows) {
     delete bias;
     delete mat1;
     delete mat2;
+  }
+}
+
+TEST_F(MusaAddmmTest, TransferThreeIndependentInputs) {
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    SlimTensor* mat1 = empty_tensor(dtype, {2, 3}, {4, 1});
+    SlimTensor* mat2 = empty_tensor(dtype, {3, 2}, {2, 1});
+    SlimTensor* bias = empty_tensor(dtype, {2}, {1});
+    copy_to_device(mat1, encode_values({1, 2, 3, 0, 4, 5, 6}, dtype));
+    copy_to_device(mat2, encode_values({7, 8, 9, 10, 11, 12}, dtype));
+    copy_to_device(bias, encode_values({1, 2}, dtype));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    SCOPED_TRACE(::testing::Message() << "dtype=" << static_cast<int>(dtype));
+    expect_values(copy_from_device(mat1, dtype, 7), {1, 2, 3, 0, 4, 5, 6});
+    expect_values(copy_from_device(mat2, dtype), {7, 8, 9, 10, 11, 12});
+    expect_values(copy_from_device(bias, dtype), {1, 2});
+    delete mat1;
+    delete mat2;
+    delete bias;
   }
 }
 
