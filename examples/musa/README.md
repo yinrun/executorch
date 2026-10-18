@@ -216,6 +216,13 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \
+  --model vit_b_16 --dtype fp16 --batch-size 2 --dynamic-batch-max 3 \
+  --vit-layer-tokens --runner-repeats 5 \
+  --weights /path/to/vit_b_16-c867db91.pth \
+  --output-dir /tmp/executorch-musa-acceptance/vit_b_16_layer_tokens \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
   --model deeplabv3_mobilenet_v3_large \
   --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
   --output-dir /tmp/executorch-musa-acceptance/deeplabv3_pretrained \
@@ -358,9 +365,17 @@ error 7.15e-6); predicted class IDs matched MUSA eager for each input.
 Dynamic ViT-B/16 FP16 and BF16 do **not** pass this check: the original
 full-depth PTE produced finite batch-2 logits but 1,000 NaNs for batch 1,
 while MUSA eager stayed finite. The `--vit-blocks` option truncates the
-encoder after loading weights to help reproduce the issue. For a six-block
-FP16 PTE, one acceptance run passed batches 2/1/3; repeating its identical
-batch-2 input in fresh runner processes produced NaN counts of [0, 1000],
+encoder after loading weights to help reproduce the issue. The
+`--vit-layer-tokens` option outputs a `[batch, blocks + 1, 768]` tensor:
+stage 0 is the class token after the positional embedding and stage `j + 1`
+is the class token after encoder block `j`. On failure, the script reports
+per-batch NaN counts at each stage without classifying them as image labels.
+For a full-depth FP16 PTE in layer-token mode, five replays of the same
+batch-2 input first produced NaNs at stages [none, 5], [4, 4], [6, 6],
+[none, none], and [4, 2] for its two batches. Stage 0 and stage 1 stayed
+finite in these runs, but the first failing block was not fixed. For a
+six-block FP16 PTE, one acceptance run passed batches 2/1/3; repeating its
+identical batch-2 input in fresh runner processes produced NaN counts of [0, 1000],
 [1000, 1000], and [0, 1000]. A seven-block PTE first returned 2,000 NaNs
 for batch 2, then three identical replays returned finite logits. These
 results do not establish a specific failing layer or a reliable low-precision

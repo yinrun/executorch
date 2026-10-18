@@ -401,6 +401,27 @@ def _torchvision_vit_b_16() -> nn.Module:
     return vit_b_16(weights=None)
 
 
+class VitLayerTokens(nn.Module):
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        patches = self.model._process_input(image)
+        tokens = torch.cat(
+            [self.model.class_token.expand(patches.shape[0], -1, -1), patches],
+            dim=1,
+        )
+        hidden = self.model.encoder.dropout(
+            tokens + self.model.encoder.pos_embedding
+        )
+        observed = [hidden[:, 0]]
+        for layer in self.model.encoder.layers:
+            hidden = layer(hidden)
+            observed.append(hidden[:, 0])
+        return torch.stack(observed, dim=1)
+
+
 MODEL_FACTORIES = {
     "mlp": (Mlp, (1, 16)),
     "simple_cnn": (SimpleCnn, (1, 3, 32, 32)),
@@ -561,6 +582,7 @@ def export_model(
     dynamic_batch_max: int | None = None,
     dynamic_spatial_max: int | None = None,
     vit_blocks: int | None = None,
+    vit_layer_tokens: bool = False,
 ) -> tuple[Path, Path, Path, torch.Tensor, nn.Module, tuple[int, ...]]:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
@@ -613,6 +635,8 @@ def export_model(
         model_name != "vit_b_16" or not 0 <= vit_blocks <= 12
     ):
         raise ValueError("--vit-blocks requires vit_b_16 and a value from 0 to 12")
+    if vit_layer_tokens and model_name != "vit_b_16":
+        raise ValueError("--vit-layer-tokens requires vit_b_16")
     torch.manual_seed(0)
     model = model_type()
     if weights_path is not None:
@@ -623,6 +647,8 @@ def export_model(
         checkpoint_model.load_state_dict(state_dict)
     if vit_blocks is not None:
         model.encoder.layers = model.encoder.layers[:vit_blocks]
+    if vit_layer_tokens:
+        model = VitLayerTokens(model)
     model = model.eval().to(device="musa", dtype=dtype)
     example = _make_input(model_name, input_shape, dtype)
     original_input = example.detach().cpu().clone()
@@ -686,6 +712,7 @@ def main() -> None:
     parser.add_argument(
         "--vit-blocks", type=int, help="run only the first 0-12 ViT encoder blocks"
     )
+    parser.add_argument("--vit-layer-tokens", action="store_true")
     parser.add_argument("--atol", type=float)
     parser.add_argument("--rtol", type=float)
     args = parser.parse_args()
@@ -702,6 +729,7 @@ def main() -> None:
         args.dynamic_batch_max,
         args.dynamic_spatial_max,
         args.vit_blocks,
+        args.vit_layer_tokens,
     )
     atol = args.atol if args.atol is not None else TOLERANCES[args.dtype]
     rtol = args.rtol if args.rtol is not None else TOLERANCES[args.dtype]
@@ -715,6 +743,7 @@ def main() -> None:
         "dynamic_spatial_max": args.dynamic_spatial_max,
         "weights": str(args.weights) if args.weights is not None else None,
         "vit_blocks": args.vit_blocks,
+        "vit_layer_tokens": args.vit_layer_tokens,
         "atol": atol,
         "rtol": rtol,
         "pte": str(pte_path),
@@ -794,6 +823,15 @@ def main() -> None:
                 bytearray(output_path.read_bytes()), dtype=DTYPES[args.dtype]
             )
             expected_flat = current_expected.detach().cpu().flatten()
+            if args.vit_layer_tokens:
+                nan_counts = torch.isnan(
+                    actual.reshape(current_expected.shape)
+                ).sum(-1)
+                if nan_counts.any():
+                    raise AssertionError(
+                        f"ViT stage NaNs for shape {current_shape}: "
+                        f"{nan_counts.tolist()} ({output_path})"
+                    )
             torch.testing.assert_close(actual, expected_flat, atol=atol, rtol=rtol)
             max_error = float((actual.float() - expected_flat.float()).abs().max())
             if args.model == "token_decoder":
@@ -807,7 +845,10 @@ def main() -> None:
                     )
                 if current_shape == input_shape:
                     result["predicted_token_ids"] = actual_token_ids.tolist()
-            if args.model in ("efficientnet_b0", "vit_b_16"):
+            if (
+                args.model in ("efficientnet_b0", "vit_b_16")
+                and not args.vit_layer_tokens
+            ):
                 expected_classes = current_expected.argmax(dim=-1).cpu()
                 actual_classes = actual.reshape(current_expected.shape).argmax(dim=-1)
                 if not torch.equal(actual_classes, expected_classes):
@@ -860,6 +901,16 @@ def main() -> None:
                     bytearray(Path(f"{repeat_prefix}-0.bin").read_bytes()),
                     dtype=DTYPES[args.dtype],
                 )
+                if args.vit_layer_tokens:
+                    nan_counts = torch.isnan(
+                        repeated.reshape(current_expected.shape)
+                    ).sum(-1)
+                    if nan_counts.any():
+                        raise AssertionError(
+                            f"ViT stage NaNs for shape {current_shape} "
+                            f"repeat {repeat}: {nan_counts.tolist()} "
+                            f"({repeat_prefix}-0.bin)"
+                        )
                 torch.testing.assert_close(
                     repeated,
                     expected_flat,
