@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -445,6 +446,107 @@ TEST_F(MusaAddmmTest, AddmmRejectsOverlappingRows) {
   delete bias;
   delete mat1;
   delete mat2;
+}
+
+TEST_F(MusaAddmmTest, DISABLED_VitAttentionProjection) {
+  constexpr int64_t hidden_size = 768;
+  constexpr int64_t projected_size = 3 * hidden_size;
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    for (int64_t tokens : {197, 394}) {
+      SlimTensor* output = empty_tensor(
+          dtype, {tokens, projected_size}, {projected_size, 1});
+      SlimTensor* bias = empty_tensor(dtype, {projected_size}, {1});
+      SlimTensor* mat1 = empty_tensor(
+          dtype, {tokens, hidden_size}, {hidden_size, 1});
+      SlimTensor* mat2 = empty_tensor(
+          dtype, {hidden_size, projected_size}, {1, hidden_size});
+      copy_to_device(
+          mat1, encode_values(std::vector<float>(tokens * hidden_size, 0.125f), dtype));
+      copy_to_device(
+          mat2,
+          encode_values(
+              std::vector<float>(hidden_size * projected_size, 0.015625f), dtype));
+      copy_to_device(
+          bias, encode_values(std::vector<float>(projected_size, 1.0f), dtype));
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+      for (int repeat = 0; repeat < 3; ++repeat) {
+        SCOPED_TRACE(::testing::Message()
+                     << "dtype=" << static_cast<int>(dtype)
+                     << " tokens=" << tokens << " repeat=" << repeat);
+        ASSERT_EQ(
+            aoti_torch_musa_addmm_out(output, bias, mat1, mat2, 1.0, 1.0),
+            Error::Ok);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const auto actual = copy_from_device(output, dtype);
+        ASSERT_EQ(actual.size(), tokens * projected_size);
+        size_t incorrect = 0;
+        for (size_t index = 0; index < actual.size(); ++index) {
+          if (!std::isfinite(actual[index]) ||
+              std::abs(actual[index] - 2.5f) > 0.01f) {
+            if (incorrect < 8) {
+              ADD_FAILURE() << "mismatch at " << index << ": " << actual[index];
+            }
+            ++incorrect;
+          }
+        }
+        EXPECT_EQ(incorrect, 0);
+      }
+
+      delete output;
+      delete bias;
+      delete mat1;
+      delete mat2;
+    }
+  }
+}
+
+TEST_F(MusaAddmmTest, VitAttentionScores) {
+  constexpr int64_t tokens = 197;
+  constexpr int64_t head_size = 64;
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    for (int64_t batch : {12, 24}) {
+      SlimTensor* output = empty_tensor(
+          dtype, {batch, tokens, tokens}, {tokens * tokens, tokens, 1});
+      SlimTensor* query = empty_tensor(
+          dtype, {batch, tokens, head_size}, {tokens * head_size, head_size, 1});
+      SlimTensor* key = empty_tensor(
+          dtype, {batch, head_size, tokens}, {head_size * tokens, tokens, 1});
+      copy_to_device(
+          query,
+          encode_values(std::vector<float>(batch * tokens * head_size, 0.125f), dtype));
+      copy_to_device(
+          key,
+          encode_values(std::vector<float>(batch * head_size * tokens, 0.125f), dtype));
+
+      for (int repeat = 0; repeat < 3; ++repeat) {
+        SCOPED_TRACE(::testing::Message()
+                     << "dtype=" << static_cast<int>(dtype)
+                     << " batch=" << batch << " repeat=" << repeat);
+        ASSERT_EQ(aoti_torch_musa_bmm_out(output, query, key), Error::Ok);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const auto actual = copy_from_device(output, dtype);
+        ASSERT_EQ(actual.size(), batch * tokens * tokens);
+        size_t incorrect = 0;
+        for (size_t index = 0; index < actual.size(); ++index) {
+          if (!std::isfinite(actual[index]) ||
+              std::abs(actual[index] - 1.0f) > 0.01f) {
+            if (incorrect < 8) {
+              ADD_FAILURE() << "mismatch at " << index << ": " << actual[index];
+            }
+            ++incorrect;
+          }
+        }
+        EXPECT_EQ(incorrect, 0);
+      }
+
+      delete output;
+      delete query;
+      delete key;
+    }
+  }
 }
 
 }

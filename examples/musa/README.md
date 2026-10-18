@@ -377,6 +377,24 @@ follows its MLP. In eight runs of a 12-block FP16 diagnostic PTE, the first
 class-token NaNs in both batches appeared at odd-numbered stages, though the
 block varied across runs. This implicates the attention half of the block
 without proving which internal tensor first became invalid.
+The shim regression tests reproduce the ViT QKV projection layout with
+`[197 or 394, 768] @ [768, 2304]`, a transposed weight and a broadcast bias.
+Under repeated fresh processes, the standalone projection occasionally
+produced a zero-valued prefix (4-16 elements) instead of the expected 2.5,
+including FP32 and FP16 cases. One failed run read the input tensor's first
+element back as zero too; this does not distinguish an input-transfer or
+storage problem from corruption during GEMM. A device-wide synchronization
+before GEMM and synchronous host-to-device copies did not eliminate the
+intermittent failure. The projection stress test is disabled by default to
+avoid a flaky CI test; invoke it explicitly with
+`--gtest_also_run_disabled_tests --gtest_filter=MusaAddmmTest.DISABLED_VitAttentionProjection`.
+The existing small addmm and BMM tests also intermittently returned zeros
+in separate full-suite runs; the issue is not isolated to this new shape.
+The separate ViT-sized attention-score BMM regression passed 30 fresh test
+processes. These standalone tests do not yet prove the cause of the pretrained
+low-precision model's NaNs: an extra QKV output inserted into a diagnostic
+model compiled into a *second* projection GEMM, not an observation of the
+original projection output.
 For a full-depth FP16 PTE in layer-token mode, five replays of the same
 batch-2 input first produced NaNs at stages [none, 5], [4, 4], [6, 6],
 [none, none], and [4, 2] for its two batches. Stage 0 and stage 1 stayed
