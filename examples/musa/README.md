@@ -340,7 +340,8 @@ diagnostic matrix operations removes the FP16 NaNs, but the exact ordering or
 buffer-lifetime cause has not been established, so no synchronization
 workaround is enabled for production. Disabling Inductor buffer reuse still
 produces NaNs, and omitting mublas handle destruction yielded inconsistent
-results; neither is a validated fix.
+results. Synchronizing only the shim's current stream after each GEMM also
+failed three repeat runs; none of these is a validated fix.
 These checks use random inputs, not ImageNet accuracy or
 throughput measurements.
 A separate pretrained FP32 PTE passed independent spatial sizes 64x64, 48x54,
