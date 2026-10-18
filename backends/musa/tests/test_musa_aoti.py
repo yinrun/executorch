@@ -449,7 +449,9 @@ class TestMusaAoti(unittest.TestCase):
 
     def test_vit_b16_aoti_compile(self) -> None:
         module = _torchvision_vit_b_16().eval().to("musa")
-        exported = export(module, (torch.randn(1, 3, 224, 224, device="musa"),))
+        exported = export_with_musa_sdpa_decomposition(
+            module, (torch.randn(1, 3, 224, 224, device="musa"),)
+        )
         result = MusaBackend.preprocess(
             exported,
             [MusaBackend.generate_method_name_compile_spec("forward")],

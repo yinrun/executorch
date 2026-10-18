@@ -684,8 +684,7 @@ def export_model(
     dynamic_shapes = (dynamic_dimensions,) if dynamic_dimensions else None
     export_model_graph = (
         export_with_musa_sdpa_decomposition
-        if dynamic_batch_max is not None
-        and model_name in ("transformer_block", "causal_attention", "vit_b_16")
+        if model_name in ("transformer_block", "causal_attention", "vit_b_16")
         else export
     )
     exported = export_model_graph(model, (example,), dynamic_shapes=dynamic_shapes)

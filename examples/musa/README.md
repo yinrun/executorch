@@ -377,6 +377,15 @@ follows its MLP. In eight runs of a 12-block FP16 diagnostic PTE, the first
 class-token NaNs in both batches appeared at odd-numbered stages, though the
 block varied across runs. This implicates the attention half of the block
 without proving which internal tensor first became invalid.
+
+The acceptance exporter now uses `export_with_musa_sdpa_decomposition` for
+both static and dynamic ViT-B/16 exports. This avoids the MUSA export-time
+shape-specializing SDPA path; the backend already provides the same
+decomposition for lowering. A newly exported static pretrained BF16 PTE passed
+8/8 fresh runner replays with maximum error 0.03125, and a newly exported
+static pretrained FP16 PTE passed 5/5 with maximum error 0.001953125. This
+fixes the static acceptance path, but does not yet establish dynamic low
+precision ViT support; the dynamic checks above remain failing.
 The shim regression tests reproduce the ViT QKV projection layout with
 `[197 or 394, 768] @ [768, 2304]`, a transposed weight and a broadcast bias.
 Under repeated fresh processes, the standalone projection occasionally
