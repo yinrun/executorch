@@ -6,6 +6,7 @@
 
 #include <executorch/backends/aoti/slim/c10/core/Device.h>
 #include <executorch/backends/aoti/slim/c10/core/ScalarType.h>
+#include <executorch/backends/aoti/slim/cuda/guard.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/platform/platform.h>
@@ -39,17 +40,27 @@ using executorch::backends::cuda::aoti_torch_empty_strided;
 using executorch::backends::cuda::aoti_torch_musa_addmm_out;
 using executorch::backends::cuda::aoti_torch_musa_bmm_out;
 using executorch::backends::cuda::aoti_torch_musa_mm_out;
+using executorch::backends::cuda::getCurrentCUDAStream;
 using executorch::runtime::Error;
 
 uint16_t float_to_half_bits(float value) {
   uint32_t bits;
   std::memcpy(&bits, &value, sizeof(bits));
+  if ((bits & 0x7fffffff) == 0) {
+    return static_cast<uint16_t>(bits >> 16);
+  }
   const uint32_t exponent = (bits >> 23) & 0xff;
   const uint32_t mantissa = bits & 0x7fffff;
   return static_cast<uint16_t>(((exponent - 112) << 10) | (mantissa >> 13));
 }
 
 float half_bits_to_float(uint16_t value) {
+  if ((value & 0x7fff) == 0) {
+    uint32_t bits = static_cast<uint32_t>(value & 0x8000) << 16;
+    float result;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+  }
   const uint32_t exponent = (value >> 10) & 0x1f;
   const uint32_t mantissa = value & 0x3ff;
   uint32_t bits = ((exponent + 112) << 23) | (mantissa << 13);
@@ -130,24 +141,35 @@ SlimTensor* empty_tensor(
 }
 
 void copy_to_device(SlimTensor* tensor, const std::vector<uint8_t>& values) {
+  auto stream = getCurrentCUDAStream(tensor->device_index());
+  ASSERT_TRUE(stream.ok());
   EXPECT_EQ(
-      cudaMemcpy(
+      cudaMemcpyAsync(
           tensor->data_ptr(),
           values.data(),
           values.size(),
-          cudaMemcpyHostToDevice),
+          cudaMemcpyHostToDevice,
+          stream.get()),
       cudaSuccess);
+  EXPECT_EQ(cudaStreamSynchronize(stream.get()), cudaSuccess);
 }
 
 std::vector<float> copy_from_device(SlimTensor* tensor, ScalarType dtype) {
   std::vector<uint8_t> encoded(tensor->nbytes());
+  auto stream = getCurrentCUDAStream(tensor->device_index());
+  EXPECT_TRUE(stream.ok());
+  if (!stream.ok()) {
+    return {};
+  }
   EXPECT_EQ(
-      cudaMemcpy(
+      cudaMemcpyAsync(
           encoded.data(),
           tensor->data_ptr(),
           encoded.size(),
-          cudaMemcpyDeviceToHost),
+          cudaMemcpyDeviceToHost,
+          stream.get()),
       cudaSuccess);
+  EXPECT_EQ(cudaStreamSynchronize(stream.get()), cudaSuccess);
   return decode_values(encoded, dtype);
 }
 
@@ -367,6 +389,45 @@ TEST_F(MusaAddmmTest, BmmSingleRowWithZeroRowStride) {
     delete output;
     delete mat1;
     delete mat2;
+  }
+}
+
+TEST_F(MusaAddmmTest, BmmBroadcastsReadonlyBatchOperands) {
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    for (bool broadcast_mat1 : {true, false}) {
+      SlimTensor* output = empty_tensor(dtype, {2, 2, 2}, {4, 2, 1});
+      SlimTensor* mat1 = empty_tensor(
+          dtype, {2, 2, 3}, {broadcast_mat1 ? 0 : 6, 3, 1});
+      SlimTensor* mat2 = empty_tensor(
+          dtype, {2, 3, 2}, {broadcast_mat1 ? 6 : 0, 2, 1});
+      copy_to_device(
+          mat1,
+          encode_values(
+              broadcast_mat1 ? std::vector<float>{1, 2, 3, 4, 5, 6}
+                             : std::vector<float>{1, 2, 3, 4, 5, 6, 2, 3, 4, 5, 6, 7},
+              dtype));
+      copy_to_device(
+          mat2,
+          encode_values(
+              broadcast_mat1 ? std::vector<float>{7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6}
+                             : std::vector<float>{7, 8, 9, 10, 11, 12},
+              dtype));
+      EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+      EXPECT_EQ(aoti_torch_musa_bmm_out(output, mat1, mat2), Error::Ok);
+      EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+      SCOPED_TRACE(::testing::Message()
+                   << "dtype=" << static_cast<int>(dtype)
+                   << " broadcast_mat1=" << broadcast_mat1);
+      expect_values(
+          copy_from_device(output, dtype),
+          broadcast_mat1 ? std::vector<float>{58, 64, 139, 154, 22, 28, 49, 64}
+                         : std::vector<float>{58, 64, 139, 154, 85, 94, 166, 184});
+
+      delete output;
+      delete mat1;
+      delete mat2;
+    }
   }
 }
 

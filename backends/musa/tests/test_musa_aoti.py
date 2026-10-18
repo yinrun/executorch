@@ -24,6 +24,7 @@ from examples.musa.aoti_kv_cache_acceptance import (
 )
 from examples.musa.aoti_model_acceptance import (
     BilinearUNet,
+    BroadcastBmm,
     DeepLabV3MobileNet,
     DilatedDecoder,
     SimpleAudioDecoder,
@@ -47,6 +48,22 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_broadcast_bmm_dynamic_batch_aoti_compile(self) -> None:
+        module = BroadcastBmm().eval().to("musa")
+        example = torch.randn(2, 4, 16, device="musa")
+        exported = export(
+            module,
+            (example,),
+            dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+        )
+        result = MusaBackend.preprocess(
+            exported, [MusaBackend.generate_method_name_compile_spec("forward")]
+        )
+
+        self.assertEqual(len(exported.range_constraints), 1)
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_transposed_bmm_aoti_compile(self) -> None:
         example = torch.randn(2, 4, 16, device="musa")
         exported = export(

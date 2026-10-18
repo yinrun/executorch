@@ -76,10 +76,17 @@ non-contiguous batch view of ViT attention without copying the matrices;
 arbitrary per-row strides are not yet supported.
 Single-row BMM operands may have a zero stride for that singleton row axis,
 as in the fixed-token upstream Llama KV-cache export; the leading batch
-stride still must not overlap distinct matrices.
+stride must not overlap distinct matrices unless the operand is a read-only
+broadcast with zero batch stride. Broadcast batches use individual GEMM calls
+instead of a strided-batched GEMM.
 The `transposed_bmm` acceptance model exercises a transposed left-hand matrix
 through PTE/PTD export and `executor_runner` output comparison, including
 bounded dynamic batch sizes.
+The `broadcast_bmm` model broadcasts a read-only right-hand weight across
+batches using a zero inter-batch stride; output matrices remain disjoint.
+The standalone C++ addmm test can still intermittently produce incorrect
+FP16/BF16 outputs for padded-row matrices; this is not covered by the broadcast
+BMM acceptance result.
 For transposed convolution, output padding must be smaller than either its
 stride or its dilation, as required by PyTorch. Transposed Conv1d uses muDNN's
 GEMM backward-data algorithm; its implicit-GEMM algorithm rejects the 1D
@@ -127,6 +134,11 @@ $PYTHON examples/musa/aoti_model_acceptance.py \
 $PYTHON examples/musa/aoti_model_acceptance.py \
   --model transposed_bmm --batch-size 2 --dynamic-batch-max 3 \
   --output-dir /tmp/executorch-musa-acceptance/transposed_bmm \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model broadcast_bmm --batch-size 2 --dynamic-batch-max 3 \
+  --output-dir /tmp/executorch-musa-acceptance/broadcast_bmm \
   --runner "$RUNNER"
 
 $PYTHON examples/musa/aoti_model_acceptance.py \

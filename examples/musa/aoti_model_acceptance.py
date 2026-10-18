@@ -231,6 +231,16 @@ class TransposedBmm(nn.Module):
         return torch.bmm(x.transpose(1, 2), x)
 
 
+class BroadcastBmm(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(16, 8))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self.weight.unsqueeze(0).expand(x.size(0), -1, -1)
+        return torch.bmm(x, weight)
+
+
 class CausalAttention(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -406,6 +416,7 @@ MODEL_FACTORIES = {
     "deeplabv3_mobilenet_v3_large": (DeepLabV3MobileNet, (1, 3, 64, 64)),
     "transformer_block": (TransformerBlock, (1, 4, 16)),
     "transposed_bmm": (TransposedBmm, (1, 4, 16)),
+    "broadcast_bmm": (BroadcastBmm, (1, 4, 16)),
     "causal_attention": (CausalAttention, (1, 4, 16)),
     "embedding_classifier": (EmbeddingClassifier, (1, 4)),
     "token_encoder": (TokenEncoder, (1, 4)),
