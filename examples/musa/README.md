@@ -3,9 +3,9 @@
 `aoti_model_acceptance.py` validates the complete MUSA path for twenty-three models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
-- `simple_cnn`: Conv2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
-- `simple_audio_cnn`: Conv1d + ReLU + strided Conv1d + AvgPool1d + Linear;
-- `simple_video_cnn`: Conv3d + ReLU + MaxPool3d + Conv3d + pooling + Linear;
+- `simple_cnn`: Conv2d + BatchNorm2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
+- `simple_audio_cnn`: Conv1d + BatchNorm1d + ReLU + strided Conv1d + AvgPool1d + Linear;
+- `simple_video_cnn`: Conv3d + BatchNorm3d + ReLU + MaxPool3d + Conv3d + pooling + Linear;
 - `simple_decoder`: ConvTranspose2d + ReLU + ConvTranspose2d with output padding;
 - `simple_audio_decoder`: grouped ConvTranspose1d + ReLU + ConvTranspose1d with output padding;
 - `simple_video_decoder`: ConvTranspose3d + ReLU + ConvTranspose3d with output padding;
@@ -678,22 +678,11 @@ differences 4.77e-7, 1.34e-3, and 7.81e-3. The checkpoint still has random
 weights; this does not validate a production Llama model.
 
 These are random-input correctness checks, not arbitrary shape-generalization
-or throughput measurements. Pretrained MobileNetV2 BF16 at 64x64 does not yet
-meet the default tolerance: the maximum difference is 0.140625 and 121/1000
-logits differ beyond `--atol 0.02 --rtol 0.04`. Do not count this configuration
-as verified until the precision difference is understood. In isolated prefix
-exports, the first two feature blocks match bit-for-bit. The next block's
-pointwise Conv2d also matches, but its following BatchNorm differs at 4 of
-98,304 BF16 values (maximum 0.03125); the discrepancy grows through later
-blocks. Investigate BF16 BatchNorm rounding before relaxing the tolerance.
-Applying native muDNN BatchNorm to the pointwise convolution output reproduces
-the eager prefix exactly; an explicit FP32 divide-and-cast formula reproduces
-the runner prefix exactly. The four differences occur near BF16 rounding
-boundaries, so replacing BatchNorm with that formula does not fix the mismatch.
-With the same MUSA input and BF16-rounded pretrained weights, a MUSA FP32
-reference has mean logit errors 0.0423 for the runner and 0.0324 for BF16 eager;
-both predict class 22, as does the FP32 reference. Matching top-1 alone does
-not justify accepting the runner's larger BF16 numerical error.
+or throughput measurements. The previously recorded pretrained MobileNetV2
+BF16 discrepancy was isolated to BatchNorm rounding. The backend now routes
+inference BatchNorm1d/2d/3d through a native muDNN AOTI shim; the pretrained
+MobileNetV2 configuration still needs to be rerun with this shim before it is
+counted as verified.
 
 Without `--runner`, the script only exports the PTE/PTD and writes the eager
 reference files. The runner command automatically adds the MUSA, Torch, and
@@ -722,13 +711,21 @@ runner: `mlp` with dynamic batches 2/1/3 (maximum error 0.00390625),
 `simple_cnn` with dynamic batches 2/1/3 (maximum error 0.001953125), and
 random-weight `resnet18` and `mobilenet_v2` at 64x64 (maximum error 0.0 in
 both cases). These checks cover the same SlimTensor/AOTI path but do not
-establish pretrained-model accuracy. In particular, the previously recorded
-pretrained MobileNetV2 BF16 BatchNorm rounding discrepancy remains open.
+establish pretrained-model accuracy.
 
 The new `simple_audio_cnn` model exercises Conv1d, strided Conv1d, AvgPool1d,
 and Linear end to end. Its dynamic batch 2/1/3 acceptance passes in FP32 with
 maximum error 1.49e-8 and in BF16 with maximum error 0.00048828125, including
 an independent runner replay for each batch size.
+
+Commit `b13bf26773` (`musa: add muDNN batch norm AOTI shim`) adds an inference
+BatchNorm fallback for contiguous affine tensors in FP32/FP16/BF16. It uses a
+custom decomposition plus an AOTInductor `ExternKernelAlloc` call, so generated
+wrappers call `aoti_torch_musa_batch_norm` directly instead of ProxyExecutor.
+The shim uses muDNN's inference API and supports rank-3/4/5 inputs. BF16
+runner acceptance now passes for `simple_audio_cnn` (maximum error
+0.0001220703125), `simple_cnn` (0.001953125), `simple_video_cnn` (0), and
+`narrow_resnet18` (0).
 
 The deeper BF16 ViT failure was traced to the strided-batched BMM path used by
 attention. The MUSA shim now uses one `mublasGemmEx` launch per batch for all
