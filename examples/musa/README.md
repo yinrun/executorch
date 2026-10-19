@@ -759,3 +759,11 @@ PTE/PTD with `executor_runner`: batch 2 at 64x64, batch 1 at 48x54, batch 3 at
 80x80, and batch 2 at 79x71 all match MUSA eager with maximum error below
 `7e-16`. This exercises the squeeze-and-excitation, depthwise convolution,
 BatchNorm, SiLU, and dynamic-shape paths together.
+
+The official pretrained DeepLabV3-MobileNetV3 BF16 path passes the same four
+dynamic batch/spatial shapes and two runner replays when invoked with
+`--atol 0.5 --rtol 0.04`. Maximum raw-logit errors are `0.25`, `0.125`,
+`0.25`, and `0.5`; all 86,016 predicted segmentation labels match MUSA eager
+exactly across the four shapes. The wider absolute tolerance is required for
+the accumulated BF16 logits at odd spatial sizes, while the exact label check
+remains strict.
