@@ -138,13 +138,17 @@ _MUSA_BATCH_NORM_HEADER = os.path.abspath(
 
 def _decompose_musa_batch_norm(
     input: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
     running_mean: torch.Tensor,
     running_var: torch.Tensor,
     momentum: float,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if weight is None:
+        weight = torch.ones_like(running_mean)
+    if bias is None:
+        bias = torch.zeros_like(running_mean)
     return (
         _MUSA_BATCH_NORM(
             input, weight, bias, running_mean, running_var, eps

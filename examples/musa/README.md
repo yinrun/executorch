@@ -725,7 +725,8 @@ maximum error 1.49e-8 and in BF16 with maximum error 0.00048828125, including
 an independent runner replay for each batch size.
 
 Commit `b13bf26773` (`musa: add muDNN batch norm AOTI shim`) adds an inference
-BatchNorm fallback for contiguous affine tensors in FP32/FP16/BF16. It uses a
+BatchNorm fallback for contiguous tensors with or without affine parameters in
+FP32/FP16/BF16. It uses a
 custom decomposition plus an AOTInductor `ExternKernelAlloc` call, so generated
 wrappers call `aoti_torch_musa_batch_norm` directly instead of ProxyExecutor.
 The shim uses muDNN's inference API and supports rank-2/3/4/5 inputs, including
@@ -735,7 +736,8 @@ runner acceptance now passes for `simple_audio_cnn` (maximum error
 `narrow_resnet18` (0).
 
 The rank-2 BatchNorm1d path and a mixed-dtype BF16 input/FP32 parameter path
-also pass generated PTE/PTD plus `executor_runner` with maximum error `0`.
+also pass generated PTE/PTD plus `executor_runner` with maximum error `0`. The
+inference path with `affine=False` is also covered and matches eager exactly.
 
 The same commit closes the pretrained MobileNetV2 BF16 case using
 `mobilenet_v2-7ebf99e0.pth`: the 64x64 export and two runner replays pass with
