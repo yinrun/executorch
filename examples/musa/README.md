@@ -753,3 +753,9 @@ passes generated PTE/PTD plus `executor_runner` for dynamic batches 2/1/3,
 with three independent runner replays per batch and maximum error 0.03125.
 This is a correctness-first fallback; batched-BMM performance optimization
 and broader BF16 model coverage remain open.
+
+The random-weight EfficientNet-B0 BF16 path also passes one combined dynamic
+PTE/PTD with `executor_runner`: batch 2 at 64x64, batch 1 at 48x54, batch 3 at
+80x80, and batch 2 at 79x71 all match MUSA eager with maximum error below
+`7e-16`. This exercises the squeeze-and-excitation, depthwise convolution,
+BatchNorm, SiLU, and dynamic-shape paths together.
