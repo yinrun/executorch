@@ -295,6 +295,42 @@ class TestMusaAoti(unittest.TestCase):
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
+    def test_direct_batch_norm_aoti_compile(self) -> None:
+        class DirectBatchNorm(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+                self.bias = nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
+                self.register_buffer(
+                    "running_mean", torch.zeros(4, dtype=torch.bfloat16)
+                )
+                self.register_buffer(
+                    "running_var", torch.ones(4, dtype=torch.bfloat16)
+                )
+
+            def forward(self, input: torch.Tensor) -> torch.Tensor:
+                return torch.ops.aten.batch_norm.default(
+                    input,
+                    self.weight,
+                    self.bias,
+                    self.running_mean,
+                    self.running_var,
+                    False,
+                    0.1,
+                    1e-5,
+                    True,
+                )
+
+        module = DirectBatchNorm().eval().to("musa")
+        example = torch.randn(1, 4, 8, 8, device="musa", dtype=torch.bfloat16)
+        result = MusaBackend.preprocess(
+            export(module, (example,)),
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_conv3d_aoti_compile(self) -> None:
         class Conv3dModel(nn.Module):
             def __init__(self) -> None:

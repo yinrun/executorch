@@ -136,6 +136,25 @@ _MUSA_BATCH_NORM_HEADER = os.path.abspath(
 )
 
 
+def _materialize_musa_batch_norm_parameters(
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    running_mean: torch.Tensor | None,
+    running_var: torch.Tensor | None,
+    eps: float,
+) -> torch.Tensor:
+    if running_mean is None or running_var is None:
+        raise RuntimeError(
+            "MUSA batch norm requires running statistics for inference"
+        )
+    if weight is None:
+        weight = torch.ones_like(running_mean)
+    if bias is None:
+        bias = torch.zeros_like(running_mean)
+    return _MUSA_BATCH_NORM(input, weight, bias, running_mean, running_var, eps)
+
+
 def _decompose_musa_batch_norm(
     input: torch.Tensor,
     weight: torch.Tensor | None,
@@ -145,16 +164,30 @@ def _decompose_musa_batch_norm(
     momentum: float,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if weight is None:
-        weight = torch.ones_like(running_mean)
-    if bias is None:
-        bias = torch.zeros_like(running_mean)
     return (
-        _MUSA_BATCH_NORM(
+        _materialize_musa_batch_norm_parameters(
             input, weight, bias, running_mean, running_var, eps
         ),
         running_mean,
         running_var,
+    )
+
+
+def _decompose_aten_batch_norm(
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    running_mean: torch.Tensor | None,
+    running_var: torch.Tensor | None,
+    training: bool,
+    momentum: float,
+    eps: float,
+    cudnn_enabled: bool,
+) -> torch.Tensor:
+    if training:
+        raise RuntimeError("MUSA AOTI batch norm supports inference only")
+    return _materialize_musa_batch_norm_parameters(
+        input, weight, bias, running_mean, running_var, eps
     )
 
 
@@ -310,7 +343,7 @@ class MusaBackend(AotiBackend, BackendDetails):
                 _decompose_scaled_dot_product_attention
             ),
             torch.ops.aten.linear.default: _decompose_linear,
-            torch.ops.aten.batch_norm.default: _decompose_musa_batch_norm,
+            torch.ops.aten.batch_norm.default: _decompose_aten_batch_norm,
             torch.ops.aten._native_batch_norm_legit_no_training.default: (
                 _decompose_musa_batch_norm
             ),
