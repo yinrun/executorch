@@ -767,3 +767,8 @@ dynamic batch/spatial shapes and two runner replays when invoked with
 exactly across the four shapes. The wider absolute tolerance is required for
 the accumulated BF16 logits at odd spatial sizes, while the exact label check
 remains strict.
+
+A random-weight ViT-B/16 with one encoder block also passes FP32 export and
+two fresh `executor_runner` executions at 1x3x224x224 with maximum error `0`.
+This provides a runner-level smoke test for the attention and LayerNorm path;
+full-depth ViT coverage is tracked separately above.
