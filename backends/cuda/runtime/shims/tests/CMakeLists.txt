@@ -61,7 +61,13 @@ set(CUDA_SHIM_TESTS
 set(CUDA_KERNEL_TESTS test_aoti_torch_cuda__weight_int4pack_mm)
 
 if(EXECUTORCH_BUILD_MUSA)
-  list(APPEND CUDA_SHIM_TESTS test_musa_addmm test_musa_convolution)
+  list(
+    APPEND
+    CUDA_SHIM_TESTS
+    test_musa_addmm
+    test_musa_convolution
+    test_musa_batch_norm
+  )
 endif()
 
 enable_testing()
