@@ -127,9 +127,9 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       InvalidArgument,
       "MUSA batch norm tensors must use the same device");
   ET_CHECK_OR_RETURN_ERROR(
-      input->dim() >= 3 && input->dim() <= 5,
+      input->dim() >= 2 && input->dim() <= 5,
       NotSupported,
-      "MUSA batch norm supports 1D, 2D, and 3D inputs only");
+      "MUSA batch norm supports BatchNorm1d, BatchNorm2d, and BatchNorm3d inputs only");
   ET_CHECK_OR_RETURN_ERROR(
       input->is_contiguous() && weight->is_contiguous() &&
           bias->is_contiguous() && running_mean->is_contiguous() &&
@@ -150,7 +150,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       "MUSA batch norm received a negative epsilon");
 
   const int64_t channel_count = input->size(1);
-  const int64_t descriptor_dims = input->dim() == 3 ? 4 : input->dim();
+  const int64_t descriptor_dims = input->dim() <= 3 ? 4 : input->dim();
   const auto data_type = mudnn_data_type(dtype);
   const auto parameter_data_type = mudnn_data_type(parameter_dtype);
   const auto tensor_format = descriptor_dims == 4 ? MUDNN_TENSOR_NCHW
@@ -160,7 +160,10 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
   for (int64_t index = 0; index < input->dim(); ++index) {
     input_dims[index] = static_cast<int>(input->size(index));
   }
-  if (input->dim() == 3) {
+  if (input->dim() == 2) {
+    input_dims[2] = 1;
+    input_dims[3] = 1;
+  } else if (input->dim() == 3) {
     input_dims[3] = 1;
   }
   std::vector<int> parameter_dims(descriptor_dims, 1);

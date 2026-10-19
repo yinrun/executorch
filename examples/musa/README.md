@@ -725,7 +725,7 @@ maximum error 1.49e-8 and in BF16 with maximum error 0.00048828125, including
 an independent runner replay for each batch size.
 
 Commit `b13bf26773` (`musa: add muDNN batch norm AOTI shim`) adds an inference
-BatchNorm fallback for contiguous affine tensors in FP32/FP16/BF16. It uses a
+ BatchNorm fallback for contiguous affine tensors in FP32/FP16/BF16. It uses a
 custom decomposition plus an AOTInductor `ExternKernelAlloc` call, so generated
 wrappers call `aoti_torch_musa_batch_norm` directly instead of ProxyExecutor.
 The shim uses muDNN's inference API and supports rank-3/4/5 inputs. BF16

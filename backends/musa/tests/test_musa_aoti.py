@@ -269,6 +269,17 @@ class TestMusaAoti(unittest.TestCase):
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
+    def test_batch_norm1d_matrix_aoti_compile(self) -> None:
+        module = nn.BatchNorm1d(4).eval().to("musa", dtype=torch.bfloat16)
+        example = torch.randn(2, 4, device="musa", dtype=torch.bfloat16)
+        result = MusaBackend.preprocess(
+            export(module, (example,)),
+            [MusaBackend.generate_method_name_compile_spec("forward")],
+        )
+
+        self.assertGreater(len(result.processed_bytes), 0)
+        self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_conv3d_aoti_compile(self) -> None:
         class Conv3dModel(nn.Module):
             def __init__(self) -> None:
