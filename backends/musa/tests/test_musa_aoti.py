@@ -220,6 +220,16 @@ class TestMusaAoti(unittest.TestCase):
                         0.1,
                         1e-5,
                     )
+                elif self.variant == "no_update":
+                    result = torch.ops.aten._batch_norm_no_update.default(
+                        input_tensor,
+                        self.weight,
+                        self.bias,
+                        self.running_mean,
+                        self.running_var,
+                        0.1,
+                        1e-5,
+                    )
                 else:
                     result = torch.ops.aten._native_batch_norm_legit_functional.default(
                         input_tensor,
@@ -234,7 +244,13 @@ class TestMusaAoti(unittest.TestCase):
                 return result
 
         example = torch.randn(2, 4, 8, 8, device="musa")
-        for variant in ("native", "legit", "functional", "no_training"):
+        for variant in (
+            "native",
+            "legit",
+            "functional",
+            "no_training",
+            "no_update",
+        ):
             with self.subTest(variant=variant):
                 exported = export(
                     NativeBatchNorm(variant).eval().to("musa"), (example,)

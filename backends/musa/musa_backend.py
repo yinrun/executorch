@@ -232,6 +232,23 @@ def _decompose_native_batch_norm_functional(
     return output, empty_mean, empty_invstd, running_mean, running_var
 
 
+def _decompose_batch_norm_no_update(
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    momentum: float,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    output = _materialize_musa_batch_norm_parameters(
+        input, weight, bias, running_mean, running_var, eps
+    )
+    empty_mean, empty_invstd = _empty_musa_batch_norm_stats(input)
+    empty_reserve = torch.empty((0,), device=input.device, dtype=torch.uint8)
+    return output, empty_mean, empty_invstd, empty_reserve
+
+
 def _lower_musa_batch_norm(
     input: Any,
     weight: Any,
@@ -394,6 +411,9 @@ class MusaBackend(AotiBackend, BackendDetails):
             ),
             torch.ops.aten._native_batch_norm_legit_functional.default: (
                 _decompose_native_batch_norm_functional
+            ),
+            torch.ops.aten._batch_norm_no_update.default: (
+                _decompose_batch_norm_no_update
             ),
         }
 
