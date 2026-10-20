@@ -197,6 +197,16 @@ class TestMusaAoti(unittest.TestCase):
                         0.1,
                         1e-5,
                     )
+                elif self.variant == "no_training":
+                    result = torch.ops.aten._native_batch_norm_legit_no_training.default(
+                        input_tensor,
+                        self.weight,
+                        self.bias,
+                        self.running_mean,
+                        self.running_var,
+                        0.1,
+                        1e-5,
+                    )
                 elif self.variant == "native":
                     result = torch.ops.aten.native_batch_norm.default(
                         input_tensor,
@@ -222,7 +232,7 @@ class TestMusaAoti(unittest.TestCase):
                 return result[0]
 
         example = torch.randn(2, 4, 8, 8, device="musa")
-        for variant in ("native", "legit", "functional"):
+        for variant in ("native", "legit", "functional", "no_training"):
             with self.subTest(variant=variant):
                 exported = export(
                     NativeBatchNorm(variant).eval().to("musa"), (example,)

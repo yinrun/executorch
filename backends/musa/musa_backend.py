@@ -155,6 +155,14 @@ def _materialize_musa_batch_norm_parameters(
     return _MUSA_BATCH_NORM(input, weight, bias, running_mean, running_var, eps)
 
 
+def _empty_musa_batch_norm_stats(
+    input: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    empty_mean = torch.empty((0,), device=input.device, dtype=torch.float32)
+    empty_invstd = torch.empty((0,), device=input.device, dtype=torch.float32)
+    return empty_mean, empty_invstd
+
+
 def _decompose_musa_batch_norm(
     input: torch.Tensor,
     weight: torch.Tensor | None,
@@ -164,13 +172,11 @@ def _decompose_musa_batch_norm(
     momentum: float,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return (
-        _materialize_musa_batch_norm_parameters(
-            input, weight, bias, running_mean, running_var, eps
-        ),
-        running_mean,
-        running_var,
+    output = _materialize_musa_batch_norm_parameters(
+        input, weight, bias, running_mean, running_var, eps
     )
+    empty_mean, empty_invstd = _empty_musa_batch_norm_stats(input)
+    return output, empty_mean, empty_invstd
 
 
 def _decompose_aten_batch_norm(
@@ -206,8 +212,8 @@ def _decompose_native_batch_norm(
     output = _materialize_musa_batch_norm_parameters(
         input, weight, bias, running_mean, running_var, eps
     )
-    empty_stats = torch.empty((0,), device=input.device, dtype=torch.float32)
-    return output, empty_stats, empty_stats
+    empty_mean, empty_invstd = _empty_musa_batch_norm_stats(input)
+    return output, empty_mean, empty_invstd
 
 
 def _decompose_native_batch_norm_functional(
