@@ -177,16 +177,16 @@ class TestMusaAoti(unittest.TestCase):
 
     def test_native_batch_norm_inference_aoti_compile(self) -> None:
         class NativeBatchNorm(nn.Module):
-            def __init__(self, legit: bool) -> None:
+            def __init__(self, variant: str) -> None:
                 super().__init__()
-                self.legit = legit
+                self.variant = variant
                 self.weight = nn.Parameter(torch.ones(4))
                 self.bias = nn.Parameter(torch.zeros(4))
                 self.register_buffer("running_mean", torch.zeros(4))
                 self.register_buffer("running_var", torch.ones(4))
 
             def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
-                if self.legit:
+                if self.variant == "legit":
                     result = torch.ops.aten._native_batch_norm_legit.default(
                         input_tensor,
                         self.weight,
@@ -197,8 +197,19 @@ class TestMusaAoti(unittest.TestCase):
                         0.1,
                         1e-5,
                     )
-                else:
+                elif self.variant == "native":
                     result = torch.ops.aten.native_batch_norm.default(
+                        input_tensor,
+                        self.weight,
+                        self.bias,
+                        self.running_mean,
+                        self.running_var,
+                        False,
+                        0.1,
+                        1e-5,
+                    )
+                else:
+                    result = torch.ops.aten._native_batch_norm_legit_functional.default(
                         input_tensor,
                         self.weight,
                         self.bias,
@@ -211,9 +222,11 @@ class TestMusaAoti(unittest.TestCase):
                 return result[0]
 
         example = torch.randn(2, 4, 8, 8, device="musa")
-        for legit in (False, True):
-            with self.subTest(legit=legit):
-                exported = export(NativeBatchNorm(legit).eval().to("musa"), (example,))
+        for variant in ("native", "legit", "functional"):
+            with self.subTest(variant=variant):
+                exported = export(
+                    NativeBatchNorm(variant).eval().to("musa"), (example,)
+                )
                 result = MusaBackend.preprocess(
                     exported,
                     [MusaBackend.generate_method_name_compile_spec("forward")],
