@@ -185,7 +185,7 @@ class TestMusaAoti(unittest.TestCase):
                 self.register_buffer("running_mean", torch.zeros(4))
                 self.register_buffer("running_var", torch.ones(4))
 
-            def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+            def forward(self, input_tensor: torch.Tensor):
                 if self.variant == "legit":
                     result = torch.ops.aten._native_batch_norm_legit.default(
                         input_tensor,
@@ -229,7 +229,7 @@ class TestMusaAoti(unittest.TestCase):
                         0.1,
                         1e-5,
                     )
-                return result[0]
+                return result
 
         example = torch.randn(2, 4, 8, 8, device="musa")
         for variant in ("native", "legit", "functional", "no_training"):
