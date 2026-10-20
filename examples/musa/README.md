@@ -770,9 +770,12 @@ remains strict.
 
 The BatchNorm decomposition now also covers direct `native_batch_norm`,
 `_native_batch_norm_legit`, `_native_batch_norm_legit_no_training`, and
-`_native_batch_norm_legit_functional` inference graphs. Their empty saved-stat
-outputs and functional running-stat outputs are preserved; the complete 37-test
-MUSA AOTI Python suite passes on the current MUSA environment.
+`_native_batch_norm_legit_functional` inference graphs, plus
+`_batch_norm_no_update`. Their empty saved-stat/reserve-space outputs and
+functional running-stat outputs are preserved; the complete 37-test MUSA AOTI
+Python suite passes on the current MUSA environment. A `BatchNorm2d` module with
+`track_running_stats=False` also passes a complete PTE/PTD runner check with
+maximum FP32 error `2.38e-7`.
 
 A random-weight ViT-B/16 with one encoder block also passes FP32 export and
 two fresh `executor_runner` executions at 1x3x224x224 with maximum error `0`.
