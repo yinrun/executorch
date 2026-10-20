@@ -768,6 +768,12 @@ exactly across the four shapes. The wider absolute tolerance is required for
 the accumulated BF16 logits at odd spatial sizes, while the exact label check
 remains strict.
 
+The BatchNorm decomposition now also covers direct `native_batch_norm`,
+`_native_batch_norm_legit`, `_native_batch_norm_legit_no_training`, and
+`_native_batch_norm_legit_functional` inference graphs. Their empty saved-stat
+outputs and functional running-stat outputs are preserved; the complete 37-test
+MUSA AOTI Python suite passes on the current MUSA environment.
+
 A random-weight ViT-B/16 with one encoder block also passes FP32 export and
 two fresh `executor_runner` executions at 1x3x224x224 with maximum error `0`.
 This provides a runner-level smoke test for the attention and LayerNorm path;
