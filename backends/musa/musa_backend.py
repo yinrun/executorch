@@ -191,6 +191,25 @@ def _decompose_aten_batch_norm(
     )
 
 
+def _decompose_native_batch_norm(
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    training: bool,
+    momentum: float,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if training:
+        raise RuntimeError("MUSA AOTI batch norm supports inference only")
+    output = _materialize_musa_batch_norm_parameters(
+        input, weight, bias, running_mean, running_var, eps
+    )
+    empty_stats = torch.empty((0,), device=input.device, dtype=torch.float32)
+    return output, empty_stats, empty_stats
+
+
 def _lower_musa_batch_norm(
     input: Any,
     weight: Any,
@@ -346,6 +365,10 @@ class MusaBackend(AotiBackend, BackendDetails):
             torch.ops.aten.batch_norm.default: _decompose_aten_batch_norm,
             torch.ops.aten._native_batch_norm_legit_no_training.default: (
                 _decompose_musa_batch_norm
+            ),
+            torch.ops.aten.native_batch_norm.default: _decompose_native_batch_norm,
+            torch.ops.aten._native_batch_norm_legit.default: (
+                _decompose_native_batch_norm
             ),
         }
 

@@ -175,6 +175,52 @@ class TestMusaAoti(unittest.TestCase):
         self.assertGreater(len(result.processed_bytes), 0)
         self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
 
+    def test_native_batch_norm_inference_aoti_compile(self) -> None:
+        class NativeBatchNorm(nn.Module):
+            def __init__(self, legit: bool) -> None:
+                super().__init__()
+                self.legit = legit
+                self.weight = nn.Parameter(torch.ones(4))
+                self.bias = nn.Parameter(torch.zeros(4))
+                self.register_buffer("running_mean", torch.zeros(4))
+                self.register_buffer("running_var", torch.ones(4))
+
+            def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+                if self.legit:
+                    result = torch.ops.aten._native_batch_norm_legit.default(
+                        input_tensor,
+                        self.weight,
+                        self.bias,
+                        self.running_mean,
+                        self.running_var,
+                        False,
+                        0.1,
+                        1e-5,
+                    )
+                else:
+                    result = torch.ops.aten.native_batch_norm.default(
+                        input_tensor,
+                        self.weight,
+                        self.bias,
+                        self.running_mean,
+                        self.running_var,
+                        False,
+                        0.1,
+                        1e-5,
+                    )
+                return result[0]
+
+        example = torch.randn(2, 4, 8, 8, device="musa")
+        for legit in (False, True):
+            with self.subTest(legit=legit):
+                exported = export(NativeBatchNorm(legit).eval().to("musa"), (example,))
+                result = MusaBackend.preprocess(
+                    exported,
+                    [MusaBackend.generate_method_name_compile_spec("forward")],
+                )
+                self.assertGreater(len(result.processed_bytes), 0)
+                self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_weighted_linear_aoti_compile(self) -> None:
         class WeightedLinear(nn.Module):
             def __init__(self) -> None:
