@@ -198,14 +198,16 @@ class TestMusaAoti(unittest.TestCase):
                         1e-5,
                     )
                 elif self.variant == "no_training":
-                    result = torch.ops.aten._native_batch_norm_legit_no_training.default(
-                        input_tensor,
-                        self.weight,
-                        self.bias,
-                        self.running_mean,
-                        self.running_var,
-                        0.1,
-                        1e-5,
+                    result = (
+                        torch.ops.aten._native_batch_norm_legit_no_training.default(
+                            input_tensor,
+                            self.weight,
+                            self.bias,
+                            self.running_mean,
+                            self.running_var,
+                            0.1,
+                            1e-5,
+                        )
                     )
                 elif self.variant == "native":
                     result = torch.ops.aten.native_batch_norm.default(
