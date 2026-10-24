@@ -131,12 +131,6 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       NotSupported,
       "MUSA batch norm supports BatchNorm1d, BatchNorm2d, and BatchNorm3d inputs only");
   ET_CHECK_OR_RETURN_ERROR(
-      input->is_contiguous() && weight->is_contiguous() &&
-          bias->is_contiguous() && running_mean->is_contiguous() &&
-          running_var->is_contiguous(),
-      NotSupported,
-      "MUSA batch norm requires contiguous tensors");
-  ET_CHECK_OR_RETURN_ERROR(
       weight->dim() == 1 && bias->dim() == 1 && running_mean->dim() == 1 &&
           running_var->dim() == 1 && weight->size(0) == input->size(1) &&
           bias->size(0) == input->size(1) &&
@@ -148,6 +142,40 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       eps >= 0.0,
       InvalidArgument,
       "MUSA batch norm received a negative epsilon");
+
+  std::unique_ptr<SlimTensor> contiguous_input;
+  std::unique_ptr<SlimTensor> contiguous_weight;
+  std::unique_ptr<SlimTensor> contiguous_bias;
+  std::unique_ptr<SlimTensor> contiguous_running_mean;
+  std::unique_ptr<SlimTensor> contiguous_running_var;
+  SlimTensor* input_for_mudnn = input;
+  SlimTensor* weight_for_mudnn = weight;
+  SlimTensor* bias_for_mudnn = bias;
+  SlimTensor* running_mean_for_mudnn = running_mean;
+  SlimTensor* running_var_for_mudnn = running_var;
+  if (!input->is_contiguous()) {
+    contiguous_input = std::make_unique<SlimTensor>(input->clone_contiguous());
+    input_for_mudnn = contiguous_input.get();
+  }
+  if (!weight->is_contiguous()) {
+    contiguous_weight =
+        std::make_unique<SlimTensor>(weight->clone_contiguous());
+    weight_for_mudnn = contiguous_weight.get();
+  }
+  if (!bias->is_contiguous()) {
+    contiguous_bias = std::make_unique<SlimTensor>(bias->clone_contiguous());
+    bias_for_mudnn = contiguous_bias.get();
+  }
+  if (!running_mean->is_contiguous()) {
+    contiguous_running_mean =
+        std::make_unique<SlimTensor>(running_mean->clone_contiguous());
+    running_mean_for_mudnn = contiguous_running_mean.get();
+  }
+  if (!running_var->is_contiguous()) {
+    contiguous_running_var =
+        std::make_unique<SlimTensor>(running_var->clone_contiguous());
+    running_var_for_mudnn = contiguous_running_var.get();
+  }
 
   const int64_t channel_count = input->size(1);
   const int64_t descriptor_dims = input->dim() <= 3 ? 4 : input->dim();
@@ -255,15 +283,15 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
           context.output,
           output->data_ptr(),
           context.input,
-          input->data_ptr(),
+          input_for_mudnn->data_ptr(),
           context.running_mean,
-          running_mean->data_ptr(),
+          running_mean_for_mudnn->data_ptr(),
           context.running_var,
-          running_var->data_ptr(),
+          running_var_for_mudnn->data_ptr(),
           context.scale,
-          weight->data_ptr(),
+          weight_for_mudnn->data_ptr(),
           context.bias,
-          bias->data_ptr()),
+          bias_for_mudnn->data_ptr()),
       "mudnnBatchNormForwardInference");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
 
