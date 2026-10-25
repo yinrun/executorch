@@ -37,7 +37,7 @@ class BackboneStages(nn.Module):
         outputs = []
         for stage in self.stages:
             image = stage(image)
-            outputs.append(image)
+            outputs.append(image.clone())
         return tuple(outputs)
 
 
@@ -51,7 +51,11 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=64)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--stage", type=int)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--stage", type=int)
+    selection.add_argument("--block-operators", type=int)
+    selection.add_argument("--stem-operators", action="store_true")
+    selection.add_argument("--stem-operator", type=int, choices=(0, 1, 2))
     args = parser.parse_args()
     if args.batch_size < 1 or min(args.height, args.width) < 32:
         parser.error("batch size must be positive and spatial sizes at least 32")
@@ -65,19 +69,32 @@ def main() -> None:
     )
     model = model.eval().to(device="musa", dtype=DTYPES[args.dtype])
     stages = list(model.model.backbone.children())
-    if args.stage is not None and not 0 <= args.stage < len(stages):
+    if args.block_operators is not None and (
+        not 0 <= args.block_operators < len(stages)
+        or not hasattr(stages[args.block_operators], "block")
+    ):
+        parser.error("--block-operators requires an inverted residual stage")
+    stem_mode = args.stem_operators or args.stem_operator is not None
+    if stem_mode:
+        stages = list(stages[0].children())
+    selected_stage = args.stem_operator if stem_mode else args.stage
+    if selected_stage is not None and not 0 <= selected_stage < len(stages):
         parser.error(f"stage must be between 0 and {len(stages) - 1}")
     torch.manual_seed(args.seed)
-    image = torch.randn(
-        args.batch_size, 3, args.height, args.width, device="musa"
-    ).to(DTYPES[args.dtype])
+    image = torch.randn(args.batch_size, 3, args.height, args.width, device="musa").to(
+        DTYPES[args.dtype]
+    )
     torch.musa.synchronize()
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
-        if args.stage is not None:
-            for stage in stages[: args.stage]:
+        if args.block_operators is not None:
+            for stage in stages[: args.block_operators]:
                 image = stage(image)
-            stage_indices = [args.stage]
-            module = BackboneStages([stages[args.stage]])
+            stages = list(stages[args.block_operators].block.children())
+        if selected_stage is not None:
+            for stage in stages[:selected_stage]:
+                image = stage(image)
+            stage_indices = [selected_stage]
+            module = BackboneStages([stages[selected_stage]])
         else:
             stage_indices = list(range(len(stages)))
             module = BackboneStages(stages)
@@ -123,16 +140,19 @@ def main() -> None:
         measurements.append(
             {
                 "stage": stage_index,
+                "module_type": type(stages[stage_index]).__name__,
                 "shape": list(reference.shape),
-                "max_abs_error": difference.max().item()
-                if difference.numel()
-                else None,
-                "mean_abs_error": difference.mean().item()
-                if difference.numel()
-                else None,
-                "p99_abs_error": torch.quantile(difference, 0.99).item()
-                if difference.numel()
-                else None,
+                "max_abs_error": (
+                    difference.max().item() if difference.numel() else None
+                ),
+                "mean_abs_error": (
+                    difference.mean().item() if difference.numel() else None
+                ),
+                "p99_abs_error": (
+                    torch.quantile(difference, 0.99).item()
+                    if difference.numel()
+                    else None
+                ),
                 "actual_nan": torch.isnan(actual).sum().item(),
                 "actual_inf": torch.isinf(actual).sum().item(),
                 "reference_nan": torch.isnan(reference_flat).sum().item(),
@@ -144,7 +164,17 @@ def main() -> None:
         "weights": str(args.weights),
         "seed": args.seed,
         "image_shape": [args.batch_size, 3, args.height, args.width],
-        "isolated_stage": args.stage,
+        "mode": (
+            "stem_operators"
+            if stem_mode
+            else (
+                "block_operators"
+                if args.block_operators is not None
+                else "backbone_stages"
+            )
+        ),
+        "block": args.block_operators,
+        "isolated_stage": selected_stage,
         "measurements": measurements,
     }
     report_json = json.dumps(report, indent=2, allow_nan=False)

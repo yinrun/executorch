@@ -46,10 +46,36 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertIn("aoti_torch_musa_bmm_out", fallbacks)
         self.assertIn("aoti_torch_musa_convolution", fallbacks)
         self.assertIn("aoti_torch_musa_batch_norm", fallbacks)
+        self.assertIn("aoti_torch_musa_hardswish", fallbacks)
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_hardswish_aoti_compile(self) -> None:
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                example = torch.randn(2, 8, 4, device="musa", dtype=dtype)
+                exported = export(
+                    nn.Hardswish().eval(),
+                    (example,),
+                    dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+                )
+                decomposed = exported.run_decompositions(
+                    MusaBackend.get_decomposition_table()
+                )
+                self.assertTrue(
+                    any(
+                        node.target == torch.ops.executorch_musa.hardswish.default
+                        for node in decomposed.graph.nodes
+                    )
+                )
+                result = MusaBackend.preprocess(
+                    exported,
+                    [MusaBackend.generate_method_name_compile_spec("forward")],
+                )
+                self.assertGreater(len(result.processed_bytes), 0)
+                self.assertIn("aoti_musa_blob", result.data_store_output.external_data)
+
     def test_broadcast_bmm_dynamic_batch_aoti_compile(self) -> None:
         module = BroadcastBmm().eval().to("musa")
         example = torch.randn(2, 4, 16, device="musa")

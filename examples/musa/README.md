@@ -832,6 +832,27 @@ cumulative run). This confirms a local BF16 discrepancy as well as propagated
 error; it does not yet identify a particular convolution algorithm as the
 cause. These stage outputs are backbone features, not segmentation logits.
 
+The subsequent operator-level probe (`--stem-operators`) identifies the
+stem's BF16 discrepancy in Hardswish: Conv2d and BatchNorm2d match exactly,
+while decomposed Hardswish differs by `0.015625`, including when isolated
+with `--stem-operator 2`. The MUSA backend now calls a native muDNN Hardswish
+shim instead. With that shim all three stem outputs and backbone stages 0–3
+match exactly; the remaining backbone discrepancy starts at stage 4 and the
+last-stage maximum error is `0.140625`. This only resolves the Hardswish
+component of the BF16 difference; full-model acceptance remains separate.
+
+Hardswish's C++ tests cover FP32/FP16/BF16, contiguous and strided offset views,
+scalar and empty inputs, and preservation of input storage. All three tests
+pass. The fallback registration and dynamic-batch AOTI compile tests pass for
+all three dtypes. The muDNN C unary API binds data addresses into its tensor
+descriptors, so the shim uses separate input and output descriptors.
+
+`--block-operators 4` emits the intermediate operators in the main branch of
+inverted-residual stage 4, fed by its eager predecessor. For residual stages,
+this mode intentionally excludes the final residual addition. Diagnostic
+outputs are cloned before the next operator runs so in-place activations do
+not overwrite an earlier observation.
+
 ```bash
 $PYTHON examples/musa/aoti_backbone_diagnostics.py \
   --dtype bf16 --batch-size 2 --height 64 --width 64 \

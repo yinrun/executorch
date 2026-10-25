@@ -67,6 +67,7 @@ if(EXECUTORCH_BUILD_MUSA)
     test_musa_addmm
     test_musa_convolution
     test_musa_batch_norm
+    test_musa_activation
   )
 endif()
 

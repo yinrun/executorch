@@ -135,6 +135,49 @@ _MUSA_BATCH_NORM_HEADER = os.path.abspath(
     )
 )
 
+_musa_activation_library = torch.library.Library("executorch_musa", "FRAGMENT")
+try:
+    _MUSA_HARDSWISH = torch.ops.executorch_musa.hardswish.default
+except AttributeError:
+    _musa_activation_library.define("hardswish(Tensor input) -> Tensor")
+    _musa_activation_library.impl(
+        "hardswish", torch.nn.functional.hardswish, "PrivateUse1"
+    )
+    _musa_activation_library.impl(
+        "hardswish",
+        lambda input: torch.empty_like(input, memory_format=torch.contiguous_format),
+        "Meta",
+    )
+    _MUSA_HARDSWISH = torch.ops.executorch_musa.hardswish.default
+_MUSA_ACTIVATION_HEADER = os.path.join(
+    os.path.dirname(_MUSA_BATCH_NORM_HEADER), "musa_activation.h"
+)
+
+
+def _decompose_musa_hardswish(input: torch.Tensor) -> torch.Tensor:
+    return _MUSA_HARDSWISH(input)
+
+
+@lowering.register_lowering(_MUSA_HARDSWISH, type_promotion_kind=None)
+def _lower_musa_hardswish(input: Any) -> Any:
+    input.realize()
+    layout = ir.FixedLayout(
+        input.get_device(),
+        input.get_dtype(),
+        input.get_size(),
+        ir.FlexibleLayout.contiguous_strides(input.get_size()),
+    )
+    return ir.TensorBox.create(
+        ir.ExternKernelAlloc(
+            layout=layout,
+            inputs=[input],
+            constant_args=[],
+            python_kernel_name="executorch_musa.hardswish",
+            cpp_kernel_name="aoti_torch_musa_hardswish",
+            op_overload=_MUSA_HARDSWISH,
+        )
+    )
+
 
 def _materialize_musa_batch_norm_parameters(
     input: torch.Tensor,
@@ -294,6 +337,7 @@ def _musa_aoti_compile_context():
             self.header.splice(
                 f'#include "{_MUSA_BATCH_NORM_HEADER}"'
             )
+            self.header.splice(f'#include "{_MUSA_ACTIVATION_HEADER}"')
 
     CppWrapperCpu.add_device_include = add_device_include_with_musa_shims
     try:
@@ -392,6 +436,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_bmm_out": None,
             "aoti_torch_musa_convolution": None,
             "aoti_torch_musa_batch_norm": None,
+            "aoti_torch_musa_hardswish": None,
         }
 
     @classmethod
@@ -401,6 +446,7 @@ class MusaBackend(AotiBackend, BackendDetails):
                 _decompose_scaled_dot_product_attention
             ),
             torch.ops.aten.linear.default: _decompose_linear,
+            torch.ops.aten.hardswish.default: _decompose_musa_hardswish,
             torch.ops.aten.batch_norm.default: _decompose_aten_batch_norm,
             torch.ops.aten._native_batch_norm_legit_no_training.default: (
                 _decompose_musa_batch_norm
