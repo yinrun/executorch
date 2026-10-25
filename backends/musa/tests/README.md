@@ -129,3 +129,38 @@ python .ci/scripts/tests/test_musa_ci.py -v
 This entry point is ready to invoke from a provisioned MUSA CI worker. No
 remote workflow or self-hosted runner registration is configured by it.
 Do not run untrusted pull-request code on a privileged self-hosted worker.
+
+## Validation snapshot (2026-10-25)
+
+Validated on M1000 with PyTorch/TorchMUSA
+`2.9.0.post1+musa5.1.2mp22`. The fresh in-tree build includes the runner and
+native CTest targets without relying on an installed ExecuTorch C++ package.
+
+| Check | Observed result |
+| --- | --- |
+| Fresh `all` smoke with MLP/SimpleCNN, FP32/BF16 | Build, native tests, original 38-test AOTI suite, original 15 precision runner cases, and 24 model runs passed |
+| New pooling-shape tests | Two targeted tests passed separately; not a single combined 40-test invocation |
+| Missing-device preflight | Nonzero exit, failed report, no configure/build steps |
+| CI orchestration unit tests | Eight passed |
+| Native tests after convolution algorithm fix | 33 cases, each repeated three times, passed |
+| Precision runner tests after fix | Three unittest methods, 24 runner cases, passed |
+| Depthwise regression against old shim | Six exact-comparison failures across FP32/FP16; the fixed shim passes all nine dtype/batch cases |
+| Pretrained MobileNetV2 FP16, fresh export | Four batch/spatial shapes, two runs each, passed; maximum logit error `0.00048828125`, top-1 labels match in every run |
+| Random-weight MobileNetV2 FP32/FP16/BF16 artifact replay | 24 runs passed; FP16's zero logits remain only a smoke check |
+| Random-weight ResNet18 FP32/FP16/BF16 artifact replay | 24 runs against freshly recomputed eager references passed; maximum errors `3.099442e-6`, `0.001953125`, `1.907349e-6`, respectively |
+| Pretrained DeepLabV3-MobileNetV3 BF16 artifact replay | Eight runs against freshly recomputed eager references passed; maximum logit error `0.03125`, all pixel labels match |
+
+The CNN and segmentation shapes are `(2,3,64,64)`, `(1,3,48,54)`,
+`(3,3,80,80)`, and `(2,3,79,71)`. Artifact replay reuses existing PTE/PTD;
+it is not a new export. These checks establish execution/numerical parity
+on the tested inputs, not dataset accuracy or performance targets.
+
+An initial saved-reference replay stopped at ResNet18 BF16's `(2,3,79,71)`
+case: the historical `expected-2-79x71.bin` has 16 zero tail entries that
+disagree with both its original runner output and fresh MUSA eager output.
+Five eager recomputations agree exactly with the original runner output.
+The old file and failed replay report were retained, not rewritten to pass.
+All ResNet18 and DeepLab references were then recomputed from the same model
+factory, seed/checkpoint, and saved inputs for the successful replay above.
+The origin of the historical file discrepancy is not established; saved
+reference integrity checks remain follow-up work.
