@@ -213,3 +213,55 @@ file length then produced a checksum failure; the original files were not
 modified. Separate tests inject reference, input, or earlier-output mutation
 during runner execution and confirm that acceptance refuses to write
 `result.json` even when numerical comparisons against the frozen reference pass.
+
+## Native device metadata validation (2026-10-25)
+
+After commit `884b38e481`, new exports use serialized MUSA device 2 and the
+AOTI boundary uses PrivateUse1 device 20. The in-tree MUSA build was rebuilt
+and the following checks ran on the same M1000/TorchMUSA environment above:
+
+| Check | Observed result |
+| --- | --- |
+| Complete `all` suite, MLP/SimpleCNN FP32/BF16 | Passed, including 24 dynamic-batch model executions and artifact verification |
+| Native CTest | Five executables, 36 cases, each repeated three times; no skips |
+| Complete AOTI unittest suite | 41 tests passed in one invocation |
+| Complete runner unittest suite | Nine methods passed: 28 successful real runner executions, one intentional foreign-backend rejection, and snapshot/artifact checks |
+| Fresh native-tagged ResNet18 BF16 | Four combined batch/spatial shapes, two runs each; maximum error `1.9073486328125e-6` |
+| Fresh native-tagged pretrained MobileNetV2 FP16 | Four combined batch/spatial shapes, two runs each; maximum error `0.00048828125` |
+| Historical CUDA-tagged `MusaBackend` ResNet18/MobileNetV2 artifacts | 16 replay runs passed against frozen references; top-1 IDs match; original PTE/PTD hashes and tensor manifests remain unchanged |
+| Device metadata inspection | Deserialized both new CNN PTEs and verified device 2 in arenas, tensors, and non-CPU weights; historical PTEs retain device 1 |
+| Growing KV-cache BF16 | Two chained runner steps passed; token IDs `[28, 32]` match eager, key/value outputs are exact, maximum logit error `0.0078125` |
+| Additional host-side checks | 12 portable-device cases, three non-MUSA-compiled header probes, eight CUDA/ROCm metadata codec tests, and eight CI orchestration tests passed |
+
+The device test includes SlimTensor allocation/copy/item, distinct wire/AOTI
+IDs, invalid device strings, native/legacy allocator registrations, and an
+ATen device-bridge round trip. It does not establish a full ATen-mode build.
+The header probes verify unchanged CUDA ABI IDs and rejection of MUSA storage
+without the MUSA build define; they are not CUDA/ROCm hardware regressions.
+The weight-mapping fixture was subsequently made independent of constructing
+a registered `torch.device("musa")`, and its focused test passed again.
+The KV-cache check feeds the first runner's cache outputs into the second
+runner through explicit tensor I/O; it is not validation of the runtime's
+internal mutable-state or paged-KV allocator.
+
+Local evidence from this run:
+
+- Full CI: `/tmp/et-musa-native-device-all-fixed-20261025/summary.json`.
+- New CNN reports: `/tmp/et-musa-native-device-followup-20261025/resnet18-bf16/summary.json`
+  and `/tmp/et-musa-native-device-followup-20261025/mobilenet_v2-fp16/summary.json`.
+- Legacy replay records: `/tmp/et-musa-native-device-followup-20261025/summary.json`.
+  This combined follow-up report is **failed**, not passed: after all 16 replay
+  checks succeeded, the additional generic device-propagation suite failed.
+- Independently completed KV check: `/tmp/et-musa-native-device-kv-growing-bf16-20261025/result.json`.
+
+The supplemental `exir.tests.test_propagate_device_pass` invocation ran 24
+tests with 19 errors: the installed Torch partitioner does not accept
+`skip_horizontal_fusion`. Loading the unchanged partitioner helper from
+pre-change commit `dfda07b86e` reproduces the same `TypeError`; this is not a
+native-device regression. The failed log and baseline reproduction are kept
+at `/tmp/et-musa-native-device-followup-20261025/device-propagation.log` and
+`/tmp/et-musa-native-device-propagation-baseline-20261025.log`. No compatibility
+monkeypatch was applied to make this suite pass. Resolve the generic
+partitioner/Torch version mismatch before claiming full EXIR regression
+coverage. Standalone deployment packaging, performance baselines, full
+ATen-mode integration, and CUDA/ROCm hardware validation remain separate work.

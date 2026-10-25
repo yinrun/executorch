@@ -59,7 +59,7 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertEqual(_aoti_device_type_for_weight(torch.ones(1)), 0)
         for name, expected in (("musa", 2), ("cuda", None)):
             tensor = mock.Mock()
-            tensor.device = torch.device(name, 0)
+            tensor.device = mock.Mock(type=name)
             if expected is None:
                 with self.assertRaisesRegex(
                     RuntimeError, "Unsupported AOTI constant device"
