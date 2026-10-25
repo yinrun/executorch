@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -51,11 +52,14 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=64)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--input", type=Path)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--stage", type=int)
     selection.add_argument("--block-operators", type=int)
     selection.add_argument("--stem-operators", action="store_true")
     selection.add_argument("--stem-operator", type=int, choices=(0, 1, 2))
+    selection.add_argument("--include-classifier", action="store_true")
+    selection.add_argument("--classifier-operators", action="store_true")
     args = parser.parse_args()
     if args.batch_size < 1 or min(args.height, args.width) < 32:
         parser.error("batch size must be positive and spatial sizes at least 32")
@@ -81,11 +85,36 @@ def main() -> None:
     if selected_stage is not None and not 0 <= selected_stage < len(stages):
         parser.error(f"stage must be between 0 and {len(stages) - 1}")
     torch.manual_seed(args.seed)
-    image = torch.randn(args.batch_size, 3, args.height, args.width, device="musa").to(
-        DTYPES[args.dtype]
-    )
+    image_shape = (args.batch_size, 3, args.height, args.width)
+    if args.input is None:
+        image = torch.randn(image_shape, device="musa").to(DTYPES[args.dtype])
+    else:
+        payload = bytearray(args.input.read_bytes())
+        element_size = torch.empty((), dtype=DTYPES[args.dtype]).element_size()
+        required_bytes = math.prod(image_shape) * element_size
+        if len(payload) < required_bytes or any(payload[required_bytes:]):
+            parser.error("input must contain the requested shape and only zero padding")
+        image = (
+            torch.frombuffer(
+                payload, dtype=DTYPES[args.dtype], count=math.prod(image_shape)
+            )
+            .reshape(image_shape)
+            .to("musa")
+        )
     torch.musa.synchronize()
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
+        if args.include_classifier or args.classifier_operators:
+            classifier = list(model.model.classifier.children()) + [
+                nn.Upsample(
+                    size=(args.height, args.width), mode="bilinear", align_corners=False
+                )
+            ]
+            if args.classifier_operators:
+                for stage in stages:
+                    image = stage(image)
+                stages = classifier
+            else:
+                stages.extend(classifier)
         if args.block_operators is not None:
             for stage in stages[: args.block_operators]:
                 image = stage(image)
@@ -163,6 +192,7 @@ def main() -> None:
         "dtype": args.dtype,
         "weights": str(args.weights),
         "seed": args.seed,
+        "input": str(args.input) if args.input is not None else None,
         "image_shape": [args.batch_size, 3, args.height, args.width],
         "mode": (
             "stem_operators"
@@ -170,7 +200,15 @@ def main() -> None:
             else (
                 "block_operators"
                 if args.block_operators is not None
-                else "backbone_stages"
+                else (
+                    "full_model_stages"
+                    if args.include_classifier
+                    else (
+                        "classifier_operators"
+                        if args.classifier_operators
+                        else "backbone_stages"
+                    )
+                )
             )
         ),
         "block": args.block_operators,

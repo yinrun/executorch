@@ -792,7 +792,8 @@ The same four DenseNet shapes also pass BF16, with two runner executions per
 shape and maximum errors `0`, `1.19e-7`, `0`, and `0.00390625` respectively
 at `atol=rtol=0.04`. Predicted classes match eager for every execution.
 Random-weight ConvNeXt-Tiny passes FP32 and BF16 at 64x64 with dynamic batches
-2/1/3 and two runner executions per batch. The maximum errors are `2.51e-6`
+2/1/3 and two runner executions per batch. After the fused-convolution-bias
+change, regenerated PTEs pass again with maximum errors `3.58e-6`
 and `0.0078125` respectively; predicted classes match on the initial runs.
 These random-weight checks establish execution correctness for the tested
 inputs, not pretrained classification accuracy or performance.
@@ -881,6 +882,24 @@ EXECUTORCH_MUSA_RUNNER="$RUNNER" $PYTHON -m unittest \
 ```
 
 Without `EXECUTORCH_MUSA_RUNNER`, these runner tests are explicitly skipped.
+
+The regenerated pretrained DeepLab BF16 full model still fails the default
+`atol=rtol=0.04` check at 2x3x64x64: 1,005 of 172,032 values fail
+`torch.testing.assert_close`, down from 16,419 with native Hardswish alone.
+The maximum absolute error over all logits is `0.125`; all 8,192 pixel labels
+match eager. This is not a passing default-tolerance acceptance, and the
+remaining dynamic shapes have not passed that stricter check.
+
+The diagnostic script accepts `--input /path/to/input-0.bin` to reuse an
+acceptance input with the specified dtype, batch, height, and width. Trailing
+zero padding from the dynamic input allocator is allowed. With
+`--include-classifier`, it also emits the ASPP, classifier, and final bilinear
+upsampling outputs. `--classifier-operators` instead feeds the classifier with
+the eager backbone output to isolate head-local error.
+On the failing acceptance input, backbone stages 0–4 match exactly, the first
+discrepancy is at stage 5 (`0.0625`), and the final backbone error is `0.078125`.
+The full diagnostic's final logits reproduce the same `0.125` maximum and
+`0.0289871` mean absolute error as the ordinary full-model runner.
 
 ```bash
 $PYTHON examples/musa/aoti_backbone_diagnostics.py \
