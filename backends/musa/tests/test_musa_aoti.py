@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import operator
 import unittest
+from unittest import mock
 
 import torch
 from torch import nn
@@ -13,7 +15,11 @@ from torch.export import Dim, export
 from executorch.backends.cuda.cuda_weight_collector import (
     decode_cuda_aoti_metadata,
 )
-from executorch.backends.musa import MusaBackend, export_with_musa_sdpa_decomposition
+from executorch.backends.musa import (
+    MusaBackend,
+    export_with_musa_pooling_shapes,
+    export_with_musa_sdpa_decomposition,
+)
 from executorch.backends.musa.musa_backend import (
     _decompose_scaled_dot_product_attention,
     _normalize_musa_assert_devices,
@@ -39,6 +45,26 @@ from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
 
 class TestMusaAotiFallbacks(unittest.TestCase):
+    def test_pooling_shape_division_and_restoration(self) -> None:
+        from torch import _meta_registrations
+
+        original = _meta_registrations.div_rtn
+        for numerator in range(-9, 10):
+            for denominator in (-4, -2, -1, 1, 2, 4):
+                self.assertEqual(
+                    original(numerator, denominator),
+                    operator.floordiv(numerator, denominator),
+                )
+
+        def check_patch(*args, **kwargs):
+            self.assertIs(_meta_registrations.div_rtn, operator.floordiv)
+            raise RuntimeError("export failed")
+
+        with mock.patch.object(torch.export, "export", side_effect=check_patch):
+            with self.assertRaisesRegex(RuntimeError, "export failed"):
+                export_with_musa_pooling_shapes(nn.Identity(), ())
+        self.assertIs(_meta_registrations.div_rtn, original)
+
     def test_registers_native_slimtensor_fallback(self) -> None:
         fallbacks = MusaBackend.get_supported_fallback_kernels()
         self.assertIn("aoti_torch_musa_addmm_out", fallbacks)
@@ -52,6 +78,40 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+    def test_dynamic_pooling_spatial_shapes(self) -> None:
+        from torch import _meta_registrations
+
+        model = (
+            nn.Sequential(
+                nn.Conv2d(3, 4, 7, stride=2, padding=3),
+                nn.MaxPool2d(3, stride=2, padding=1),
+            )
+            .eval()
+            .to("musa")
+        )
+        original = _meta_registrations.div_rtn
+        example = torch.randn(2, 3, 64, 64, device="musa")
+        exported = export_with_musa_pooling_shapes(
+            model,
+            (example,),
+            dynamic_shapes=(
+                {
+                    0: Dim("batch", min=1, max=3),
+                    2: Dim("height", min=48, max=80),
+                    3: Dim("width", min=48, max=80),
+                },
+            ),
+        )
+        self.assertIs(_meta_registrations.div_rtn, original)
+        with torch.no_grad():
+            for shape in ((1, 3, 48, 54), (3, 3, 80, 80), (2, 3, 79, 71)):
+                value = torch.randn(shape, device="musa")
+                torch.testing.assert_close(exported.module()(value), model(value))
+        result = MusaBackend.preprocess(
+            exported, [MusaBackend.generate_method_name_compile_spec("forward")]
+        )
+        self.assertGreater(len(result.processed_bytes), 0)
+
     def test_hardswish_aoti_compile(self) -> None:
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype):

@@ -58,14 +58,24 @@ The script pads raw input files to the bound and passes the actual shape via
 buffer as a bound-sized tensor. For `bilinear_unet` only,
 `--dynamic-spatial-max 48` exports one PTE with independent height and width
 between 24 and 48. It checks 32x40, 24x30, 48x48, and 47x39 using that PTE.
-For `deeplabv3_mobilenet_v3_large` and `efficientnet_b0`,
+For `resnet18`, `mobilenet_v2`, `deeplabv3_mobilenet_v3_large`, and `efficientnet_b0`,
 `--dynamic-spatial-max 80` checks
 64x64, 48x54, 80x80, and 79x71 using one PTE with independent height and
 width between 48 and 80. Both include odd sizes. Dynamic batch and spatial
-dimensions can also be combined for either supported model using
+dimensions can also be combined for these supported models using
 `--batch-size 2 --dynamic-batch-max 3 --dynamic-spatial-max 80` (use 48 for
 the bilinear U-Net). This accepts a batch of 1–3 with independent bounded
 height and width in one PTE.
+ResNet18 and MobileNetV2 use `export_with_musa_pooling_shapes` for this path.
+The installed PyTorch pooling meta helper tests the remainder of a symbolic
+integer division even though Python `//` already rounds toward negative
+infinity. This adds an unnecessary parity constraint to the ResNet stem's
+pooling input. The helper temporarily uses `operator.floordiv` during export,
+restores the original function on success or failure, and leaves the actual
+pooling operators and model architecture unchanged. It preserves independent
+integer height/width bounds rather than requiring multiples of four. As with
+the SDPA export helper, export calls using this compatibility patch must be
+serialized.
 For `densenet121`, the tested export range uses `8 * Dim` for independent
 height and width between 32 and 80, checking 64x64, 32x40, 80x80, and 72x64.
 This constraint comes from the current exporter's pooling guards; it is not a
@@ -96,9 +106,10 @@ through PTE/PTD export and `executor_runner` output comparison, including
 bounded dynamic batch sizes.
 The `broadcast_bmm` model broadcasts a read-only right-hand weight across
 batches using a zero inter-batch stride; output matrices remain disjoint.
-The standalone C++ addmm test can still intermittently produce incorrect
-FP16/BF16 outputs for padded-row matrices; this is not covered by the broadcast
-BMM acceptance result.
+Earlier standalone addmm tests exposed intermittent padded-row FP16/BF16
+errors. The subsequent packing and GEMM-path fixes described below now pass
+repeated native regressions, including the re-enabled no-bias padded case;
+this does not establish support for arbitrary matrix strides.
 For transposed convolution, output padding must be smaller than either its
 stride or its dilation, as required by PyTorch. Transposed Conv1d uses muDNN's
 GEMM backward-data algorithm; its implicit-GEMM algorithm rejects the 1D

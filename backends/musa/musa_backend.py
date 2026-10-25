@@ -7,6 +7,7 @@
 import contextlib
 import hashlib
 import math
+import operator
 import os
 import typing
 from unittest import mock
@@ -475,6 +476,22 @@ def _decompose_linear(
     if contiguous_input.dim() == 2:
         return torch.addmm(bias, contiguous_input, weight.t())
     return torch.matmul(contiguous_input, weight.t()) + bias
+
+
+def export_with_musa_pooling_shapes(
+    module: torch.nn.Module, args: tuple[Any, ...], **kwargs: Any
+) -> torch.export.ExportedProgram:
+    """Export pooling without the meta kernel's redundant remainder guards.
+
+    Python integer division already rounds toward negative infinity. The
+    installed pooling meta helper additionally tests the remainder, specializing
+    symbolic spatial dimensions even though its correction is never needed.
+    Exports must run sequentially while this scoped compatibility patch is active.
+    """
+    from torch import _meta_registrations
+
+    with mock.patch.object(_meta_registrations, "div_rtn", operator.floordiv):
+        return torch.export.export(module, args, **kwargs)
 
 
 def export_with_musa_sdpa_decomposition(

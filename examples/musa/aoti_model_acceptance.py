@@ -41,6 +41,7 @@ from torch.export import Dim, export
 from executorch.backends.musa import (
     MusaBackend,
     MusaPartitioner,
+    export_with_musa_pooling_shapes,
     export_with_musa_sdpa_decomposition,
 )
 from executorch.exir import to_edge_transform_and_lower
@@ -658,6 +659,8 @@ def export_model(
         input_shape = (batch_size, 3, input_size, input_size)
     spatial_minimum = {
         "bilinear_unet": 24,
+        "resnet18": 48,
+        "mobilenet_v2": 48,
         "deeplabv3_mobilenet_v3_large": 48,
         "efficientnet_b0": 48,
         "densenet121": 32,
@@ -670,7 +673,8 @@ def export_model(
         ):
             raise ValueError(
                 "--dynamic-spatial-max requires bilinear_unet (min=24) or "
-                "deeplabv3_mobilenet_v3_large/efficientnet_b0 (min=48), "
+                "resnet18/mobilenet_v2/deeplabv3_mobilenet_v3_large/"
+                "efficientnet_b0 (min=48), "
                 "or densenet121 (min=32), "
                 "with max >= input size"
             )
@@ -746,6 +750,8 @@ def export_model(
         if model_name in ("transformer_block", "causal_attention", "vit_b_16")
         else export
     )
+    if model_name in ("resnet18", "mobilenet_v2") and dynamic_spatial_max is not None:
+        export_model_graph = export_with_musa_pooling_shapes
     exported = export_model_graph(model, (example,), dynamic_shapes=dynamic_shapes)
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]
     with _serialization_schema():
