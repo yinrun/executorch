@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -100,6 +101,42 @@ class MusaCiTest(unittest.TestCase):
         self.assertEqual(env["EXECUTORCH_MUSA_RUNNER"], "/build/executor_runner")
         self.assertTrue(env["PYTHONPATH"].endswith(os.pathsep + "/deps"))
         self.assertTrue(env["LD_LIBRARY_PATH"].startswith("/build/backends/cuda"))
+
+    def test_weights_are_forwarded_to_each_selected_dtype(self):
+        args = self.arguments(
+            "--suite",
+            "models",
+            "--models",
+            "mobilenet_v2",
+            "--weights",
+            "mobilenet_v2",
+            "/checkpoints/mobile.pth",
+        )
+        commands = dict(
+            musa_ci.commands(args, "cmake", "ctest", "flatc", "/torch/cmake")
+        )
+        for dtype in ("fp32", "fp16", "bf16"):
+            command = commands[f"model-mobilenet_v2-{dtype}"]
+            self.assertEqual(
+                command[command.index("--weights") + 1], "/checkpoints/mobile.pth"
+            )
+        for options in (
+            ("--suite", "native", "--weights", "mobilenet_v2", "/weights"),
+            ("--models", "mlp", "--weights", "mobilenet_v2", "/weights"),
+            ("--weights", "mlp", "/weights"),
+            (
+                "--weights",
+                "mobilenet_v2",
+                "/first",
+                "--weights",
+                "mobilenet_v2",
+                "/second",
+            ),
+        ):
+            with self.subTest(options=options), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ), self.assertRaises(SystemExit):
+                self.arguments(*options)
 
     def test_failed_and_skipped_commands_fail_the_report(self):
         for name, code in (

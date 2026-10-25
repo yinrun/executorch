@@ -1,10 +1,11 @@
-"""Measure DeepLab MobileNetV3 stage errors against MUSA eager outputs.
+"""Measure MobileNet stage errors against MUSA eager outputs.
 
 Export every backbone stage as an output, or use --stage to isolate one stage
 fed by its eager predecessor. Retaining intermediate outputs can change fusion
 and allocation, so these measurements supplement full-model acceptance.
-Use --include-classifier to observe the complete segmentation pipeline, or
+Use --include-classifier to observe the complete model pipeline, or
 --classifier-operators to isolate the head with an eager backbone input.
+Use --module-path to observe children of a Sequential fed by its eager input.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from examples.musa.aoti_model_acceptance import (
     DTYPES,
     _run_runner,
     _serialization_schema,
+    _torchvision_mobilenet_v2,
     _write_tensor,
 )
 
@@ -46,6 +48,11 @@ class BackboneStages(nn.Module):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model",
+        choices=("deeplabv3_mobilenet_v3_large", "mobilenet_v2"),
+        default="deeplabv3_mobilenet_v3_large",
+    )
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--runner", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -62,6 +69,7 @@ def main() -> None:
     selection.add_argument("--stem-operator", type=int, choices=(0, 1, 2))
     selection.add_argument("--include-classifier", action="store_true")
     selection.add_argument("--classifier-operators", action="store_true")
+    selection.add_argument("--module-path")
     args = parser.parse_args()
     if args.batch_size < 1 or min(args.height, args.width) < 32:
         parser.error("batch size must be positive and spatial sizes at least 32")
@@ -69,15 +77,26 @@ def main() -> None:
     if not torch.musa.is_available():
         raise RuntimeError("MUSA is not available")
 
-    model = DeepLabV3MobileNet()
-    model.model.load_state_dict(
+    if args.model == "mobilenet_v2":
+        model = _torchvision_mobilenet_v2()
+        checkpoint_model = model
+        backbone = model.features
+    else:
+        model = DeepLabV3MobileNet()
+        checkpoint_model = model.model
+        backbone = model.model.backbone
+    checkpoint_model.load_state_dict(
         torch.load(args.weights, map_location="cpu", weights_only=True)
     )
     model = model.eval().to(device="musa", dtype=DTYPES[args.dtype])
-    stages = list(model.model.backbone.children())
+    stages = list(backbone.children())
     if args.block_operators is not None and (
         not 0 <= args.block_operators < len(stages)
-        or not hasattr(stages[args.block_operators], "block")
+        or not (
+            hasattr(stages[args.block_operators], "conv")
+            if args.model == "mobilenet_v2"
+            else hasattr(stages[args.block_operators], "block")
+        )
     ):
         parser.error("--block-operators requires an inverted residual stage")
     stem_mode = args.stem_operators or args.stem_operator is not None
@@ -105,12 +124,37 @@ def main() -> None:
         )
     torch.musa.synchronize()
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
+        if args.module_path is not None:
+            selected_module = model.get_submodule(args.module_path)
+            if not isinstance(selected_module, nn.Sequential):
+                parser.error("--module-path requires a Sequential module")
+            captured = []
+            hook = selected_module.register_forward_pre_hook(
+                lambda module, inputs: captured.append(inputs[0].detach().clone())
+            )
+            try:
+                model(image)
+            finally:
+                hook.remove()
+            if len(captured) != 1:
+                parser.error("selected module must execute exactly once")
+            image = captured[0]
+            stages = list(selected_module.children())
         if args.include_classifier or args.classifier_operators:
-            classifier = list(model.model.classifier.children()) + [
-                nn.Upsample(
-                    size=(args.height, args.width), mode="bilinear", align_corners=False
-                )
-            ]
+            if args.model == "mobilenet_v2":
+                classifier = [
+                    nn.AdaptiveAvgPool2d((1, 1)),
+                    nn.Flatten(1),
+                    *model.classifier.children(),
+                ]
+            else:
+                classifier = list(model.model.classifier.children()) + [
+                    nn.Upsample(
+                        size=(args.height, args.width),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                ]
             if args.classifier_operators:
                 for stage in stages:
                     image = stage(image)
@@ -120,7 +164,12 @@ def main() -> None:
         if args.block_operators is not None:
             for stage in stages[: args.block_operators]:
                 image = stage(image)
-            stages = list(stages[args.block_operators].block.children())
+            block = (
+                stages[args.block_operators].conv
+                if args.model == "mobilenet_v2"
+                else stages[args.block_operators].block
+            )
+            stages = list(block.children())
         if selected_stage is not None:
             for stage in stages[:selected_stage]:
                 image = stage(image)
@@ -190,29 +239,27 @@ def main() -> None:
                 "reference_inf": torch.isinf(reference_flat).sum().item(),
             }
         )
+    if args.module_path is not None:
+        mode = "module_children"
+    elif stem_mode:
+        mode = "stem_operators"
+    elif args.block_operators is not None:
+        mode = "block_operators"
+    elif args.include_classifier:
+        mode = "full_model_stages"
+    elif args.classifier_operators:
+        mode = "classifier_operators"
+    else:
+        mode = "backbone_stages"
     report = {
+        "model": args.model,
+        "module_path": args.module_path,
         "dtype": args.dtype,
         "weights": str(args.weights),
         "seed": args.seed,
         "input": str(args.input) if args.input is not None else None,
         "image_shape": [args.batch_size, 3, args.height, args.width],
-        "mode": (
-            "stem_operators"
-            if stem_mode
-            else (
-                "block_operators"
-                if args.block_operators is not None
-                else (
-                    "full_model_stages"
-                    if args.include_classifier
-                    else (
-                        "classifier_operators"
-                        if args.classifier_operators
-                        else "backbone_stages"
-                    )
-                )
-            )
-        ),
+        "mode": mode,
         "block": args.block_operators,
         "isolated_stage": selected_stage,
         "measurements": measurements,

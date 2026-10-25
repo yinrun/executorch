@@ -47,6 +47,40 @@ and ConvNeXt-Tiny. DenseNet's spatial dimensions use multiples of eight;
 ConvNeXt and SimpleCNN keep fixed spatial sizes. These are random-weight
 execution checks, not pretrained or dataset-level accuracy measurements.
 
+Supply local torchvision state dictionaries to exercise pretrained weights;
+repeat `--weights MODEL PATH` for multiple selected models. The selected
+checkpoint is used for every requested dtype and recorded in `summary.json`.
+The script does not download checkpoints or relax numerical tolerances.
+
+```bash
+python .ci/scripts/test_musa.py --suite models \
+  --models mobilenet_v2 --dtypes fp16 \
+  --weights mobilenet_v2 /checkpoints/mobilenet_v2-7ebf99e0.pth \
+  --build-dir /tmp/executorch-musa-ci \
+  --output-dir /tmp/executorch-musa-pretrained-results
+```
+
+Random-weight MobileNetV2 FP16 logits can underflow entirely to zero; passing
+that smoke test alone is not evidence of pretrained numerical accuracy.
+The pretrained FP16 test currently fails the unchanged `atol=rtol=0.01`
+criterion on M1000 (TorchMUSA 2.9.0.post1+musa5.1.2mp22). Stage diagnostics
+reproduce the first differences in the first inverted-residual depthwise
+convolution. Use the same input as the failing acceptance run to investigate:
+
+```bash
+python examples/musa/aoti_backbone_diagnostics.py \
+  --model mobilenet_v2 --dtype fp16 \
+  --module-path features.1.conv.0 \
+  --input /tmp/executorch-musa-pretrained-results/models/mobilenet_v2-fp16/input-0.bin \
+  --weights /checkpoints/mobilenet_v2-7ebf99e0.pth \
+  --runner /tmp/executorch-musa-ci/executor_runner \
+  --output-dir /tmp/executorch-musa-depthwise-diagnostics
+```
+
+`--include-classifier` instead reports every backbone stage and the classifier.
+Intermediate outputs can change fusion, so always rerun full-model acceptance
+after a precision fix.
+
 For a smaller end-to-end matrix while retaining all native, compiler, and
 precision tests:
 

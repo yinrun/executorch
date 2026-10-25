@@ -73,7 +73,21 @@ def parse_args(argv=None):
         choices=("fp32", "fp16", "bf16"),
         default=["fp32", "fp16", "bf16"],
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--weights", action="append", nargs=2, default=[], metavar=("MODEL", "PATH")
+    )
+    args = parser.parse_args(argv)
+    weights = {}
+    for model, path in args.weights:
+        if args.suite not in ("all", "models") or model not in args.models:
+            parser.error("--weights requires a selected model in the all/models suite")
+        if model not in MODELS[2:]:
+            parser.error("--weights requires a torchvision model")
+        if model in weights:
+            parser.error(f"Duplicate weights for {model}")
+        weights[model] = Path(path).expanduser().resolve()
+    args.weights = weights
+    return args
 
 
 def require_tool(name):
@@ -209,6 +223,8 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
                     "densenet121",
                 }:
                     command += ["--dynamic-spatial-max", "80"]
+                if model in args.weights:
+                    command += ["--weights", str(args.weights[model])]
                 yield f"model-{model}-{dtype}", command
 
 
@@ -271,6 +287,10 @@ def main(argv=None):
             raise RuntimeError(
                 "MUSA CI requires a usable MUSA GPU; skipped tests are not success"
             )
+        for model, path in args.weights.items():
+            if not path.is_file():
+                raise RuntimeError(f"Weights for {model} are missing: {path}")
+        report["weights"] = {model: str(path) for model, path in args.weights.items()}
         cmake = require_tool(args.cmake)
         ctest = require_tool(args.ctest or Path(cmake).with_name("ctest"))
         flatc = require_tool(args.flatc)
