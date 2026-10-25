@@ -65,6 +65,7 @@ class MusaCiTest(unittest.TestCase):
         self.assertIn("export", commands)
         self.assertIn("runner", commands)
         self.assertIn("test_musa_package", commands)
+        self.assertIn("test_musa_benchmark", commands)
         self.assertIn("test_musa_deployment", commands)
         models = {
             name: command
@@ -126,6 +127,7 @@ class MusaCiTest(unittest.TestCase):
         )
         self.assertEqual(commands["build"][-1], "executor_runner")
         self.assertIn("test_musa_package", commands)
+        self.assertIn("test_musa_benchmark", commands)
         self.assertIn("test_musa_deployment", commands)
         self.assertNotIn("export", commands)
         self.assertFalse(any(name.startswith("model-") for name in commands))

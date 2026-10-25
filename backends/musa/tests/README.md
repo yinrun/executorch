@@ -30,7 +30,7 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
 | `runner` | Frozen tensor snapshots/artifact failures, native MUSA and legacy device tags, foreign-backend rejection, plus convolution and Hardsigmoid precision through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
-| `deployment` | Package validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries |
+| `deployment` | Package/benchmark validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
 The five native CTest executables contain 37 GoogleTest cases. Each executable
@@ -119,6 +119,14 @@ moves each package to a directory containing spaces. It runs dynamic batches
 1/2/3 with a clean subprocess environment, `LD_BIND_NOW=1`, and no preload.
 It compares results against MUSA eager and inspects loader initialization
 records to reject Torch/Python libraries and Python package directories.
+Batch 1 also exercises the ordinary, uninstrumented runner; batches 2/3
+collect three synchronized samples after two warmups. Each model then runs
+two fresh benchmark processes through the standard-library-only driver
+(`python -S`), checking the final outputs byte-for-byte and sample counts.
+The MLP package additionally rejects zero measured executions, count overflow,
+and server-mode benchmarking without writing a successful timing report.
+Four benchmark unit tests check statistics, invalid samples, package hashes,
+and path traversal; the deployment suite includes these tests automatically.
 The launcher, runner, and ExecuTorch libraries come from the moved package;
 the MUSA SDK and GPU driver remain external prerequisites. This is a Linux,
 same-architecture test of the current static-core/shared-shims configuration,

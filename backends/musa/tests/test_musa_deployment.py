@@ -1,8 +1,10 @@
 """Set EXECUTORCH_MUSA_RUNNER and EXECUTORCH_MUSA_PATCHELF to test deployment."""
 
+import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,10 +12,11 @@ from pathlib import Path
 import torch
 
 from examples.musa.aoti_model_acceptance import (
-    export_model,
     _write_input,
     _write_tensor,
+    export_model,
 )
+from examples.musa.benchmark_aoti import validate_samples
 from examples.musa.package_aoti import package
 
 
@@ -41,7 +44,9 @@ class TestMusaDeployment(unittest.TestCase):
                 )
                 bundle = root / "package"
                 manifest = package(runner.parent, pte, ptd, bundle, patchelf, "readelf")
-                self.assertTrue(any(key.startswith("model:") for key in manifest["elf"]))
+                self.assertTrue(
+                    any(key.startswith("model:") for key in manifest["elf"])
+                )
                 relocated = root / "relocated package"
                 bundle.rename(relocated)
                 environment = {
@@ -52,6 +57,16 @@ class TestMusaDeployment(unittest.TestCase):
                     "LD_DEBUG": "libs",
                 }
                 for batch in (1, 2, 3):
+                    timing = root / f"timing-{batch}.json"
+                    benchmark_flags = (
+                        [
+                            f"--musa_benchmark_output={timing}",
+                            "--musa_warmup_executions=2",
+                            "--num_executions=3",
+                        ]
+                        if batch != 1
+                        else []
+                    )
                     actual_shape = (batch, *shape[1:])
                     value = torch.randn(actual_shape, device="musa", dtype=dtype)
                     _write_input(value, root / "input.bin", (3, *shape[1:]))
@@ -64,15 +79,21 @@ class TestMusaDeployment(unittest.TestCase):
                             f"--input_shapes={'x'.join(map(str, actual_shape))}",
                             f"--output_file={root / 'output'}",
                             "--print_output=summary",
+                            *benchmark_flags,
                         ],
                         cwd=root,
                         env=environment,
                         text=True,
                         capture_output=True,
+                        timeout=120,
                     )
                     self.assertEqual(
                         result.returncode, 0, result.stdout + result.stderr
                     )
+                    if benchmark_flags:
+                        validate_samples(json.loads(timing.read_text()), 2, 3)
+                    else:
+                        self.assertFalse(timing.exists())
                     loaded = re.findall(r"calling init: (.+)", result.stderr)
                     self.assertTrue(loaded)
                     self.assertTrue(
@@ -103,6 +124,66 @@ class TestMusaDeployment(unittest.TestCase):
                     torch.testing.assert_close(
                         actual, expected, atol=tolerance, rtol=tolerance
                     )
+                benchmark = subprocess.run(
+                    [
+                        sys.executable,
+                        "-S",
+                        str(
+                            Path(__file__).resolve().parents[3]
+                            / "examples/musa/benchmark_aoti.py"
+                        ),
+                        "--package",
+                        str(relocated),
+                        "--inputs",
+                        str(root / "input.bin"),
+                        "--input-shapes",
+                        "x".join(map(str, actual_shape)),
+                        "--reference-output",
+                        str(root / "output-0.bin"),
+                        "--output-dir",
+                        str(root / "benchmark results"),
+                        "--warmup",
+                        "2",
+                        "--iterations",
+                        "3",
+                        "--repeats",
+                        "2",
+                    ],
+                    env=environment,
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                    timeout=180,
+                )
+                self.assertEqual(
+                    benchmark.returncode, 0, benchmark.stdout + benchmark.stderr
+                )
+                report = json.loads(
+                    (root / "benchmark results/summary.json").read_text()
+                )
+                self.assertEqual(report["status"], "passed")
+                self.assertEqual(report["execute_ms"]["count"], 6)
+                self.assertEqual(len(report["processes"]), 2)
+                if name == "mlp":
+                    for flags in (
+                        ["--num_executions=0"],
+                        ["--num_executions=4294967295", "--musa_warmup_executions=1"],
+                        ["--server_mode"],
+                    ):
+                        rejected_report = root / "rejected.json"
+                        rejected = subprocess.run(
+                            [
+                                str(relocated / "run.sh"),
+                                f"--musa_benchmark_output={rejected_report}",
+                                *flags,
+                            ],
+                            env=environment,
+                            cwd=root,
+                            capture_output=True,
+                            timeout=30,
+                        )
+                        self.assertNotEqual(rejected.returncode, 0)
+                        self.assertFalse(rejected_report.exists())
 
 
 if __name__ == "__main__":

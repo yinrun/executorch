@@ -77,6 +77,59 @@ development environment but must be re-exported for this runtime-only path.
 An audit of declared dependencies is not an accuracy check: run model-specific
 acceptance after relocation, especially after changing the SDK/driver.
 
+## Synchronized stateless-model benchmarks
+
+Rebuild and repackage the runner before using the MUSA-only benchmark flags:
+
+```bash
+MUSA_HOME=/usr/local/musa /tmp/musa-package/run.sh \
+  --inputs=/tmp/model/input-0.bin --input_shapes=2x16 \
+  --musa_benchmark_output=/tmp/timing.json \
+  --musa_warmup_executions=10 --num_executions=50 --print_output=none
+```
+
+This runs ten unmeasured warmups followed by fifty measured executions in
+one process. `execute_ms` measures host wall-clock time around
+`Method::execute()` and a final `musaDeviceSynchronize`; input preparation
+is synchronized before that timer starts. `prepare_execute_ms` additionally
+includes per-iteration input preparation, resizing, and its synchronization.
+Neither metric includes process startup, program/method loading, initial
+input-file reads, final output-file writes, or warmup samples. Transfers
+inside `Method::execute()` and synchronization overhead are included.
+These are not device-event kernel timings or service request latency.
+
+The opt-in mode requires exactly one planned MUSA device, a `MusaBackend`
+delegate, non-server mode, and a positive measured count. Legacy CUDA-tagged
+MUSA packages are accepted; native CUDA delegates are not. The default
+runner path is unchanged when `--musa_benchmark_output` is absent. Run on
+an otherwise idle GPU: device-wide synchronization can wait for other work.
+Use stateless models only; warmups advance mutable state and this interface
+does not reset a KV cache or define an LLM prefill/decode workload.
+
+For fresh-process repeats with frozen inputs, package integrity checks,
+raw timing arrays, per-process statistics, and pooled statistics:
+
+```bash
+python3 -S examples/musa/benchmark_aoti.py \
+  --package /tmp/musa-package --inputs /tmp/model/input-0.bin \
+  --input-shapes 2x16 --reference-output /tmp/model/accepted-output-0.bin \
+  --warmup 10 --iterations 50 --repeats 5 \
+  --output-dir /tmp/musa-benchmark
+```
+
+The driver needs only Python 3.11+ standard libraries on the benchmark host;
+the packaged inference process still has no Python/Torch dependency. Its
+clean environment disables loader tracing during measurement. It refuses
+to reuse an output directory, checks SHA-256 hashes before and after the
+run, and compares each process's final tensor outputs byte-for-byte against
+previously accepted runner outputs for these exact inputs. Establish MUSA
+eager accuracy separately before supplying those references: repeatability
+is not an independent accuracy check, and intermediate iterations are not
+checked. Reports include minimum, median, mean, nearest-rank p90, and maximum
+milliseconds; startup and individual process medians are not mixed into
+the pooled sample distribution. No speedup is implied without a comparable
+baseline using the same weights, shapes, dtypes, and measurement boundaries.
+
 ## Model coverage
 
 `aoti_model_acceptance.py` exercises the complete MUSA path for these models:

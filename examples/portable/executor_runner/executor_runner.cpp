@@ -27,6 +27,10 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#if defined(EXECUTORCH_USE_MUSA)
+#include <executorch/examples/musa/benchmark.h>
+#include <limits>
+#endif
 
 #include <gflags/gflags.h>
 
@@ -97,6 +101,16 @@ DEFINE_string(
     "summary",
     "Output printing mode: 'none' to suppress, 'summary' for first/last 100 elements, 'all' for everything.");
 DEFINE_uint32(num_executions, 1, "Number of times to run the model.");
+#if defined(EXECUTORCH_USE_MUSA)
+DEFINE_string(
+    musa_benchmark_output,
+    "",
+    "Write synchronized MUSA timing samples to JSON; requires non-server mode and a single MUSA device.");
+DEFINE_uint32(
+    musa_warmup_executions,
+    10,
+    "Unmeasured executions before MUSA benchmark samples; used only with --musa_benchmark_output.");
+#endif
 DEFINE_string(
     method_name,
     "",
@@ -387,6 +401,11 @@ int main(int argc, char** argv) {
   executorch::runtime::runtime_init();
 
   gflags::ParseCommandLineFlags(&argc, &argv, true);
+#if defined(EXECUTORCH_USE_MUSA)
+  ET_CHECK_MSG(
+      FLAGS_musa_benchmark_output.empty() || !FLAGS_server_mode,
+      "MUSA benchmarking does not support server mode");
+#endif
   if (argc != 1) {
     std::string msg = "Extra commandline args:";
     for (int i = 1 /* skip argv[0] (program name) */; i < argc; i++) {
@@ -820,8 +839,29 @@ int main(int argc, char** argv) {
   }
 
   et_timestamp_t time_spent_executing = 0;
+  uint32_t total_executions = FLAGS_num_executions;
+#if defined(EXECUTORCH_USE_MUSA)
+  std::unique_ptr<executorch::examples::musa::Benchmark> musa_benchmark;
+  if (!FLAGS_musa_benchmark_output.empty()) {
+    ET_CHECK_MSG(
+        FLAGS_musa_warmup_executions <=
+            std::numeric_limits<uint32_t>::max() - total_executions,
+        "MUSA benchmark execution count overflow");
+    musa_benchmark = std::make_unique<executorch::examples::musa::Benchmark>(
+        *method_meta,
+        FLAGS_musa_benchmark_output,
+        FLAGS_musa_warmup_executions,
+        total_executions);
+    total_executions += FLAGS_musa_warmup_executions;
+  }
+#endif
   // Run the model.
-  for (uint32_t i = 0; i < FLAGS_num_executions; i++) {
+  for (uint32_t i = 0; i < total_executions; i++) {
+#if defined(EXECUTORCH_USE_MUSA)
+    if (musa_benchmark) {
+      musa_benchmark->begin();
+    }
+#endif
     // Allocate input tensors and set all of their elements to 1 or to the
     // contents of input_buffers if available. For non bundled IO, the `inputs`
     // variable owns the allocated memory and must live past the last call to
@@ -859,6 +899,11 @@ int main(int argc, char** argv) {
       }
     }
 
+#if defined(EXECUTORCH_USE_MUSA)
+    if (musa_benchmark) {
+      musa_benchmark->synchronize();
+    }
+#endif
     const et_timestamp_t before_execute =
         executorch::runtime::pal_current_ticks();
     Error status = method->execute();
@@ -869,6 +914,11 @@ int main(int argc, char** argv) {
           "Arm/VGF delegate inputs dumped successfully; stopping before delegate dispatch.");
       return 0;
     }
+#if defined(EXECUTORCH_USE_MUSA)
+    if (musa_benchmark && status == Error::Ok) {
+      musa_benchmark->synchronize();
+    }
+#endif
     const et_timestamp_t after_execute =
         executorch::runtime::pal_current_ticks();
     const et_timestamp_t iter_elapsed = after_execute - before_execute;
@@ -879,11 +929,16 @@ int main(int argc, char** argv) {
         method_name,
         static_cast<uint32_t>(status));
     const auto iter_tick_ratio = et_pal_ticks_to_ns_multiplier();
+#if defined(EXECUTORCH_USE_MUSA)
+    if (musa_benchmark) {
+      musa_benchmark->record(i, before_execute, after_execute);
+    }
+#endif
     ET_LOG(
         Info,
         "Iteration %" PRIu32 " of %" PRIu32 ": %f ms",
         i + 1,
-        FLAGS_num_executions,
+        total_executions,
         static_cast<double>(iter_elapsed) * iter_tick_ratio.numerator /
             iter_tick_ratio.denominator / 1000000.0);
   }
@@ -892,7 +947,7 @@ int main(int argc, char** argv) {
   ET_LOG(
       Info,
       "Model executed successfully %" PRIu32 " time(s) in %f ms.",
-      FLAGS_num_executions,
+      total_executions,
       static_cast<double>(time_spent_executing) * tick_ratio.numerator /
           tick_ratio.denominator / NANOSECONDS_PER_MILLISECOND);
 
@@ -1027,5 +1082,10 @@ int main(int argc, char** argv) {
   }
 #endif
 
+#if defined(EXECUTORCH_USE_MUSA)
+  if (musa_benchmark) {
+    musa_benchmark->write();
+  }
+#endif
   return 0;
 }

@@ -199,7 +199,7 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
                 f"backends.musa.tests.{module}",
             ]
     if "deployment" in selected:
-        for module in ("test_musa_package", "test_musa_deployment"):
+        for module in ("test_musa_package", "test_musa_benchmark", "test_musa_deployment"):
             yield module, [
                 sys.executable,
                 "-c",
