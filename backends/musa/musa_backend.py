@@ -328,20 +328,71 @@ lowering.register_lowering(_MUSA_BATCH_NORM, type_promotion_kind=None)(
 @contextlib.contextmanager
 def _musa_aoti_compile_context():
     from torch._inductor.codegen.cpp_wrapper_cpu import CppWrapperCpu
+    from torch._inductor.kernel import conv
 
     original_add_device_include = CppWrapperCpu.add_device_include
+    convolution_op = torch.ops.aten.convolution.default
+    original_convolution = lowering.lowerings[convolution_op]
+
+    def convolution_with_fused_bias(
+        input,
+        weight,
+        bias,
+        stride,
+        padding,
+        dilation,
+        transposed,
+        output_padding,
+        groups,
+    ):
+        if input.get_device().type == "musa" and bias is not None and not transposed:
+            input = ir.ExternKernel.require_contiguous(input)
+            weight = ir.ExternKernel.require_contiguous(weight)
+            bias = ir.ExternKernel.require_contiguous(bias)
+            for tensor in (input, weight, bias):
+                tensor.realize()
+            parameters = {
+                "stride": tuple(stride),
+                "padding": tuple(padding),
+                "dilation": tuple(dilation),
+                "transposed": transposed,
+                "output_padding": tuple(output_padding),
+                "groups": groups,
+            }
+            inferred_layout = conv.conv_layout(input, weight, bias, **parameters)
+            layout = ir.FixedLayout(
+                input.get_device(),
+                input.get_dtype(),
+                inferred_layout.size,
+                ir.FlexibleLayout.contiguous_strides(inferred_layout.size),
+            )
+            return conv.aten_convolution.bind(
+                [input, weight, bias], layout, list(parameters), **parameters
+            ).output_node()
+        return original_convolution(
+            input,
+            weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            transposed,
+            output_padding,
+            groups,
+        )
 
     def add_device_include_with_musa_shims(self: Any, device: str) -> None:
         original_add_device_include(self, device)
         if device == "musa":
-            self.header.splice(
-                f'#include "{_MUSA_BATCH_NORM_HEADER}"'
-            )
+            self.header.splice(f'#include "{_MUSA_BATCH_NORM_HEADER}"')
             self.header.splice(f'#include "{_MUSA_ACTIVATION_HEADER}"')
 
     CppWrapperCpu.add_device_include = add_device_include_with_musa_shims
     try:
-        yield
+        with mock.patch.dict(
+            lowering.lowerings, {convolution_op: convolution_with_fused_bias}
+        ):
+            yield
     finally:
         CppWrapperCpu.add_device_include = original_add_device_include
 

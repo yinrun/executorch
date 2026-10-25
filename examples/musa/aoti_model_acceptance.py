@@ -6,8 +6,8 @@
 
 """Export and execute representative models through the MUSA AOTI backend.
 
-The script uses fixed-shape inputs for each export. It is an acceptance
-smoke test for the complete export path, not a benchmark. The
+The script checks fixed or bounded dynamic inputs through the complete export
+and runner path. It is a correctness smoke test, not a benchmark. The
 ``narrow_resnet18`` model keeps the ResNet-18 block topology but uses narrow
 channels; ``resnet18`` is the standard torchvision model with optional weights.
 ``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6;

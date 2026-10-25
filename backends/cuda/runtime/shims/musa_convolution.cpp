@@ -57,8 +57,12 @@ struct MudnnContext {
   mudnnTensorDescriptor_t output = nullptr;
   mudnnFilterDescriptor_t weight = nullptr;
   mudnnConvolutionDescriptor_t convolution = nullptr;
+  mudnnActivationDescriptor_t activation = nullptr;
 
   ~MudnnContext() {
+    if (activation != nullptr) {
+      mudnnDestroyActivationDescriptor(activation);
+    }
     if (convolution != nullptr) {
       mudnnDestroyConvolutionDescriptor(convolution);
     }
@@ -97,14 +101,14 @@ extern "C" {
 AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
     SlimTensor* input,
     SlimTensor* weight,
-    SlimTensor* bias,
+    SlimTensor* const* bias_handle,
     const int64_t* stride,
     int64_t stride_len,
     const int64_t* padding,
     int64_t padding_len,
     const int64_t* dilation,
     int64_t dilation_len,
-    bool transposed,
+    int32_t transposed,
     const int64_t* output_padding,
     int64_t output_padding_len,
     int64_t groups,
@@ -114,6 +118,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       InvalidArgument,
       "MUSA convolution received a null tensor handle");
   *ret_output = nullptr;
+  SlimTensor* bias = bias_handle != nullptr ? *bias_handle : nullptr;
 
   const auto dtype = input->dtype();
   ET_CHECK_OR_RETURN_ERROR(
@@ -422,56 +427,103 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       return Error::Internal;
     }
   }
-  error = transposed
-      ? check_mudnn(
-            mudnnConvolutionBackwardData(
-                context.handle,
-                &alpha,
-                context.weight,
-                weight_for_mudnn->data_ptr(),
-                context.input,
-                input_for_mudnn->data_ptr(),
-                context.convolution,
-                backward_data_algorithm,
-                workspace.data,
-                workspace_size,
-                &beta,
-                context.output,
-                output->data_ptr()),
-            "mudnnConvolutionBackwardData")
-      : check_mudnn(
-            mudnnConvolutionForward(
-                context.handle,
-                &alpha,
-                context.input,
-                input_for_mudnn->data_ptr(),
-                context.weight,
-                weight_for_mudnn->data_ptr(),
-                context.convolution,
-                MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
-                workspace.data,
-                workspace_size,
-                &beta,
-                context.output,
-                output->data_ptr()),
-            "mudnnConvolutionForward");
-  ET_CHECK_OK_OR_RETURN_ERROR(error);
-
   if (bias != nullptr) {
     std::vector<int> bias_dims(descriptor_dims, 1);
     bias_dims[1] = static_cast<int>(output_channels);
     error = check_mudnn(
-        mudnnCreateTensorDescriptor(&context.bias), "mudnnCreateTensorDescriptor");
+        mudnnCreateTensorDescriptor(&context.bias),
+        "mudnnCreateTensorDescriptor");
+    ET_CHECK_OK_OR_RETURN_ERROR(error);
+    if (transposed) {
+      error = check_mudnn(
+          mudnnSetTensorNdDescriptorEx(
+              context.bias,
+              tensor_format,
+              data_type,
+              descriptor_dims,
+              bias_dims.data()),
+          "mudnnSetTensorNdDescriptorEx(bias)");
+    } else {
+      const int bias_size = static_cast<int>(output_channels);
+      const int bias_stride = 1;
+      error = check_mudnn(
+          mudnnSetTensorNdDescriptor(
+              context.bias, data_type, 1, &bias_size, &bias_stride),
+          "mudnnSetTensorNdDescriptor(bias)");
+    }
+    ET_CHECK_OK_OR_RETURN_ERROR(error);
+  }
+  if (!transposed && bias != nullptr) {
+    error = check_mudnn(
+        mudnnCreateActivationDescriptor(&context.activation),
+        "mudnnCreateActivationDescriptor");
     ET_CHECK_OK_OR_RETURN_ERROR(error);
     error = check_mudnn(
-        mudnnSetTensorNdDescriptorEx(
-            context.bias,
-            tensor_format,
-            data_type,
-            descriptor_dims,
-            bias_dims.data()),
-        "mudnnSetTensorNdDescriptorEx(bias)");
+        mudnnSetActivationDescriptor(
+            context.activation,
+            MUDNN_ACTIVATION_IDENTITY,
+            MUDNN_NOT_PROPAGATE_NAN,
+            0.0),
+        "mudnnSetActivationDescriptor");
     ET_CHECK_OK_OR_RETURN_ERROR(error);
+    error = check_mudnn(
+        mudnnConvolutionBiasActivationForward(
+            context.handle,
+            &alpha,
+            context.input,
+            input_for_mudnn->data_ptr(),
+            context.weight,
+            weight_for_mudnn->data_ptr(),
+            context.convolution,
+            MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+            workspace.data,
+            workspace_size,
+            &beta,
+            nullptr,
+            nullptr,
+            context.bias,
+            bias_for_mudnn->data_ptr(),
+            context.activation,
+            context.output,
+            output->data_ptr()),
+        "mudnnConvolutionBiasActivationForward");
+  } else {
+    error = transposed ? check_mudnn(
+                             mudnnConvolutionBackwardData(
+                                 context.handle,
+                                 &alpha,
+                                 context.weight,
+                                 weight_for_mudnn->data_ptr(),
+                                 context.input,
+                                 input_for_mudnn->data_ptr(),
+                                 context.convolution,
+                                 backward_data_algorithm,
+                                 workspace.data,
+                                 workspace_size,
+                                 &beta,
+                                 context.output,
+                                 output->data_ptr()),
+                             "mudnnConvolutionBackwardData")
+                       : check_mudnn(
+                             mudnnConvolutionForward(
+                                 context.handle,
+                                 &alpha,
+                                 context.input,
+                                 input_for_mudnn->data_ptr(),
+                                 context.weight,
+                                 weight_for_mudnn->data_ptr(),
+                                 context.convolution,
+                                 MUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                                 workspace.data,
+                                 workspace_size,
+                                 &beta,
+                                 context.output,
+                                 output->data_ptr()),
+                             "mudnnConvolutionForward");
+  }
+  ET_CHECK_OK_OR_RETURN_ERROR(error);
+
+  if (transposed && bias != nullptr) {
     error = check_mudnn(
         mudnnAddTensor(
             context.handle,
@@ -488,6 +540,5 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   *ret_output = output.release();
   return Error::Ok;
 }
-
 }
 }

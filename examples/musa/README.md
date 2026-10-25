@@ -853,6 +853,35 @@ this mode intentionally excludes the final residual addition. Diagnostic
 outputs are cloned before the next operator runs so in-place activations do
 not overwrite an earlier observation.
 
+Further SE isolation finds another source of BF16 error: the eager convolution
+fuses bias into the accumulator, whereas Inductor's generic GPU lowering
+removes bias from the convolution and adds it after rounding the output.
+The MUSA compile context now keeps bias in the native forward-convolution
+call. The shim uses `mudnnConvolutionBiasActivationForward` with identity
+activation and a one-dimensional bias descriptor. Transposed convolution keeps
+its separate bias addition, matching the eager implementation.
+
+The convolution ABI also now matches AOTI's optional tensor argument: bias is
+passed as a pointer to a tensor handle, and `transposed` is an `int32_t`.
+Previously the signature mismatch was hidden because lowered calls always
+passed null bias. Both compiler lowering and runtime changes are needed;
+existing PTEs that already separated the bias must be regenerated.
+
+With these changes, all six observed operations in pretrained stage-4 SE
+(pool, fc1, ReLU, fc2, Hardsigmoid, multiply) match BF16 eager exactly on the
+diagnostic input. Eleven native convolution tests pass, including a two-output
+channel BF16 cancellation test: `(1 + 0.00390625) - 1` must return `0.00390625`
+with fused bias, rather than `0` after an intermediate BF16 rounding.
+Six PTE/PTD runner cases also pass exactly: Conv1d/2d/3d in FP16 and BF16,
+each exported with a dynamic batch bound and executed at batch 2. Run them with:
+
+```bash
+EXECUTORCH_MUSA_RUNNER="$RUNNER" $PYTHON -m unittest \
+  backends.musa.tests.test_musa_runner -v
+```
+
+Without `EXECUTORCH_MUSA_RUNNER`, these runner tests are explicitly skipped.
+
 ```bash
 $PYTHON examples/musa/aoti_backbone_diagnostics.py \
   --dtype bf16 --batch-size 2 --height 64 --width 64 \

@@ -15,14 +15,14 @@ extern "C" {
 AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
     SlimTensor*,
     SlimTensor*,
-    SlimTensor*,
+    SlimTensor* const*,
     const int64_t*,
     int64_t,
     const int64_t*,
     int64_t,
     const int64_t*,
     int64_t,
-    bool,
+    int32_t,
     const int64_t*,
     int64_t,
     int64_t,
@@ -197,7 +197,7 @@ void run_convolution(ScalarType dtype) {
       aoti_torch_musa_convolution(
           input,
           weight,
-          bias,
+          &bias,
           stride,
           2,
           padding,
@@ -237,7 +237,7 @@ void run_convolution_1d() {
       aoti_torch_musa_convolution(
           input,
           weight,
-          bias,
+          &bias,
           stride,
           1,
           padding,
@@ -282,7 +282,7 @@ void run_convolution_3d(ScalarType dtype) {
       aoti_torch_musa_convolution(
           input,
           weight,
-          bias,
+          &bias,
           stride,
           3,
           padding,
@@ -323,7 +323,7 @@ void run_convolution_transposed_2d(ScalarType dtype) {
       aoti_torch_musa_convolution(
           input,
           weight,
-          bias,
+          &bias,
           stride,
           2,
           padding,
@@ -536,7 +536,7 @@ void run_convolution_noncontiguous_input(ScalarType dtype) {
       aoti_torch_musa_convolution(
           input,
           weight,
-          bias,
+          &bias,
           stride,
           2,
           padding,
@@ -607,12 +607,54 @@ TEST_F(MusaConvolutionTest, ForwardDtypes) {
   }
 }
 
+TEST_F(MusaConvolutionTest, BFloat16BiasBeforeOutputRounding) {
+  const auto dtype = ScalarType::BFloat16;
+  SlimTensor* input = empty_tensor(dtype, {1, 2, 1, 1}, {2, 1, 1, 1});
+  SlimTensor* weight = empty_tensor(dtype, {2, 2, 1, 1}, {2, 1, 1, 1});
+  SlimTensor* bias = empty_tensor(dtype, {2}, {1});
+  copy_to_device(input, encode_values({1.0f, 0.00390625f}, dtype));
+  copy_to_device(weight, encode_values({1.0f, 1.0f, 1.0f, 1.0f}, dtype));
+  copy_to_device(bias, encode_values({-1.0f, -1.0f}, dtype));
+  const int64_t stride[] = {1, 1};
+  const int64_t padding[] = {0, 0};
+  const int64_t dilation[] = {1, 1};
+  SlimTensor* output = nullptr;
+  ASSERT_EQ(
+      aoti_torch_musa_convolution(
+          input,
+          weight,
+          &bias,
+          stride,
+          2,
+          padding,
+          2,
+          dilation,
+          2,
+          false,
+          padding,
+          2,
+          1,
+          &output),
+      Error::Ok);
+  ASSERT_NE(output, nullptr);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  const auto values = copy_from_device(output, dtype);
+  ASSERT_EQ(values.size(), 2);
+  EXPECT_FLOAT_EQ(values[0], 0.00390625f);
+  EXPECT_FLOAT_EQ(values[1], 0.00390625f);
+  delete output;
+  delete bias;
+  delete weight;
+  delete input;
+}
+
 TEST_F(MusaConvolutionTest, ForwardNd) {
   run_convolution_1d();
 }
 
 TEST_F(MusaConvolutionTest, Forward3dDtypes) {
-  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_convolution_3d(dtype);
   }
 }
