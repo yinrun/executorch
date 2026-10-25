@@ -348,6 +348,76 @@ These checks do not claim a different host/GPU ISA, absence of the external
 SDK/driver requirement, dataset-level model accuracy, or performance gains.
 The separate generic EXIR/Torch partitioner mismatch described above remains
 open; no version-compatibility workaround is hidden in this deployment path.
-The now-42-test AOTI compiler suite was not rerun in full in this validation
-round; the new context-isolation test, fresh model compilation, deployment
-suite, native suite, and existing runner suite were executed separately.
+The follow-up full 42-test AOTI compiler suite passes without skips at
+`6a79a2c593` (528.949 seconds reported by unittest). Evidence is retained at
+`/tmp/et-musa-runtime-only-full-export-20261025/summary.json` and `export.log`.
+
+## Synchronized benchmark validation (2026-10-25)
+
+Commit `f9409a2eff` adds opt-in synchronized runner samples, a standard-library
+benchmark driver, and deployment regression coverage. Seven package tests,
+four benchmark tests, and the relocated deployment test pass, as do all nine
+CI orchestration tests. The deployment test covers ordinary batch-1 execution,
+instrumented batches 2/3, two fresh driver processes per model, exact final
+output repeatability, and invalid benchmark flags. Logs are under
+`/tmp/et-musa-benchmark-deployment-20261025`.
+The four benchmark unit tests also pass directly with `python -S` and only
+the checkout on `PYTHONPATH`. After the model measurements, all nine existing
+runner regression methods pass without skips (242.535 seconds), covering
+convolution/Hardsigmoid precision, native and legacy device tags, and tensor
+artifact failures. Evidence is at
+`/tmp/et-musa-benchmark-runner-20261025/summary.json` and `runner.log`.
+
+The performance baseline uses Release (`-O3 -DNDEBUG`) on aarch64/Cortex-A78,
+M1000, driver `5.2.2-M1000`, SDK `/usr/local/musa-5.1.0`, and exports made
+with TorchMUSA `2.9.0.post1+musa5.1.2mp22`. Each model uses five fresh
+processes, ten warmups per process, and fifty measured executions per
+process: 250 measured samples per model. Model/inputs/references/package
+files are hashed, outputs are checked exactly against previously accepted
+runner outputs, and those references are also rechecked against the frozen
+MUSA eager tensors at the original tolerances before measurement.
+
+These are host-synchronized `Method::execute()` measurements, not pure
+kernel latency or process-startup latency. The inclusive metric adds input
+preparation and its synchronization. No loader tracing or concurrent
+ExecuTorch export/regression work runs during the measurements. Clocks and
+exclusive GPU access are not locked; the retained device snapshots and
+per-process distributions expose, but do not eliminate, environmental noise.
+The numbers are a baseline for these exact inputs, not a speedup claim,
+cross-model ranking, dataset accuracy result, or production throughput.
+
+| Model | Dtype | Input shape | Execute min (ms) | Execute median (ms) | Execute p90 (ms) | Prepare + execute median (ms) |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| MLP, random weights | FP32 | 2x16 | 3.582620 | 3.972702 | 5.089428 | 3.978342 |
+| SimpleCNN, random weights | BF16 | 2x3x32x32 | 2.977056 | 3.202298 | 3.718140 | 3.214298 |
+| ResNet18, random weights | BF16 | 2x3x64x64 | 17.686656 | 19.257625 | 20.734833 | 19.293725 |
+| MobileNetV2, pretrained | FP16 | 2x3x64x64 | 20.986793 | 23.206886 | 25.605579 | 23.250927 |
+
+All four benchmark reports pass: 1,000 measured samples total and exact
+final-output agreement for all twenty fresh processes. This checks one
+shape per model, not the full dynamic-spatial matrix. SimpleCNN was freshly
+exported and accepted at batches 1/2/3, twice each, before packaging. The
+ResNet18 and MobileNetV2 PTE/PTD hashes match their previously relocated and
+accepted runtime-only packages; only the runner is updated for timing.
+Maximum differences between
+the frozen MUSA eager references and the accepted runner outputs are
+`1.4901161193847656e-8`, `0`, `1.9073486328125e-6`, and `0.00048828125`,
+respectively. Timing repeats do not compare against eager anew or validate
+every intermediate iteration.
+
+Aggregate evidence is at
+`/tmp/et-musa-benchmark-baseline-20261025/summary.json`. That directory also
+contains `run_baseline.py`, device snapshots, the fresh SimpleCNN export,
+four runtime packages, and one `<model>-timings` directory per model.
+Each timing directory retains the manifest snapshot, frozen input/reference,
+per-process output hashes, commands, raw samples, stdout/stderr, and summaries.
+The minimum/median are pooled execution samples, not subprocess runtimes or
+an average of process medians. The benchmark utility and exact timing
+boundaries are documented in `examples/musa/README.md`.
+
+Next performance work should collect a trace that separates host dispatch,
+allocations/copies, synchronization, and GEMM/convolution kernels before
+changing those paths. The tiny-MLP result alone cannot identify the dominant
+overhead. Stateful KV-cache workloads need their own reset and workload
+protocol rather than reusing these stateless warmups. The generic EXIR/Torch
+partitioner version mismatch remains a separate compatibility task.
