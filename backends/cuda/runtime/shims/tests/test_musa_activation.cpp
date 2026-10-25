@@ -16,16 +16,24 @@ using executorch::backends::aoti::slim::SlimTensor;
 using executorch::backends::aoti::slim::c10::DeviceType;
 using executorch::backends::aoti::slim::c10::ScalarType;
 using executorch::backends::cuda::aoti_torch_empty_strided;
+using executorch::backends::cuda::aoti_torch_musa_hardsigmoid;
 using executorch::backends::cuda::aoti_torch_musa_hardswish;
 using executorch::runtime::Error;
 using executorch::runtime::etensor::BFloat16;
 using executorch::runtime::etensor::Half;
 
 template <typename Element>
-void check_values(ScalarType dtype, int64_t stride, int64_t offset) {
+void check_values(
+    ScalarType dtype,
+    int64_t stride,
+    int64_t offset,
+    bool hard_sigmoid = false) {
   const std::vector<float> values = {-4, -3, -2, -1, 0, 1, 2, 3, 4};
-  const std::vector<float> expected = {
-      0, 0, -1.0f / 3, -1.0f / 3, 0, 2.0f / 3, 5.0f / 3, 3, 4};
+  const std::vector<float> expected = hard_sigmoid
+      ? std::vector<
+            float>{0, 0, 1.0f / 6, 1.0f / 3, 0.5f, 2.0f / 3, 5.0f / 6, 1, 1}
+      : std::vector<float>{
+            0, 0, -1.0f / 3, -1.0f / 3, 0, 2.0f / 3, 5.0f / 3, 3, 4};
   const int64_t storage_size = offset + (values.size() - 1) * stride + 1;
   const int64_t storage_stride = 1;
   std::vector<Element> storage(storage_size, Element(0.0f));
@@ -54,7 +62,9 @@ void check_values(ScalarType dtype, int64_t stride, int64_t offset) {
   auto input = owner->as_strided(
       {static_cast<int64_t>(values.size())}, {stride}, offset);
   SlimTensor* raw_output = nullptr;
-  ASSERT_EQ(aoti_torch_musa_hardswish(&input, &raw_output), Error::Ok);
+  const auto activation =
+      hard_sigmoid ? aoti_torch_musa_hardsigmoid : aoti_torch_musa_hardswish;
+  ASSERT_EQ(activation(&input, &raw_output), Error::Ok);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   std::unique_ptr<SlimTensor> output(raw_output);
   ASSERT_NE(output, nullptr);
@@ -149,10 +159,20 @@ TEST_F(MusaActivationTest, EmptyAndScalarInputs) {
   }
 }
 
+TEST_F(MusaActivationTest, HardsigmoidDtypesAndStridedViews) {
+  for (int64_t stride : {1, 2}) {
+    check_values<float>(ScalarType::Float, stride, 1, true);
+    check_values<Half>(ScalarType::Half, stride, 1, true);
+    check_values<BFloat16>(ScalarType::BFloat16, stride, 1, true);
+  }
+}
+
 TEST_F(MusaActivationTest, RejectsNullInput) {
   SlimTensor* output = nullptr;
   EXPECT_EQ(
       aoti_torch_musa_hardswish(nullptr, &output), Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_musa_hardsigmoid(nullptr, &output), Error::InvalidArgument);
 }
 
 }

@@ -47,6 +47,7 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertIn("aoti_torch_musa_convolution", fallbacks)
         self.assertIn("aoti_torch_musa_batch_norm", fallbacks)
         self.assertIn("aoti_torch_musa_hardswish", fallbacks)
+        self.assertIn("aoti_torch_musa_hardsigmoid", fallbacks)
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")

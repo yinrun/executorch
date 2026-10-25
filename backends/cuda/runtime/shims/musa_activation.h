@@ -21,6 +21,9 @@ extern "C" {
 MUSA_ACTIVATION_EXPORT MusaActivationError aoti_torch_musa_hardswish(
     MusaActivationTensorHandle input,
     MusaActivationTensorHandle* ret_output);
+MUSA_ACTIVATION_EXPORT MusaActivationError aoti_torch_musa_hardsigmoid(
+    MusaActivationTensorHandle input,
+    MusaActivationTensorHandle* ret_output);
 }
 
 #ifndef TORCH_INDUCTOR_CPP_WRAPPER

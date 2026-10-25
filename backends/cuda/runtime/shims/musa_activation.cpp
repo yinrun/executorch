@@ -19,7 +19,7 @@ Error check_mudnn(mudnnStatus_t status) {
   ET_CHECK_OR_RETURN_ERROR(
       status == MUDNN_STATUS_SUCCESS,
       Internal,
-      "MUSA hardswish failed with muDNN status %d",
+      "MUSA activation failed with muDNN status %d",
       static_cast<int>(status));
   return Error::Ok;
 }
@@ -46,29 +46,29 @@ struct UnaryContext {
   }
 };
 
-}
-
-extern "C" AOTI_SHIM_EXPORT Error
-aoti_torch_musa_hardswish(SlimTensor* input, SlimTensor** ret_output) {
+Error run_activation(
+    SlimTensor* input,
+    SlimTensor** ret_output,
+    mudnnUnaryMode_t mode) {
   ET_CHECK_OR_RETURN_ERROR(
       input != nullptr && ret_output != nullptr,
       InvalidArgument,
-      "MUSA hardswish received a null tensor handle");
+      "MUSA activation received a null tensor handle");
   *ret_output = nullptr;
   ET_CHECK_OR_RETURN_ERROR(
       input->is_cuda(),
       InvalidArgument,
-      "MUSA hardswish expects a device tensor");
+      "MUSA activation expects a device tensor");
   const auto dtype = input->dtype();
   ET_CHECK_OR_RETURN_ERROR(
       dtype == ScalarType::Float || dtype == ScalarType::Half ||
           dtype == ScalarType::BFloat16,
       NotSupported,
-      "MUSA hardswish supports float32, float16, and bfloat16 only");
+      "MUSA activation supports float32, float16, and bfloat16 only");
   ET_CHECK_OR_RETURN_ERROR(
       input->numel() <= std::numeric_limits<int>::max(),
       NotSupported,
-      "MUSA hardswish exceeds the muDNN descriptor size limit");
+      "MUSA activation exceeds the muDNN descriptor size limit");
 
   std::vector<int64_t> sizes(input->sizes().begin(), input->sizes().end());
   std::vector<int64_t> strides(sizes.size(), 1);
@@ -115,13 +115,16 @@ aoti_torch_musa_hardswish(SlimTensor* input, SlimTensor** ret_output) {
   }
   ET_CHECK_OK_OR_RETURN_ERROR(
       check_mudnn(mudnnCreateUnaryDescriptor(&context.unary)));
+  double alpha = 0.166667;
+  double beta = 0.5;
+  const bool hard_sigmoid = mode == MUDNN_UNARY_HARDSIGMOID;
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(mudnnSetUnaryDescriptor(
       context.unary,
-      MUDNN_UNARY_HARDSWISH,
-      MUDNN_PARAM_DATA_NONE,
-      nullptr,
-      MUDNN_PARAM_DATA_NONE,
-      nullptr)));
+      mode,
+      hard_sigmoid ? MUDNN_PARAM_DATA_DOUBLE : MUDNN_PARAM_DATA_NONE,
+      hard_sigmoid ? &alpha : nullptr,
+      hard_sigmoid ? MUDNN_PARAM_DATA_DOUBLE : MUDNN_PARAM_DATA_NONE,
+      hard_sigmoid ? &beta : nullptr)));
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(mudnnUnary(
       context.handle,
       context.unary,
@@ -131,6 +134,18 @@ aoti_torch_musa_hardswish(SlimTensor* input, SlimTensor** ret_output) {
       input->data_ptr())));
   *ret_output = output.release();
   return Error::Ok;
+}
+
+}
+
+extern "C" AOTI_SHIM_EXPORT Error
+aoti_torch_musa_hardswish(SlimTensor* input, SlimTensor** ret_output) {
+  return run_activation(input, ret_output, MUDNN_UNARY_HARDSWISH);
+}
+
+extern "C" AOTI_SHIM_EXPORT Error
+aoti_torch_musa_hardsigmoid(SlimTensor* input, SlimTensor** ret_output) {
+  return run_activation(input, ret_output, MUDNN_UNARY_HARDSIGMOID);
 }
 
 }

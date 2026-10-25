@@ -883,7 +883,8 @@ EXECUTORCH_MUSA_RUNNER="$RUNNER" $PYTHON -m unittest \
 
 Without `EXECUTORCH_MUSA_RUNNER`, these runner tests are explicitly skipped.
 
-The regenerated pretrained DeepLab BF16 full model still fails the default
+Before the native Hardsigmoid change, the regenerated pretrained DeepLab BF16
+full model still fails the default
 `atol=rtol=0.04` check at 2x3x64x64: 1,005 of 172,032 values fail
 `torch.testing.assert_close`, down from 16,419 with native Hardswish alone.
 The maximum absolute error over all logits is `0.125`; all 8,192 pixel labels
@@ -900,6 +901,19 @@ On the failing acceptance input, backbone stages 0–4 match exactly, the first
 discrepancy is at stage 5 (`0.0625`), and the final backbone error is `0.078125`.
 The full diagnostic's final logits reproduce the same `0.125` maximum and
 `0.0289871` mean absolute error as the ordinary full-model runner.
+
+Further stage-5 SE isolation finds exact pooling, fc1, ReLU, and fc2 outputs,
+followed by a `0.00390625` Hardsigmoid difference and a `0.0078125` multiply
+difference. TorchMUSA's native Hardsigmoid uses muDNN with alpha `0.166667`
+and beta `0.5`, rather than decomposed `clamp(x + 3, 0, 6) / 6`. At BF16
+rounding boundaries, these are not interchangeable: for example, input
+`0.85546875` produces eager `0.64453125` versus decomposed `0.640625`.
+The backend now preserves native Hardsigmoid through a dedicated custom op
+and shared unary SlimTensor shim, using the eager implementation's parameters.
+All four native activation tests pass. The runner regression covers those
+boundary inputs in FP32/FP16/BF16 and batches 1/2/3, with exact eager equality
+for all nine runs. This operator result does not alone establish full-model
+accuracy.
 
 ```bash
 $PYTHON examples/musa/aoti_backbone_diagnostics.py \

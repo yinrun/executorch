@@ -149,6 +149,21 @@ except AttributeError:
         "Meta",
     )
     _MUSA_HARDSWISH = torch.ops.executorch_musa.hardswish.default
+
+try:
+    _MUSA_HARDSIGMOID = torch.ops.executorch_musa.hardsigmoid.default
+except AttributeError:
+    _musa_activation_library.define("hardsigmoid(Tensor input) -> Tensor")
+    _musa_activation_library.impl(
+        "hardsigmoid", torch.nn.functional.hardsigmoid, "PrivateUse1"
+    )
+    _musa_activation_library.impl(
+        "hardsigmoid",
+        lambda input: torch.empty_like(input, memory_format=torch.contiguous_format),
+        "Meta",
+    )
+    _MUSA_HARDSIGMOID = torch.ops.executorch_musa.hardsigmoid.default
+
 _MUSA_ACTIVATION_HEADER = os.path.join(
     os.path.dirname(_MUSA_BATCH_NORM_HEADER), "musa_activation.h"
 )
@@ -158,8 +173,11 @@ def _decompose_musa_hardswish(input: torch.Tensor) -> torch.Tensor:
     return _MUSA_HARDSWISH(input)
 
 
-@lowering.register_lowering(_MUSA_HARDSWISH, type_promotion_kind=None)
-def _lower_musa_hardswish(input: Any) -> Any:
+def _decompose_musa_hardsigmoid(input: torch.Tensor) -> torch.Tensor:
+    return _MUSA_HARDSIGMOID(input)
+
+
+def _lower_musa_activation(input: Any, op: Any, name: str) -> Any:
     input.realize()
     layout = ir.FixedLayout(
         input.get_device(),
@@ -172,11 +190,21 @@ def _lower_musa_hardswish(input: Any) -> Any:
             layout=layout,
             inputs=[input],
             constant_args=[],
-            python_kernel_name="executorch_musa.hardswish",
-            cpp_kernel_name="aoti_torch_musa_hardswish",
-            op_overload=_MUSA_HARDSWISH,
+            python_kernel_name=f"executorch_musa.{name}",
+            cpp_kernel_name=f"aoti_torch_musa_{name}",
+            op_overload=op,
         )
     )
+
+
+@lowering.register_lowering(_MUSA_HARDSWISH, type_promotion_kind=None)
+def _lower_musa_hardswish(input: Any) -> Any:
+    return _lower_musa_activation(input, _MUSA_HARDSWISH, "hardswish")
+
+
+@lowering.register_lowering(_MUSA_HARDSIGMOID, type_promotion_kind=None)
+def _lower_musa_hardsigmoid(input: Any) -> Any:
+    return _lower_musa_activation(input, _MUSA_HARDSIGMOID, "hardsigmoid")
 
 
 def _materialize_musa_batch_norm_parameters(
@@ -488,6 +516,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_convolution": None,
             "aoti_torch_musa_batch_norm": None,
             "aoti_torch_musa_hardswish": None,
+            "aoti_torch_musa_hardsigmoid": None,
         }
 
     @classmethod
@@ -498,6 +527,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             ),
             torch.ops.aten.linear.default: _decompose_linear,
             torch.ops.aten.hardswish.default: _decompose_musa_hardswish,
+            torch.ops.aten.hardsigmoid.default: _decompose_musa_hardsigmoid,
             torch.ops.aten.batch_norm.default: _decompose_aten_batch_norm,
             torch.ops.aten._native_batch_norm_legit_no_training.default: (
                 _decompose_musa_batch_norm
