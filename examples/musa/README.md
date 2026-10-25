@@ -130,6 +130,11 @@ these cases to zeros or flash output would change masking semantics.
 - `flatc` is available on `PATH` for PTE/PTD serialization;
 - an ExecuTorch `executor_runner` built with `EXECUTORCH_BUILD_MUSA=ON`.
 
+For a reproducible build plus native/compiler/runner regression entry point,
+see [MUSA regression instructions](../../backends/musa/tests/README.md).
+It builds the runner and native test targets directly from this checkout,
+without hand-linking test binaries or installing the C++ libraries first.
+
 For example, from the repository root:
 
 ```bash
@@ -443,9 +448,10 @@ correctly afterward from distinct allocations. Thus neither bias broadcast
 nor pageable device-to-host copies alone explains the remaining failure.
 Packing padded mat1 into a contiguous scratch buffer still failed in an
 isolated replay, as did synchronization before destroying the mublas handle;
-both experiments were reverted. The no-bias stress check is disabled for
-normal CI because it is intentionally intermittent; run it explicitly with
-`--gtest_also_run_disabled_tests --gtest_filter=MusaAddmmTest.DISABLED_PaddedMat1WithoutBias`.
+both experiments were reverted. The no-bias stress check was disabled during
+this investigation. After the later packing fix and repeated successful
+validation, it is enabled in normal CI again; select it explicitly with
+`--gtest_filter=MusaAddmmTest.PaddedMat1WithoutBias`.
 These observations implicate the GEMM execution or its ordering but do not
 identify a validated runtime or SDK fix.
 For comparison, PyTorch MUSA eager `torch.addmm` with the same padded

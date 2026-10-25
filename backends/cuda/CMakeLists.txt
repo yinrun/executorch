@@ -512,6 +512,20 @@ install(
 if(BUILD_TESTING)
   include(${EXECUTORCH_ROOT}/tools/cmake/Test.cmake)
 
+  if(EXECUTORCH_BUILD_MUSA)
+    foreach(_musa_test addmm convolution batch_norm activation)
+      et_cxx_test(
+        test_musa_${_musa_test} SOURCES
+        runtime/shims/tests/test_musa_${_musa_test}.cpp EXTRA_LIBS
+        aoti_cuda_shims MUSA::musart
+      )
+      target_compile_definitions(
+        test_musa_${_musa_test} PRIVATE CUDA_AVAILABLE=1 EXECUTORCH_USE_MUSA=1
+      )
+      set_tests_properties(test_musa_${_musa_test} PROPERTIES LABELS musa)
+    endforeach()
+  endif()
+
   et_cxx_test(
     test_cuda_allocator SOURCES runtime/test/test_cuda_allocator.cpp EXTRA_LIBS
     aoti_cuda_backend

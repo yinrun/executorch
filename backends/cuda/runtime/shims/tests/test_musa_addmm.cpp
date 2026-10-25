@@ -359,7 +359,7 @@ TEST_F(MusaAddmmTest, AddmmDtypesAndTransposedMat2) {
   }
 }
 
-TEST_F(MusaAddmmTest, DISABLED_PaddedMat1WithoutBias) {
+TEST_F(MusaAddmmTest, PaddedMat1WithoutBias) {
   for (ScalarType dtype :
        {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_addmm(dtype, false, false, true, 0.0);
