@@ -196,6 +196,11 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
                 f"backends.musa.tests.{module}",
             ]
     if "models" in selected:
+        yield "artifact-tests", [
+            sys.executable,
+            str(ROOT / ".ci/scripts/tests/test_musa_artifacts.py"),
+            "-v",
+        ]
         for model in dict.fromkeys(args.models):
             for dtype in dict.fromkeys(args.dtypes):
                 command = [
@@ -226,6 +231,13 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
                 if model in args.weights:
                     command += ["--weights", str(args.weights[model])]
                 yield f"model-{model}-{dtype}", command
+                yield f"verify-model-{model}-{dtype}", [
+                    sys.executable,
+                    str(ROOT / "examples/musa/acceptance_artifacts.py"),
+                    str(
+                        args.output_dir / "models" / f"{model}-{dtype}" / "result.json"
+                    ),
+                ]
 
 
 def run_step(name, command, args, env, report):

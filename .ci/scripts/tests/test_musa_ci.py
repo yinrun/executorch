@@ -78,6 +78,12 @@ class MusaCiTest(unittest.TestCase):
         self.assertNotIn("--dynamic-spatial-max", models["model-mlp-fp32"])
         self.assertIn("--dynamic-spatial-max", models["model-densenet121-bf16"])
         self.assertIn("--runner", models["model-mlp-fp32"])
+        self.assertIn("artifact-tests", commands)
+        names = list(commands)
+        for name in models:
+            verification = "verify-" + name
+            self.assertEqual(names[names.index(name) + 1], verification)
+            self.assertTrue(commands[verification][-1].endswith("/result.json"))
 
     def test_environment_does_not_inherit_test_filters(self):
         with patch.dict(

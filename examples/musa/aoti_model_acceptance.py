@@ -47,6 +47,8 @@ from executorch.backends.musa import (
 from executorch.exir import to_edge_transform_and_lower
 from executorch.extension.export_util.utils import save_pte_program
 
+from examples.musa.acceptance_artifacts import record_artifact, verify_artifacts
+
 
 class Mlp(nn.Module):
     def __init__(self) -> None:
@@ -521,9 +523,22 @@ def _serialization_schema() -> Iterator[None]:
                 destination.write_bytes(content)
 
 
-def _write_tensor(tensor: torch.Tensor, path: Path) -> None:
-    raw = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
-    path.write_bytes(raw.tobytes())
+def _write_tensor(tensor: torch.Tensor, path: Path) -> torch.Tensor:
+    if tensor.device.type == "musa":
+        torch.musa.synchronize(tensor.device)
+    snapshot = tensor.detach().to(device="cpu", copy=True).contiguous()
+    payload = snapshot.reshape(-1).view(torch.uint8).numpy().tobytes()
+    path.write_bytes(payload)
+    if path.read_bytes() != payload:
+        raise RuntimeError(f"Tensor artifact write/read mismatch: {path}")
+    return snapshot
+
+
+def _record_tensor_artifact(tensor: torch.Tensor, path: Path) -> dict:
+    if tensor.device.type != "cpu":
+        raise ValueError("Artifact records require a frozen CPU tensor snapshot")
+    payload = tensor.contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+    return record_artifact(path, payload)
 
 
 def _make_input(
@@ -767,7 +782,7 @@ def export_model(
     _write_input(
         original_input, input_path, tuple(max_shape) if dynamic_shapes else None
     )
-    _write_tensor(expected, expected_path)
+    expected = _write_tensor(expected, expected_path)
     ptd_path = output_dir / "aoti_musa_blob.ptd"
     if not ptd_path.exists():
         raise RuntimeError(f"AOTI external data was not created: {ptd_path}")
@@ -833,6 +848,8 @@ def main() -> None:
         "expected_shape": list(expected.shape),
         "runner": None,
         "runner_repeats": args.runner_repeats,
+        "artifact_version": 1,
+        "artifact_cases": [],
     }
 
     if args.runner is not None:
@@ -889,6 +906,7 @@ def main() -> None:
             if current_shape == input_shape:
                 current_input_path = input_path
                 current_expected = expected
+                current_expected_path = args.output_dir / "expected-0.bin"
             else:
                 example = _make_input(args.model, current_shape, DTYPES[args.dtype])
                 original_input = example.detach().cpu().clone()
@@ -896,9 +914,20 @@ def main() -> None:
                     current_expected = model(example)
                 current_input_path = args.output_dir / f"input-{label}.bin"
                 _write_input(original_input, current_input_path, max_shape)
-                _write_tensor(
-                    current_expected, args.output_dir / f"expected-{label}.bin"
+                current_expected_path = args.output_dir / f"expected-{label}.bin"
+                current_expected = _write_tensor(
+                    current_expected, current_expected_path
                 )
+            artifact_case = {
+                "input_shape": list(current_shape),
+                "expected_shape": list(current_expected.shape),
+                "input": record_artifact(current_input_path),
+                "expected": _record_tensor_artifact(
+                    current_expected, current_expected_path
+                ),
+                "outputs": [],
+            }
+            result["artifact_cases"].append(artifact_case)
             output_prefix = args.output_dir / f"runner-output-{label}"
             completed = _run_runner(
                 args.runner,
@@ -913,6 +942,7 @@ def main() -> None:
                 bytearray(output_path.read_bytes()), dtype=DTYPES[args.dtype]
             )
             expected_flat = current_expected.detach().cpu().flatten()
+            artifact_case["outputs"].append(_record_tensor_artifact(actual, output_path))
             if args.vit_layer_tokens:
                 nan_counts = torch.isnan(
                     actual.reshape(current_expected.shape)
@@ -997,6 +1027,9 @@ def main() -> None:
                     bytearray(Path(f"{repeat_prefix}-0.bin").read_bytes()),
                     dtype=DTYPES[args.dtype],
                 )
+                artifact_case["outputs"].append(
+                    _record_tensor_artifact(repeated, Path(f"{repeat_prefix}-0.bin"))
+                )
                 if args.vit_layer_tokens:
                     nan_counts = torch.isnan(
                         repeated.reshape(current_expected.shape)
@@ -1024,6 +1057,19 @@ def main() -> None:
                     }
                 )
 
+    else:
+        result["artifact_cases"].append(
+            {
+                "input_shape": list(input_shape),
+                "expected_shape": list(expected.shape),
+                "input": record_artifact(input_path),
+                "expected": _record_tensor_artifact(
+                    expected, args.output_dir / "expected-0.bin"
+                ),
+                "outputs": [],
+            }
+        )
+    verify_artifacts(args.output_dir, result)
     result_json = json.dumps(result, indent=2, sort_keys=True)
     (args.output_dir / "result.json").write_text(result_json + "\n")
     print(result_json)

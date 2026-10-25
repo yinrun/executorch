@@ -1,9 +1,12 @@
 """Runner regressions; set EXECUTORCH_MUSA_RUNNER to a MUSA executor_runner."""
 
+import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 from torch import nn
@@ -14,10 +17,124 @@ from executorch.exir import to_edge_transform_and_lower
 from executorch.extension.export_util.utils import save_pte_program
 
 from examples.musa.aoti_model_acceptance import (
+    _record_tensor_artifact,
     _run_runner,
     _serialization_schema,
     _write_input,
+    _write_tensor,
+    main as acceptance_main,
 )
+
+
+class TestTensorSnapshots(unittest.TestCase):
+    def test_cpu_snapshots_are_owned_and_byte_exact(self) -> None:
+        for dtype in (torch.float32, torch.float16, torch.bfloat16, torch.int64):
+            for shape in ((), (0,), (2, 4)):
+                with self.subTest(
+                    dtype=dtype, shape=shape
+                ), tempfile.TemporaryDirectory() as directory:
+                    source = torch.ones(shape, dtype=dtype)
+                    if source.ndim == 2:
+                        source = source.transpose(0, 1)
+                    if source.is_floating_point():
+                        source.requires_grad_()
+                    path = Path(directory) / "tensor.bin"
+                    snapshot = _write_tensor(source, path)
+                    self.assertEqual(snapshot.device.type, "cpu")
+                    self.assertTrue(snapshot.is_contiguous())
+                    self.assertFalse(snapshot.requires_grad)
+                    with torch.no_grad():
+                        source.zero_()
+                    torch.testing.assert_close(
+                        snapshot, torch.ones_like(snapshot), atol=0, rtol=0
+                    )
+                    record = _record_tensor_artifact(snapshot, path)
+                    self.assertEqual(
+                        record["nbytes"], snapshot.numel() * snapshot.element_size()
+                    )
+
+    def test_snapshot_detects_same_size_tail_corruption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "expected.bin"
+            snapshot = _write_tensor(torch.ones(2, 1000, dtype=torch.bfloat16), path)
+            path.write_bytes(path.read_bytes()[:-32] + bytes(32))
+            with self.assertRaisesRegex(ValueError, "tensor snapshot"):
+                _record_tensor_artifact(snapshot, path)
+
+    def test_acceptance_rejects_artifact_mutation_during_runner(self) -> None:
+        for mutated in (None, "expected-0.bin", "input-0.bin", "runner-output-1-0.bin"):
+            with self.subTest(
+                mutated=mutated
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                expected = _write_tensor(
+                    torch.ones(1, 1000, dtype=torch.bfloat16), root / "expected-0.bin"
+                )
+                _write_input(
+                    torch.ones(1, 16, dtype=torch.bfloat16), root / "input-0.bin", None
+                )
+                arguments = [
+                    "acceptance",
+                    "--model",
+                    "mlp",
+                    "--dtype",
+                    "bf16",
+                    "--output-dir",
+                    str(root),
+                    "--runner",
+                    "/runner",
+                    "--runner-repeats",
+                    "2",
+                ]
+                exported = (
+                    root / "model.pte",
+                    root / "model.ptd",
+                    root / "input-0.bin",
+                    expected,
+                    nn.Identity(),
+                    (1, 16),
+                )
+
+                def run(runner, pte, ptd, input_path, output_prefix, shape):
+                    _write_tensor(expected, Path(f"{output_prefix}-0.bin"))
+                    if mutated is not None and "repeat" in output_prefix.name:
+                        path = root / mutated
+                        path.write_bytes(path.read_bytes()[:-32] + bytes(32))
+                    return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+                with mock.patch("sys.argv", arguments), mock.patch(
+                    "examples.musa.aoti_model_acceptance.export_model",
+                    return_value=exported,
+                ), mock.patch(
+                    "examples.musa.aoti_model_acceptance._run_runner", side_effect=run
+                ), mock.patch(
+                    "builtins.print"
+                ):
+                    if mutated is None:
+                        acceptance_main()
+                        report = json.loads((root / "result.json").read_text())
+                        self.assertEqual(len(report["artifact_cases"][0]["outputs"]), 2)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                            acceptance_main()
+                        self.assertFalse((root / "result.json").exists())
+
+    @unittest.skipUnless(
+        hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
+    )
+    def test_musa_snapshots_preserve_noncontiguous_tail_values(self) -> None:
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype), tempfile.TemporaryDirectory() as directory:
+                source = torch.arange(2000, device="musa", dtype=torch.float32)
+                source = (source * 0.01 + 1).to(dtype).reshape(1000, 2).transpose(0, 1)
+                path = Path(directory) / "expected.bin"
+                snapshot = _write_tensor(source, path)
+                expected = source.cpu().clone()
+                source.zero_()
+                torch.musa.synchronize()
+                torch.testing.assert_close(snapshot, expected, atol=0, rtol=0)
+                self.assertTrue(bool(snapshot[:, -16:].ne(0).all()))
+                _record_tensor_artifact(snapshot, path)
 
 
 @unittest.skipUnless(

@@ -27,7 +27,7 @@ required. Use a dedicated build directory.
 | --- | --- |
 | `native` | Build and CTest for addmm/BMM, convolution, BatchNorm, and activation shims |
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
-| `runner` | Fused-bias convolution, depthwise algorithm rounding, and Hardsigmoid precision tests through PTE/PTD and `executor_runner` |
+| `runner` | Frozen tensor snapshots/artifact failures, plus fused-bias convolution, depthwise algorithm rounding, and Hardsigmoid precision through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
 | `all` | All of the above, in order |
 
@@ -120,6 +120,38 @@ and model directories retain PTE/PTD, inputs, outputs, and `result.json`.
 JUnit counts the four native executables, not individual GoogleTest cases;
 the verbose native log retains the case-level results and repeated runs.
 
+### Tensor artifact consistency
+
+Model acceptance freezes each eager reference into an owned, contiguous CPU
+snapshot. Writing `expected-*.bin`, numerical comparisons, and class/token
+checks all use that snapshot rather than separate device-to-host transfers.
+The shared tensor writer checks its immediate byte-for-byte readback.
+
+New `result.json` files contain `artifact_version: 1` and `artifact_cases`.
+Each case records input/output shapes and relative filenames, byte lengths,
+and SHA-256 checksums for its input, expected output, and every runner output.
+Reference/output records are checked against the exact tensor bytes used in
+the comparison. Before publishing the result, acceptance checks all files
+again, including input padding and output sizes. If a file changes while the
+runner executes, acceptance fails without publishing a successful result.
+
+The `models`/`all` CI suites also run eight standalone artifact tests and a
+separate verification process after each model acceptance step. Verification
+needs only the Python standard library and works after moving the report
+directory together with its tensor files:
+
+```bash
+python -S examples/musa/acceptance_artifacts.py /path/to/model/result.json
+python -S .ci/scripts/tests/test_musa_artifacts.py -v
+```
+
+Missing files, same-length corruption (including zeroed tails), truncation,
+invalid padding, incomplete repetitions, or inconsistent recorded dynamic
+shapes fail verification. Legacy reports without the manifest are rejected;
+regenerate them instead of creating checksums for unverified old references.
+This is tensor artifact integrity checking, not an independent accuracy test,
+and does not hash PTE/PTD or authenticate the report itself.
+
 The orchestration itself has CPU-only tests requiring no MUSA installation:
 
 ```bash
@@ -162,5 +194,6 @@ Five eager recomputations agree exactly with the original runner output.
 The old file and failed replay report were retained, not rewritten to pass.
 All ResNet18 and DeepLab references were then recomputed from the same model
 factory, seed/checkpoint, and saved inputs for the successful replay above.
-The origin of the historical file discrepancy is not established; saved
-reference integrity checks remain follow-up work.
+The origin of the historical file discrepancy is not established. New runs
+now use the frozen-reference and integrity checks described above; the old
+file is retained as evidence, not silently repaired.
