@@ -27,7 +27,7 @@ required. Use a dedicated build directory.
 | --- | --- |
 | `native` | Build and CTest for addmm/BMM, convolution, BatchNorm, and activation shims |
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
-| `runner` | FP16/BF16 fused-bias convolution and FP32/FP16/BF16 Hardsigmoid precision tests through PTE/PTD and `executor_runner` |
+| `runner` | Fused-bias convolution, depthwise algorithm rounding, and Hardsigmoid precision tests through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
 | `all` | All of the above, in order |
 
@@ -62,10 +62,14 @@ python .ci/scripts/test_musa.py --suite models \
 
 Random-weight MobileNetV2 FP16 logits can underflow entirely to zero; passing
 that smoke test alone is not evidence of pretrained numerical accuracy.
-The pretrained FP16 test currently fails the unchanged `atol=rtol=0.01`
-criterion on M1000 (TorchMUSA 2.9.0.post1+musa5.1.2mp22). Stage diagnostics
-reproduce the first differences in the first inverted-residual depthwise
-convolution. Use the same input as the failing acceptance run to investigate:
+On M1000 (TorchMUSA 2.9.0.post1+musa5.1.2mp22), the original hard-coded
+IMPLICIT_GEMM convolution path failed pretrained FP16 acceptance with maximum
+logit error `0.01953125`. Stage diagnostics located the first differences in
+the first inverted-residual depthwise convolution. Selecting the muDNN
+recommended forward algorithm, as TorchMUSA eager does, reduces the maximum
+error to `0.00048828125`: all four shapes and both runner repetitions pass
+the unchanged `atol=rtol=0.01` criterion. Use the same input as an acceptance
+run to investigate individual operators:
 
 ```bash
 python examples/musa/aoti_backbone_diagnostics.py \
@@ -80,6 +84,14 @@ python examples/musa/aoti_backbone_diagnostics.py \
 `--include-classifier` instead reports every backbone stage and the classifier.
 Intermediate outputs can change fusion, so always rerun full-model acceptance
 after a precision fix.
+
+The forward shim queries the muDNN C++ recommendation API used by TorchMUSA
+and explicitly maps its algorithm enum to the C API used for execution.
+Workspace queries and both biased/unbiased forward calls use that selection.
+FP32 remains in scalar mode (TF32 disabled); FP16/BF16 use tensor mode.
+Transposed convolution retains its existing backward-data algorithm path.
+The checkpoint-independent depthwise runner regression compares FP32, FP16,
+and BF16 outputs exactly against MUSA eager at batches 1/2/3.
 
 For a smaller end-to-end matrix while retaining all native, compiler, and
 precision tests:

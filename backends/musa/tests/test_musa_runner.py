@@ -27,6 +27,53 @@ from examples.musa.aoti_model_acceptance import (
     "requires MUSA and EXECUTORCH_MUSA_RUNNER",
 )
 class TestMusaRunner(unittest.TestCase):
+    def test_depthwise_convolution_algorithm_rounding(self) -> None:
+        runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                torch.manual_seed(123)
+                model = nn.Conv2d(32, 32, 3, padding=1, groups=32, bias=False)
+                model = model.eval().to(device="musa", dtype=dtype)
+                example = torch.randn(2, 32, 32, 32, device="musa", dtype=dtype)
+                exported = export(
+                    model,
+                    (example,),
+                    dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+                )
+                specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    with _serialization_schema():
+                        manager = to_edge_transform_and_lower(
+                            exported, partitioner=[MusaPartitioner(specs)]
+                        ).to_executorch()
+                        pte = Path(save_pte_program(manager, "depthwise", directory))
+                    for batch in (1, 2, 3):
+                        with self.subTest(
+                            batch=batch
+                        ), torch.no_grad(), torch.backends.mudnn.flags(
+                            allow_tf32=False
+                        ):
+                            value = torch.randn(
+                                batch, 32, 32, 32, device="musa", dtype=dtype
+                            )
+                            expected = model(value).cpu().flatten()
+                            self.assertGreater(expected.abs().max().item(), 0.1)
+                            _write_input(value, root / "input.bin", (3, 32, 32, 32))
+                            _run_runner(
+                                runner,
+                                pte,
+                                root / "aoti_musa_blob.ptd",
+                                root / "input.bin",
+                                root / "output",
+                                tuple(value.shape),
+                            )
+                            actual = torch.frombuffer(
+                                bytearray((root / "output-0.bin").read_bytes()),
+                                dtype=dtype,
+                            )
+                            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     def test_hardsigmoid_rounding(self) -> None:
         runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
