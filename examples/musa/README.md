@@ -771,11 +771,12 @@ PTE/PTD with `executor_runner`: batch 2 at 64x64, batch 1 at 48x54, batch 3 at
 `7e-16`. This exercises the squeeze-and-excitation, depthwise convolution,
 BatchNorm, SiLU, and dynamic-shape paths together.
 
-The official pretrained DeepLabV3-MobileNetV3 BF16 path passes the same four
+Before the native activation and fused-bias precision fixes described below,
+the official pretrained DeepLabV3-MobileNetV3 BF16 path passed the same four
 dynamic batch/spatial shapes and two runner replays when invoked with
 `--atol 0.5 --rtol 0.04`. Maximum raw-logit errors are `0.25`, `0.125`,
 `0.25`, and `0.5`; all 86,016 predicted segmentation labels match MUSA eager
-exactly across the four shapes. The wider absolute tolerance is required for
+exactly across the four shapes. The wider absolute tolerance was required for
 the accumulated BF16 logits at odd spatial sizes, while the exact label check
 remains strict.
 
@@ -914,6 +915,34 @@ All four native activation tests pass. The runner regression covers those
 boundary inputs in FP32/FP16/BF16 and batches 1/2/3, with exact eager equality
 for all nine runs. This operator result does not alone establish full-model
 accuracy.
+
+With native Hardswish, fused forward-convolution bias, and native Hardsigmoid
+together, the regenerated pretrained DeepLab BF16 PTE/PTD passes the default
+`atol=rtol=0.04` without overrides. One dynamic PTE passes two fresh runner
+executions for each of these shapes:
+
+| Input shape | Maximum absolute logit error (both runs) |
+| --- | ---: |
+| 2x3x64x64 | 0 |
+| 1x3x48x54 | 0.015625 |
+| 3x3x80x80 | 0 |
+| 2x3x79x71 | 0.03125 |
+
+An additional readback of all eight saved outputs verifies exact segmentation
+labels for all 82,404 pixels, including the repeated executions.
+
+These checks use the official pretrained weights with generated inputs and
+MUSA eager as the reference; they are not dataset-level segmentation accuracy
+or performance measurements. Reproduce the stricter acceptance with:
+
+```bash
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model deeplabv3_mobilenet_v3_large --dtype bf16 \
+  --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
+  --batch-size 2 --dynamic-batch-max 3 --dynamic-spatial-max 80 \
+  --runner-repeats 2 --runner "$RUNNER" \
+  --output-dir /tmp/executorch-musa-acceptance/deeplab_bf16_native
+```
 
 ```bash
 $PYTHON examples/musa/aoti_backbone_diagnostics.py \
