@@ -100,6 +100,57 @@ AOTITorchError aoti_torch_get_current_cuda_stream(
   return Error::Ok;
 }
 
+#if defined(EXECUTORCH_USE_MUSA)
+AOTITorchError aoti_torch_create_musa_guard(
+    int32_t device_index,
+    CUDAGuardHandle* ret_guard) {
+  return aoti_torch_create_cuda_guard(device_index, ret_guard);
+}
+
+AOTITorchError aoti_torch_delete_musa_guard(CUDAGuardHandle guard) {
+  return aoti_torch_delete_cuda_guard(guard);
+}
+
+AOTITorchError aoti_torch_musa_guard_set_index(
+    CUDAGuardHandle guard,
+    int32_t device_index) {
+  return aoti_torch_cuda_guard_set_index(guard, device_index);
+}
+
+AOTITorchError aoti_torch_create_musa_stream_guard(
+    void* stream,
+    int32_t device_index,
+    CUDAStreamGuardHandle* ret_guard) {
+  ET_CHECK_OR_RETURN_ERROR(
+      ret_guard != nullptr && device_index >= 0 && device_index <= INT8_MAX,
+      InvalidArgument,
+      "Invalid MUSA stream guard output or device index");
+  auto result = CUDAStreamGuard::create(
+      static_cast<cudaStream_t>(stream),
+      static_cast<DeviceIndex>(device_index));
+  if (!result.ok()) {
+    return result.error();
+  }
+  *ret_guard = new CUDAStreamGuard(std::move(result.get()));
+  return Error::Ok;
+}
+
+AOTITorchError aoti_torch_delete_musa_stream_guard(
+    CUDAStreamGuardHandle guard) {
+  return aoti_torch_delete_cuda_stream_guard(guard);
+}
+
+AOTITorchError aoti_torch_get_current_musa_stream(
+    int32_t device_index,
+    void** ret_stream) {
+  ET_CHECK_OR_RETURN_ERROR(
+      device_index >= -1 && device_index <= INT8_MAX,
+      InvalidArgument,
+      "Invalid MUSA stream device index");
+  return aoti_torch_get_current_cuda_stream(device_index, ret_stream);
+}
+#endif
+
 } // extern "C"
 
 } // namespace executorch::backends::cuda

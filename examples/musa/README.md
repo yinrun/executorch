@@ -28,6 +28,53 @@ and SlimTensor GPU storage code through MUSA API adapters. Native device
 metadata does not imply that standalone packaging, full ATen-mode runtime
 integration, or CUDA/ROCm hardware regression testing is complete.
 
+## Runtime-only Linux package
+
+New MUSA exports omit Torch/Python libraries from the AOTI link command.
+The runtime supplies the MUSA device/stream-guard ABI and PrivateUse1 device
+constant itself. Stream guards accept the default stream and restore nested
+stream selections. Compiler changes are scoped to MUSA AOTI, not eager/JIT,
+CPU, CUDA, or compile-only options.
+
+Export on the development machine with the normal TorchMUSA toolchain, then:
+
+```bash
+python examples/musa/package_aoti.py \
+  --build-dir /tmp/executorch-musa-ci \
+  --pte /tmp/model/mlp.pte --ptd /tmp/model/aoti_musa_blob.ptd \
+  --output-dir /tmp/musa-package --patchelf /path/to/patchelf
+
+mv /tmp/musa-package '/tmp/moved musa package'
+MUSA_HOME=/usr/local/musa '/tmp/moved musa package/run.sh' \
+  --inputs=/tmp/model/input-0.bin --input_shapes=2x16 \
+  --output_file=/tmp/model/result --print_output=summary
+```
+
+The development-side packager requires the export Python environment,
+`flatc`, GNU `readelf`, and `patchelf`. It copies the runner, two ExecuTorch
+shared libraries, and PTE/PTD; replaces build-tree RPATHs with `$ORIGIN`
+paths; checks every referenced AOTI library in PTE/PTD; and records SHA-256
+hashes in `manifest.json`. It rejects Torch/Python dependencies, unexpected
+external libraries, and non-relocatable search paths. Failed packaging does
+not publish a partial output directory, and existing packages are not
+overwritten. Do not use this tool on untrusted binaries.
+
+The target needs a compatible Linux architecture/glibc/libstdc++, MUSA SDK,
+GPU driver, GPU access, and writable temporary storage. It does **not** need
+Python, PyTorch, TorchMUSA, the source checkout, or the build directory for
+the tested models. The SDK/driver are not copied or redistributed. The
+shell launcher uses only the package and `$MUSA_HOME/lib` for its library
+search path and clears Python/preload environment overrides. It deliberately
+does not preserve a caller's custom `LD_LIBRARY_PATH`.
+
+This packager currently targets the default static-core MUSA build with
+`libaoti_cuda_shims.so` and `libextension_cuda.so`, not shared-core/wheel
+layouts or arbitrary third-party operator libraries. Historical models that
+still link `libtorch_cpu`/`libmusa_python` remain usable through the earlier
+development environment but must be re-exported for this runtime-only path.
+An audit of declared dependencies is not an accuracy check: run model-specific
+acceptance after relocation, especially after changing the SDK/driver.
+
 ## Model coverage
 
 `aoti_model_acceptance.py` exercises the complete MUSA path for these models:

@@ -177,6 +177,12 @@ int32_t aoti_torch_device_type_cuda() {
   return 1; // DeviceType::CUDA
 }
 
+#if defined(EXECUTORCH_USE_MUSA)
+int32_t aoti_torch_device_type_privateuse1() {
+  return 20;
+}
+#endif
+
 // ============================================================
 // Grad Mode Functions - Implementations
 // ============================================================

@@ -48,7 +48,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--suite",
-        choices=("all", "native", "export", "runner", "models"),
+        choices=("all", "native", "export", "runner", "models", "deployment"),
         default="all",
     )
     parser.add_argument("--build-dir", type=Path, default=ROOT / "cmake-out-musa")
@@ -56,6 +56,7 @@ def parse_args(argv=None):
     parser.add_argument("--cmake", default=os.environ.get("CMAKE", "cmake"))
     parser.add_argument("--ctest")
     parser.add_argument("--flatc", default="flatc")
+    parser.add_argument("--patchelf", default="patchelf")
     parser.add_argument(
         "--musa-home",
         type=Path,
@@ -123,17 +124,18 @@ def environment(build_dir, musa_home, flatc, torch_root, torch_musa_root):
             ]
         )
     result["EXECUTORCH_MUSA_RUNNER"] = str(build_dir / "executor_runner")
+    result["MUSA_HOME"] = str(musa_home)
     return result
 
 
 def commands(args, cmake, ctest, flatc, torch_prefix):
     selected = (
-        {"native", "export", "runner", "models"}
+        {"native", "export", "runner", "models", "deployment"}
         if args.suite == "all"
         else {args.suite}
     )
     targets = list(NATIVE_TARGETS) if "native" in selected else []
-    if selected & {"runner", "models"}:
+    if selected & {"runner", "models", "deployment"}:
         targets.append("executor_runner")
     if targets:
         yield "configure", [
@@ -191,6 +193,14 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
     for suite, module in (("export", "test_musa_aoti"), ("runner", "test_musa_runner")):
         if suite in selected:
             yield suite, [
+                sys.executable,
+                "-c",
+                UNITTEST_DRIVER,
+                f"backends.musa.tests.{module}",
+            ]
+    if "deployment" in selected:
+        for module in ("test_musa_package", "test_musa_deployment"):
+            yield module, [
                 sys.executable,
                 "-c",
                 UNITTEST_DRIVER,
@@ -334,6 +344,9 @@ def main(argv=None):
             Path(torch_musa.__file__).parent,
         )
         run_step("flatc-version", [flatc, "--version"], args, env, report)
+        if args.suite in ("all", "deployment"):
+            env["EXECUTORCH_MUSA_PATCHELF"] = require_tool(args.patchelf)
+            require_tool("readelf")
         for name, command in commands(
             args, cmake, ctest, flatc, torch.utils.cmake_prefix_path
         ):

@@ -2,6 +2,7 @@
 
 #include <executorch/backends/aoti/common_shims_slim.h>
 #include <executorch/backends/aoti/slim/factory/empty.h>
+#include <executorch/backends/cuda/runtime/shims/cuda_guard.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
 #include <executorch/extension/aten_util/aten_device.h>
 #include <executorch/extension/cuda/cuda_allocator.h>
@@ -125,4 +126,48 @@ TEST_F(MusaDeviceTest, SlimTensorAllocationCopyAndAbiRoundTrip) {
   }
 }
 
+TEST_F(MusaDeviceTest, AotiGuardsRestoreNestedAndDefaultStreams) {
+  using namespace executorch::backends::cuda;
+  EXPECT_EQ(
+      executorch::backends::aoti::aoti_torch_device_type_privateuse1(), 20);
+  CUDAGuardHandle device_guard = nullptr;
+  ASSERT_EQ(aoti_torch_create_musa_guard(0, &device_guard), Error::Ok);
+  EXPECT_EQ(aoti_torch_musa_guard_set_index(device_guard, 0), Error::Ok);
+  ASSERT_EQ(aoti_torch_delete_musa_guard(device_guard), Error::Ok);
+  EXPECT_EQ(aoti_torch_create_musa_guard(0, nullptr), Error::InvalidArgument);
+  EXPECT_EQ(aoti_torch_delete_musa_guard(nullptr), Error::InvalidArgument);
+  cudaStream_t stream = nullptr;
+  ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+  ASSERT_EQ(setCurrentCUDAStream(nullptr, 0), Error::Ok);
+  CUDAStreamGuardHandle outer = nullptr;
+  CUDAStreamGuardHandle inner = nullptr;
+  ASSERT_EQ(aoti_torch_create_musa_stream_guard(stream, 0, &outer), Error::Ok);
+  void* current = nullptr;
+  ASSERT_EQ(aoti_torch_get_current_musa_stream(0, &current), Error::Ok);
+  EXPECT_EQ(current, stream);
+  ASSERT_EQ(aoti_torch_create_musa_stream_guard(nullptr, 0, &inner), Error::Ok);
+  ASSERT_EQ(aoti_torch_get_current_musa_stream(0, &current), Error::Ok);
+  EXPECT_EQ(current, nullptr);
+  ASSERT_EQ(aoti_torch_delete_musa_stream_guard(inner), Error::Ok);
+  ASSERT_EQ(aoti_torch_get_current_musa_stream(0, &current), Error::Ok);
+  EXPECT_EQ(current, stream);
+  ASSERT_EQ(aoti_torch_delete_musa_stream_guard(outer), Error::Ok);
+  ASSERT_EQ(aoti_torch_get_current_musa_stream(0, &current), Error::Ok);
+  EXPECT_EQ(current, nullptr);
+  EXPECT_EQ(
+      aoti_torch_create_musa_stream_guard(stream, 256, &outer),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_create_musa_stream_guard(stream, 0, nullptr),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_get_current_musa_stream(256, &current),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_get_current_musa_stream(0, nullptr), Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_delete_musa_stream_guard(nullptr), Error::InvalidArgument);
+  clearCurrentCUDAStream(0);
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
 }

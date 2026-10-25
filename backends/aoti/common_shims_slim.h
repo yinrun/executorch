@@ -93,6 +93,9 @@ AOTI_SHIM_EXPORT int32_t aoti_torch_dtype_bool();
 
 AOTI_SHIM_EXPORT int32_t aoti_torch_device_type_cpu();
 AOTI_SHIM_EXPORT int32_t aoti_torch_device_type_cuda();
+#if defined(EXECUTORCH_USE_MUSA)
+AOTI_SHIM_EXPORT int32_t aoti_torch_device_type_privateuse1();
+#endif
 
 // ============================================================
 // Grad Mode Functions - Declarations

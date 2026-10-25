@@ -48,6 +48,41 @@ from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
 class TestMusaAotiFallbacks(unittest.TestCase):
 
+    def test_runtime_link_libraries_are_scoped_and_restored(self) -> None:
+        from torch._inductor.cpp_builder import CppTorchDeviceOptions
+        from executorch.backends.musa.musa_backend import _musa_aoti_compile_context
+
+        original = CppTorchDeviceOptions.get_libraries
+        libraries = ["torch", "torch_cpu", "c10", "omp", "musa", "musa_python"]
+        for aot_mode, compile_only, device in (
+            (True, False, "MUSA"),
+            (False, False, "MUSA"),
+            (True, True, "MUSA"),
+            (True, False, "CUDA"),
+            (True, False, "CPU"),
+        ):
+            options = object.__new__(CppTorchDeviceOptions)
+            options._libraries = list(libraries)
+            options._aot_mode = aot_mode
+            options._compile_only = compile_only
+            options._definitions = [f" USE_{device}"]
+            with self.subTest(
+                aot_mode=aot_mode, compile_only=compile_only, device=device
+            ):
+                with _musa_aoti_compile_context():
+                    expected = (
+                        ["omp", "musa", "musart"]
+                        if aot_mode and not compile_only and device == "MUSA"
+                        else libraries
+                    )
+                    self.assertEqual(options.get_libraries(), expected)
+                    self.assertEqual(options._libraries, libraries)
+                self.assertIs(CppTorchDeviceOptions.get_libraries, original)
+        with self.assertRaisesRegex(RuntimeError, "compile failed"):
+            with _musa_aoti_compile_context():
+                raise RuntimeError("compile failed")
+        self.assertIs(CppTorchDeviceOptions.get_libraries, original)
+
     def test_native_device_compile_spec_and_weight_mapping(self) -> None:
         from executorch.exir.passes.propagate_device_pass import (
             _parse_device_spec_value,

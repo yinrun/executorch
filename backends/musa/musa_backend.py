@@ -357,9 +357,11 @@ lowering.register_lowering(_MUSA_BATCH_NORM, type_promotion_kind=None)(
 @contextlib.contextmanager
 def _musa_aoti_compile_context():
     from torch._inductor.codegen.cpp_wrapper_cpu import CppWrapperCpu
+    from torch._inductor.cpp_builder import CppTorchDeviceOptions
     from torch._inductor.kernel import conv
 
     original_add_device_include = CppWrapperCpu.add_device_include
+    original_get_libraries = CppTorchDeviceOptions.get_libraries
     convolution_op = torch.ops.aten.convolution.default
     original_convolution = lowering.lowerings[convolution_op]
 
@@ -416,10 +418,30 @@ def _musa_aoti_compile_context():
             self.header.splice(f'#include "{_MUSA_BATCH_NORM_HEADER}"')
             self.header.splice(f'#include "{_MUSA_ACTIVATION_HEADER}"')
 
+    def get_runtime_libraries(self: Any) -> List[str]:
+        libraries = original_get_libraries(self)
+        if (
+            not self.get_aot_mode()
+            or self.get_compile_only()
+            or "USE_MUSA" not in {value.strip() for value in self.get_definitions()}
+        ):
+            return libraries
+        excluded = {"torch", "torch_cpu", "torch_python", "c10", "musa_python"}
+        return list(
+            dict.fromkeys(
+                [
+                    *(library for library in libraries if library not in excluded),
+                    "musart",
+                ]
+            )
+        )
+
     CppWrapperCpu.add_device_include = add_device_include_with_musa_shims
     try:
         with mock.patch.dict(
             lowering.lowerings, {convolution_op: convolution_with_fused_bias}
+        ), mock.patch.object(
+            CppTorchDeviceOptions, "get_libraries", get_runtime_libraries
         ):
             yield
     finally:

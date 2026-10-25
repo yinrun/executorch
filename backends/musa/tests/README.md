@@ -19,7 +19,8 @@ Use the desired Python executable to select the environment. `--cmake`,
 The selected source checkout takes precedence on child processes' Python
 import path. The build-tree shims, selected TorchMUSA libraries, and SDK are
 placed on their runtime library path; no installed ExecuTorch C++ package is
-required. Use a dedicated build directory.
+required. Use a dedicated build directory. The `all` and `deployment` suites
+also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path).
 
 ## Suites
 
@@ -29,9 +30,10 @@ required. Use a dedicated build directory.
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
 | `runner` | Frozen tensor snapshots/artifact failures, native MUSA and legacy device tags, foreign-backend rejection, plus convolution and Hardsigmoid precision through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
+| `deployment` | Package validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries |
 | `all` | All of the above, in order |
 
-The five native CTest executables contain 36 GoogleTest cases. Each executable
+The five native CTest executables contain 37 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
@@ -102,6 +104,29 @@ python .ci/scripts/test_musa.py --suite all \
   --build-dir /tmp/executorch-musa-ci \
   --output-dir /tmp/executorch-musa-ci-results
 ```
+
+## Runtime-only deployment regression
+
+```bash
+python .ci/scripts/test_musa.py --suite deployment \
+  --patchelf /path/to/patchelf \
+  --build-dir /tmp/executorch-musa-ci \
+  --output-dir /tmp/executorch-musa-deployment-results
+```
+
+This suite builds the runner, validates the packager, exports two models, and
+moves each package to a directory containing spaces. It runs dynamic batches
+1/2/3 with a clean subprocess environment, `LD_BIND_NOW=1`, and no preload.
+It compares results against MUSA eager and inspects loader initialization
+records to reject Torch/Python libraries and Python package directories.
+The launcher, runner, and ExecuTorch libraries come from the moved package;
+the MUSA SDK and GPU driver remain external prerequisites. This is a Linux,
+same-architecture test of the current static-core/shared-shims configuration,
+not a universal wheel or cross-platform SDK test.
+
+See `examples/musa/package_aoti.py` and the example README for packaging
+commands. Old artifacts that directly link Torch/Python must be re-exported;
+the packager refuses them instead of deleting ELF dependencies after linking.
 
 ## Failure handling and artifacts
 

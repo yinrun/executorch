@@ -94,6 +94,23 @@ aoti_torch_delete_cuda_stream_guard(CUDAStreamGuardHandle guard);
 AOTI_SHIM_EXPORT AOTITorchError
 aoti_torch_get_current_cuda_stream(int32_t device_index, void** ret_stream);
 
+#if defined(EXECUTORCH_USE_MUSA)
+AOTI_SHIM_EXPORT AOTITorchError
+aoti_torch_create_musa_guard(int32_t device_index, CUDAGuardHandle* ret_guard);
+AOTI_SHIM_EXPORT AOTITorchError
+aoti_torch_delete_musa_guard(CUDAGuardHandle guard);
+AOTI_SHIM_EXPORT AOTITorchError
+aoti_torch_musa_guard_set_index(CUDAGuardHandle guard, int32_t device_index);
+AOTI_SHIM_EXPORT AOTITorchError aoti_torch_create_musa_stream_guard(
+    void* stream,
+    int32_t device_index,
+    CUDAStreamGuardHandle* ret_guard);
+AOTI_SHIM_EXPORT AOTITorchError
+aoti_torch_delete_musa_stream_guard(CUDAStreamGuardHandle guard);
+AOTI_SHIM_EXPORT AOTITorchError
+aoti_torch_get_current_musa_stream(int32_t device_index, void** ret_stream);
+#endif
+
 } // extern "C"
 
 } // namespace executorch::backends::cuda

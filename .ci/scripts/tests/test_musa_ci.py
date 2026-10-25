@@ -64,6 +64,8 @@ class MusaCiTest(unittest.TestCase):
         self.assertIn("executor_runner", commands["build"])
         self.assertIn("export", commands)
         self.assertIn("runner", commands)
+        self.assertIn("test_musa_package", commands)
+        self.assertIn("test_musa_deployment", commands)
         models = {
             name: command
             for name, command in commands.items()
@@ -108,8 +110,25 @@ class MusaCiTest(unittest.TestCase):
         self.assertNotIn("GTEST_FILTER", env)
         self.assertNotIn("GTEST_REPEAT", env)
         self.assertEqual(env["EXECUTORCH_MUSA_RUNNER"], "/build/executor_runner")
+        self.assertEqual(env["MUSA_HOME"], "/sdk")
         self.assertTrue(env["PYTHONPATH"].endswith(os.pathsep + "/deps"))
         self.assertTrue(env["LD_LIBRARY_PATH"].startswith("/build/backends/cuda"))
+
+    def test_deployment_suite_builds_runner_without_model_matrix(self):
+        commands = dict(
+            musa_ci.commands(
+                self.arguments("--suite", "deployment"),
+                "cmake",
+                "ctest",
+                "flatc",
+                "/torch/cmake",
+            )
+        )
+        self.assertEqual(commands["build"][-1], "executor_runner")
+        self.assertIn("test_musa_package", commands)
+        self.assertIn("test_musa_deployment", commands)
+        self.assertNotIn("export", commands)
+        self.assertFalse(any(name.startswith("model-") for name in commands))
 
     def test_weights_are_forwarded_to_each_selected_dtype(self):
         args = self.arguments(
