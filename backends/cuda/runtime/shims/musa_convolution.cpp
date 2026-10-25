@@ -218,8 +218,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       NotSupported,
       "MUSA convolution supports float32, float16, and bfloat16 tensors only");
   ET_CHECK_OR_RETURN_ERROR(
-      input->is_cuda() && weight->is_cuda() &&
-          (bias == nullptr || bias->is_cuda()),
+      input->is_gpu() && weight->is_gpu() &&
+          (bias == nullptr || bias->is_gpu()),
       InvalidArgument,
       "MUSA convolution expects device tensors");
   ET_CHECK_OR_RETURN_ERROR(
@@ -331,7 +331,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       output_sizes.data(),
       output_strides.data(),
       static_cast<int32_t>(dtype),
-      static_cast<int32_t>(DeviceType::CUDA),
+      executorch::backends::aoti::slim::c10::device_type_to_aoti(
+          executorch::backends::aoti::slim::c10::kGPU),
       input->device_index(),
       &raw_output);
   ET_CHECK_OK_OR_RETURN_ERROR(error);

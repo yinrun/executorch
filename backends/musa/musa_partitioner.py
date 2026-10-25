@@ -17,12 +17,7 @@ from executorch.exir.passes.propagate_device_pass import TARGET_DEVICE_COMPILE_S
     "MusaPartitioner is an experimental AOTInductor integration for ExecuTorch."
 )
 class MusaPartitioner(AotiPartitioner):
-    """Partitioner for the initial MUSA AOTI compatibility path.
-
-    ExecuTorch's current serialized device schema only has a CUDA GPU entry.
-    Until a native MUSA entry is added, propagation uses ``cuda:0`` while the
-    compiler and runtime device remain MUSA.
-    """
+    """Partition AOTI delegates with native MUSA memory-planning metadata."""
 
     def __init__(self, compile_spec: List[CompileSpec]) -> None:
         has_target_device = any(
@@ -30,6 +25,6 @@ class MusaPartitioner(AotiPartitioner):
         )
         if not has_target_device:
             compile_spec = list(compile_spec) + [
-                CompileSpec(TARGET_DEVICE_COMPILE_SPEC_KEY, b"cuda:0")
+                CompileSpec(TARGET_DEVICE_COMPILE_SPEC_KEY, b"musa:0")
             ]
         super().__init__(MusaBackend.__name__, compile_spec)

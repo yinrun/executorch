@@ -110,7 +110,8 @@ AOTITorchError aoti_torch_get_device_type(
   if (tensor == nullptr || ret_device_type == nullptr) {
     return Error::InvalidArgument;
   }
-  *ret_device_type = static_cast<int32_t>(tensor->device_type());
+  *ret_device_type = executorch::backends::aoti::slim::c10::device_type_to_aoti(
+      tensor->device_type());
   return Error::Ok;
 }
 

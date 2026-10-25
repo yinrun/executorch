@@ -20,20 +20,46 @@ namespace executorch::backends::aoti::slim::c10 {
 enum class DeviceType : int8_t {
   CPU = 0,
   CUDA = 1,
-  COMPILE_TIME_MAX_DEVICE_TYPES = 2,
+  MUSA = 2,
+  COMPILE_TIME_MAX_DEVICE_TYPES = 3,
 };
 
 constexpr DeviceType kCPU = DeviceType::CPU;
 constexpr DeviceType kCUDA = DeviceType::CUDA;
+constexpr DeviceType kMUSA = DeviceType::MUSA;
+#if defined(EXECUTORCH_USE_MUSA)
+constexpr DeviceType kGPU = kMUSA;
+#else
+constexpr DeviceType kGPU = kCUDA;
+#endif
+
+inline DeviceType canonical_device_type(DeviceType device_type) {
+#if defined(EXECUTORCH_USE_MUSA)
+  if (device_type == DeviceType::CUDA) {
+    return DeviceType::MUSA;
+  }
+#endif
+  return device_type;
+}
 
 inline DeviceType device_type_from_aoti(int32_t device_type) {
 #if defined(EXECUTORCH_USE_MUSA)
-  // TorchMUSA exposes its backend through c10::DeviceType::PrivateUse1.
   if (device_type == 20) {
-    return DeviceType::CUDA;
+    return DeviceType::MUSA;
   }
 #endif
-  return static_cast<DeviceType>(device_type);
+  ET_CHECK_MSG(
+      device_type == 0 || device_type == 1,
+      "Unsupported AOTI device type: %d",
+      device_type);
+  return canonical_device_type(static_cast<DeviceType>(device_type));
+}
+
+inline int32_t device_type_to_aoti(DeviceType device_type) {
+  if (canonical_device_type(device_type) == DeviceType::MUSA) {
+    return 20;
+  }
+  return static_cast<int32_t>(device_type);
 }
 
 /// Maximum number of device types at compile time.
@@ -50,6 +76,8 @@ inline std::string DeviceTypeName(DeviceType d, bool lower_case = false) {
       return lower_case ? "cpu" : "CPU";
     case DeviceType::CUDA:
       return lower_case ? "cuda" : "CUDA";
+    case DeviceType::MUSA:
+      return lower_case ? "musa" : "MUSA";
     default:
       ET_CHECK_MSG(false, "Unknown device type: %d", static_cast<int>(d));
   }
@@ -59,7 +87,7 @@ inline std::string DeviceTypeName(DeviceType d, bool lower_case = false) {
 /// @param d The device type to check.
 /// @return true if the device type is valid, false otherwise.
 inline bool isValidDeviceType(DeviceType d) {
-  return d == DeviceType::CPU || d == DeviceType::CUDA;
+  return d == DeviceType::CPU || d == DeviceType::CUDA || d == DeviceType::MUSA;
 }
 
 inline std::ostream& operator<<(std::ostream& stream, DeviceType type) {

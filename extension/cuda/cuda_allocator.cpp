@@ -566,14 +566,25 @@ Error CudaAllocator::copy_device_to_host(
 }
 
 DeviceType CudaAllocator::device_type() const {
-  return DeviceType::CUDA;
+  return device_type_;
 }
 
 CudaAllocator& CudaAllocator::instance() {
   // Registered allocators can be called until the process exits.
-  static auto* allocator = new CudaAllocator();
+#if defined(EXECUTORCH_USE_MUSA)
+  static auto* allocator = new CudaAllocator(DeviceType::MUSA);
+#else
+  static auto* allocator = new CudaAllocator(DeviceType::CUDA);
+#endif
   return *allocator;
 }
+
+#if defined(EXECUTORCH_USE_MUSA)
+CudaAllocator& CudaAllocator::legacy_cuda_instance() {
+  static auto* allocator = new CudaAllocator(DeviceType::CUDA);
+  return *allocator;
+}
+#endif
 
 Result<void*> CudaAllocator::allocate_async(
     size_t nbytes,

@@ -17,10 +17,12 @@ from executorch.backends.cuda.cuda_weight_collector import (
 )
 from executorch.backends.musa import (
     MusaBackend,
+    MusaPartitioner,
     export_with_musa_pooling_shapes,
     export_with_musa_sdpa_decomposition,
 )
 from executorch.backends.musa.musa_backend import (
+    _aoti_device_type_for_weight,
     _decompose_scaled_dot_product_attention,
     _normalize_musa_assert_devices,
 )
@@ -45,6 +47,34 @@ from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
 
 class TestMusaAotiFallbacks(unittest.TestCase):
+
+    def test_native_device_compile_spec_and_weight_mapping(self) -> None:
+        from executorch.exir.passes.propagate_device_pass import (
+            _parse_device_spec_value,
+        )
+        from executorch.exir.schema import DeviceType
+
+        partitioner = MusaPartitioner([])
+        self.assertEqual(_parse_device_spec_value(b"musa:12"), (DeviceType.MUSA, 12))
+        self.assertEqual(_aoti_device_type_for_weight(torch.ones(1)), 0)
+        for name, expected in (("musa", 2), ("cuda", None)):
+            tensor = mock.Mock()
+            tensor.device = torch.device(name, 0)
+            if expected is None:
+                with self.assertRaisesRegex(
+                    RuntimeError, "Unsupported AOTI constant device"
+                ):
+                    _aoti_device_type_for_weight(tensor)
+            else:
+                self.assertEqual(_aoti_device_type_for_weight(tensor), expected)
+        self.assertEqual(partitioner.delegation_spec.backend_id, "MusaBackend")
+        targets = [
+            spec.value
+            for spec in partitioner.delegation_spec.compile_specs
+            if spec.key == "target_device"
+        ]
+        self.assertEqual(targets, [b"musa:0"])
+
     def test_pooling_shape_division_and_restoration(self) -> None:
         from torch import _meta_registrations
 
@@ -373,6 +403,10 @@ class TestMusaAoti(unittest.TestCase):
         entries = {entry.fqn: entry for entry in metadata.entries}
         self.assertIn("linear.weight", entries)
         self.assertEqual(entries["linear.weight"].sizes, (4, 8))
+        self.assertEqual(entries["linear.weight"].device_type, 2)
+        self.assertTrue(
+            entries["linear.weight"].storage_key.startswith("musa_fqn_weight:musa:")
+        )
 
     def test_dynamic_embedding_aoti_compile(self) -> None:
         class EmbeddingModel(nn.Module):

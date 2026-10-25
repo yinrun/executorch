@@ -67,6 +67,7 @@ enum TensorDataLocation : byte {
 enum DeviceType : byte {
   CPU = 0,
   CUDA = 1,
+  MUSA = 2,
 }
 
 // Table to put additional information about tensors in that is not applicable

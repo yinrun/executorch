@@ -240,6 +240,14 @@ class SlimTensor {
     return device().is_cuda();
   }
 
+  bool is_musa() const {
+    return device().is_musa();
+  }
+
+  bool is_gpu() const {
+    return device().is_gpu();
+  }
+
   /**
    * Check if the tensor is defined (has valid storage).
    */
@@ -511,9 +519,9 @@ class SlimTensor {
           add_byte_offset_checked(src_data, src_byte_offset);
       if (this->device().is_cpu() && other.device().is_cpu()) {
         std::memcpy(dst_byte_offset_ptr, src_byte_offset_ptr, elem_size);
-      } else if (this->device().is_cuda() || other.device().is_cuda()) {
+      } else if (this->device().is_gpu() || other.device().is_gpu()) {
 #if defined(CUDA_AVAILABLE)
-        DeviceTraits<c10::DeviceType::CUDA>::memcpy(
+        DeviceTraits<c10::kGPU>::memcpy(
             dst_byte_offset_ptr,
             src_byte_offset_ptr,
             elem_size,
@@ -555,7 +563,7 @@ class SlimTensor {
       result = *static_cast<const T*>(this->data_ptr());
     } else {
 #if defined(CUDA_AVAILABLE)
-      DeviceTraits<c10::DeviceType::CUDA>::memcpy(
+      DeviceTraits<c10::kGPU>::memcpy(
           &result, this->data_ptr(), sizeof(T), CPU_DEVICE, this->device());
 #else
       ET_CHECK_MSG(false, "item(): CUDA tensor but CUDA support not available");

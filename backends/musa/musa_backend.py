@@ -18,7 +18,7 @@ from torch._inductor import ir, lowering
 from executorch.backends.aoti.aoti_backend import AotiBackend
 from executorch.backends.cuda.cuda_weight_collector import (
     AOTI_DEVICE_TYPE_CPU,
-    AOTI_DEVICE_TYPE_CUDA,
+    SERIALIZED_DEVICE_TYPE_MUSA,
     CudaWeightCollector,
 )
 from executorch.exir._warnings import experimental
@@ -28,8 +28,8 @@ from executorch.exir.graph_module import contains_any_call_fn_target_op
 
 
 def _aoti_device_type_for_weight(tensor: torch.Tensor) -> int:
-    if tensor.device.type in ("cuda", "musa"):
-        return AOTI_DEVICE_TYPE_CUDA
+    if tensor.device.type == "musa":
+        return SERIALIZED_DEVICE_TYPE_MUSA
     if tensor.device.type == "cpu":
         return AOTI_DEVICE_TYPE_CPU
     raise RuntimeError(f"Unsupported AOTI constant device for MUSA export: {tensor.device}")

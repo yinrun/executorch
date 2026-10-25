@@ -417,7 +417,7 @@ AOTITorchError aoti_torch_zero_(SlimTensor* self) {
     return Error::Ok;
   }
 #if defined(CUDA_AVAILABLE)
-  if (self->device().is_cuda()) {
+  if (self->device().is_gpu()) {
     auto stream = getCurrentCUDAStream(self->device_index());
     ET_CHECK_OK_OR_RETURN_ERROR(stream.error());
     ET_CUDA_CHECK_OR_RETURN_ERROR(

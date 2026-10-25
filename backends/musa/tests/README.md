@@ -25,13 +25,13 @@ required. Use a dedicated build directory.
 
 | Suite | Coverage |
 | --- | --- |
-| `native` | Build and CTest for addmm/BMM, convolution, BatchNorm, and activation shims |
+| `native` | Build and CTest for addmm/BMM, convolution, BatchNorm, activation shims, and native/legacy device metadata |
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
-| `runner` | Frozen tensor snapshots/artifact failures, plus fused-bias convolution, depthwise algorithm rounding, and Hardsigmoid precision through PTE/PTD and `executor_runner` |
+| `runner` | Frozen tensor snapshots/artifact failures, native MUSA and legacy device tags, foreign-backend rejection, plus convolution and Hardsigmoid precision through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
 | `all` | All of the above, in order |
 
-The four native CTest executables contain 33 GoogleTest cases. Each executable
+The five native CTest executables contain 36 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
@@ -117,7 +117,7 @@ It is reset before preflight, so a failed rerun cannot retain an old overall
 success status. Only a final `status: passed` means the requested suite
 completed. Each step has a separate log; `native.xml` is CTest JUnit output,
 and model directories retain PTE/PTD, inputs, outputs, and `result.json`.
-JUnit counts the four native executables, not individual GoogleTest cases;
+JUnit counts the five native executables, not individual GoogleTest cases;
 the verbose native log retains the case-level results and repeated runs.
 
 ### Tensor artifact consistency

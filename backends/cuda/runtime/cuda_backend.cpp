@@ -656,12 +656,19 @@ class ET_EXPERIMENTAL CudaBackend final
     for (size_t i = 0; i < n_inputs + n_outputs; i++) {
       auto* tensor = &(args[i]->toTensor());
       auto device_type = tensor->unsafeGetTensorImpl()->device_type();
+      const auto expected_device = CudaAllocator::instance().device_type();
+      bool supported_device = device_type == expected_device;
+#if defined(EXECUTORCH_USE_MUSA)
+      supported_device |=
+          device_type == executorch::runtime::etensor::DeviceType::CUDA;
+#endif
       ET_CHECK_OR_RETURN_ERROR(
-          device_type == executorch::runtime::etensor::DeviceType::CUDA,
+          supported_device,
           InvalidArgument,
-          "Tensor %zu expected device_type=CUDA (1), got %d. "
-          "Device info may not be properly propagated from CudaPartitioner.",
+          "Tensor %zu expected GPU device_type=%d, got %d. "
+          "Device info may not be properly propagated from the partitioner.",
           i,
+          static_cast<int>(expected_device),
           static_cast<int>(device_type));
 
       // device_type above is only metadata. Also verify the storage actually
@@ -1588,9 +1595,11 @@ class ET_EXPERIMENTAL CudaBackend final
 namespace executorch::backends {
 namespace {
 auto cls = cuda::CudaBackend();
+#if !defined(EXECUTORCH_USE_MUSA)
 executorch::runtime::Backend backend{cuda::kCudaBackendId, &cls};
 static executorch::runtime::Error success_with_compiler =
     register_backend(backend);
+#endif
 
 #if defined(EXECUTORCH_USE_MUSA)
 executorch::runtime::Backend musa_backend{cuda::kMusaBackendId, &cls};
@@ -1603,6 +1612,10 @@ static executorch::runtime::Error musa_success_with_compiler =
 static bool cuda_allocator_registered = [] {
   executorch::runtime::register_device_allocator(
       &cuda::CudaAllocator::instance());
+#if defined(EXECUTORCH_USE_MUSA)
+  executorch::runtime::register_device_allocator(
+      &cuda::CudaAllocator::legacy_cuda_instance());
+#endif
   return true;
 }();
 } // namespace

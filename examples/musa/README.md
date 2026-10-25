@@ -1,5 +1,35 @@
 # MUSA AOTI model acceptance
 
+## Native device metadata and compatibility
+
+New `MusaPartitioner` exports default to `target_device=musa:0`. PTE tensor
+metadata, memory-planning arenas, weight descriptors, and SlimTensor use a
+distinct `MUSA=2` device type; CPU remains 0 and CUDA remains 1. MUSA weight
+storage keys use `musa_fqn_weight:musa:`. The shared weight container magic
+`ETCUDAFQN0` and the PTD flat-tensor layout are unchanged.
+
+These serialized values are **not** PyTorch AOTI device IDs: TorchMUSA uses
+`PrivateUse1=20`. The shim boundary translates MUSA metadata to/from 20;
+passing serialized value 2 as an AOTI device ID is rejected. Native MUSA
+SlimTensors report `is_musa()` and `is_gpu()`, but not `is_cuda()`.
+
+A MUSA runtime also accepts existing `MusaBackend` artifacts whose tensor,
+arena, and weight descriptors use the legacy CUDA tag 1. It registers both
+native and legacy allocators and normalizes legacy SlimTensor device tags
+to MUSA. This is compatibility with earlier **MUSA** exports, not execution
+of CUDA binaries: a MUSA build registers `MusaBackend` only and rejects a
+`CudaBackend` delegate. CUDA/ROCm builds retain their existing CUDA-tagged
+path and do not allocate MUSA tensors. Older runtimes without the new enum
+cannot run native-MUSA artifacts; rebuild the runtime together with the
+exporter.
+
+The implementation still shares the `backends/cuda` runtime, allocator,
+and SlimTensor GPU storage code through MUSA API adapters. Native device
+metadata does not imply that standalone packaging, full ATen-mode runtime
+integration, or CUDA/ROCm hardware regression testing is complete.
+
+## Model coverage
+
 `aoti_model_acceptance.py` exercises the complete MUSA path for these models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;

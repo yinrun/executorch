@@ -36,6 +36,12 @@ inline c10::Device executorch_to_torch_device(
       return c10::Device(c10::DeviceType::CPU);
     case executorch::runtime::etensor::DeviceType::CUDA:
       return c10::Device(c10::DeviceType::CUDA, device.index());
+    case executorch::runtime::etensor::DeviceType::MUSA:
+#if defined(EXECUTORCH_USE_MUSA)
+      return c10::Device(c10::DeviceType::PrivateUse1, device.index());
+#else
+      break;
+#endif
   }
   // Aborting on an unknown device rather than falling back to CPU: a wrong
   // label made the host read accelerator memory and segfault.
@@ -61,6 +67,11 @@ torch_to_executorch_device(c10::Device device) {
     case c10::DeviceType::CUDA:
       return executorch::runtime::etensor::Device(
           executorch::runtime::etensor::DeviceType::CUDA, device.index());
+#if defined(EXECUTORCH_USE_MUSA)
+    case c10::DeviceType::PrivateUse1:
+      return executorch::runtime::etensor::Device(
+          executorch::runtime::etensor::DeviceType::MUSA, device.index());
+#endif
     default:
       return std::nullopt;
   }

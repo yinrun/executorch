@@ -513,7 +513,7 @@ if(BUILD_TESTING)
   include(${EXECUTORCH_ROOT}/tools/cmake/Test.cmake)
 
   if(EXECUTORCH_BUILD_MUSA)
-    foreach(_musa_test addmm convolution batch_norm activation)
+    foreach(_musa_test addmm convolution batch_norm activation device)
       et_cxx_test(
         test_musa_${_musa_test} SOURCES
         runtime/shims/tests/test_musa_${_musa_test}.cpp EXTRA_LIBS
@@ -524,6 +524,7 @@ if(BUILD_TESTING)
       )
       set_tests_properties(test_musa_${_musa_test} PROPERTIES LABELS musa)
     endforeach()
+    target_link_libraries(test_musa_device c10)
   endif()
 
   et_cxx_test(

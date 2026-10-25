@@ -594,7 +594,7 @@ Error CudaKVPool::bind(CudaDelegateHandle* handle) {
   bound.tensors.reserve(descriptors->second.size());
   std::vector<aoti::AOTInductorConstantMapEntry> pairs;
   pairs.reserve(descriptors->second.size());
-  const slimc10::Device device(slimc10::DeviceType::CUDA, device_);
+  const slimc10::Device device(slimc10::kGPU, device_);
   for (const Descriptor& descriptor : descriptors->second) {
     void* data = nullptr;
     std::vector<int64_t> sizes;

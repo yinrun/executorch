@@ -164,7 +164,7 @@ inline executorch::runtime::Error _copy_slimtensor_to_etensor_impl(
       std::memcpy(dst_data, src_data, nbytes);
     } else if (stream) {
       executorch::backends::aoti::slim::DeviceTraits<
-          executorch::backends::aoti::slim::c10::DeviceType::CUDA>::
+          executorch::backends::aoti::slim::c10::kGPU>::
           memcpy_async(
               dst_data,
               src_data,
@@ -173,9 +173,9 @@ inline executorch::runtime::Error _copy_slimtensor_to_etensor_impl(
               slim_tensor->device(),
               stream);
     } else {
-      executorch::backends::aoti::slim::DeviceTraits<
-          executorch::backends::aoti::slim::c10::DeviceType::CUDA>::
-          memcpy(dst_data, src_data, nbytes, dst_device, slim_tensor->device());
+      executorch::backends::aoti::slim::
+          DeviceTraits<executorch::backends::aoti::slim::c10::kGPU>::memcpy(
+              dst_data, src_data, nbytes, dst_device, slim_tensor->device());
     }
   } else {
     // Slow path: strides differ (e.g., AOTI delegate output layout differs
@@ -406,7 +406,7 @@ make_slimtensor_from_blob_with_etensor_metadata(
     void* data_ptr,
     const executorch::runtime::etensor::Tensor* etensor,
     const executorch::backends::aoti::slim::c10::Device& device =
-        executorch::backends::aoti::slim::DEFAULT_CUDA_DEVICE) {
+        executorch::backends::aoti::slim::DEFAULT_GPU_DEVICE) {
   auto sizes = etensor->sizes();
   auto strides = etensor->strides();
   std::vector<int64_t> sizes_vec(sizes.begin(), sizes.end());

@@ -5,3 +5,4 @@
 class DeviceType(object):
     CPU = 0
     CUDA = 1
+    MUSA = 2

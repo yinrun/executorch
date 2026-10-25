@@ -43,7 +43,10 @@ class MusaCiTest(unittest.TestCase):
         self.assertIn("-DEXECUTORCH_BUILD_CUDA=OFF", commands["configure"])
         self.assertIn("-DEXECUTORCH_BUILD_ROCM=OFF", commands["configure"])
         self.assertIn("-DBUILD_TESTING=ON", commands["configure"])
-        self.assertEqual(commands["build"][-4:], list(musa_ci.NATIVE_TARGETS))
+        self.assertEqual(
+            commands["build"][-len(musa_ci.NATIVE_TARGETS) :],
+            list(musa_ci.NATIVE_TARGETS),
+        )
         self.assertIn("--no-tests=error", commands["native"])
         self.assertEqual(
             commands["native"][commands["native"].index("--parallel") + 1], "1"

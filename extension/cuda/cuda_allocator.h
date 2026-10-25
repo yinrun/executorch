@@ -59,6 +59,9 @@ class EXECUTORCH_EXTENSION_CUDA_API CudaAllocator final
 
   /// Returns the global CudaAllocator singleton.
   static CudaAllocator& instance();
+#if defined(EXECUTORCH_USE_MUSA)
+  static CudaAllocator& legacy_cuda_instance();
+#endif
 
   // --- Async (stream-based) operations for SlimTensor/Storage layer ---
 
@@ -176,7 +179,9 @@ class EXECUTORCH_EXTENSION_CUDA_API CudaAllocator final
       cudaStream_t stream);
 
  private:
-  CudaAllocator() = default;
+  explicit CudaAllocator(executorch::runtime::etensor::DeviceType type)
+      : device_type_(type) {}
+  executorch::runtime::etensor::DeviceType device_type_;
   CudaAllocator(const CudaAllocator&) = delete;
   CudaAllocator& operator=(const CudaAllocator&) = delete;
   CudaAllocator(CudaAllocator&&) = delete;

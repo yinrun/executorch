@@ -142,7 +142,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       "MUSA addmm supports float32, float16, and bfloat16 tensors only");
 
   ET_CHECK_OR_RETURN_ERROR(
-      out->is_cuda() && self->is_cuda() && mat1->is_cuda() && mat2->is_cuda(),
+      out->is_gpu() && self->is_gpu() && mat1->is_gpu() && mat2->is_gpu(),
       InvalidArgument,
       "MUSA addmm expects device tensors");
 
@@ -430,7 +430,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       NotSupported,
       "MUSA bmm supports float32, float16, and bfloat16 tensors only");
   ET_CHECK_OR_RETURN_ERROR(
-      out->is_cuda() && mat1->is_cuda() && mat2->is_cuda(),
+      out->is_gpu() && mat1->is_gpu() && mat2->is_gpu(),
       InvalidArgument,
       "MUSA bmm expects device tensors");
   ET_CHECK_OR_RETURN_ERROR(

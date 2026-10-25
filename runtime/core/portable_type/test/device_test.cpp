@@ -19,12 +19,14 @@ using executorch::runtime::etensor::kNumDeviceTypes;
 TEST(DeviceTypeTest, EnumValues) {
   EXPECT_EQ(static_cast<int8_t>(DeviceType::CPU), 0);
   EXPECT_EQ(static_cast<int8_t>(DeviceType::CUDA), 1);
+  EXPECT_EQ(static_cast<int8_t>(DeviceType::MUSA), 2);
 }
 
 TEST(DeviceTypeTest, NumDeviceTypesCoversAllEnums) {
   // kNumDeviceTypes must be large enough to index all defined device types.
   EXPECT_GT(kNumDeviceTypes, static_cast<size_t>(DeviceType::CPU));
   EXPECT_GT(kNumDeviceTypes, static_cast<size_t>(DeviceType::CUDA));
+  EXPECT_GT(kNumDeviceTypes, static_cast<size_t>(DeviceType::MUSA));
 }
 
 // --- Device: CPU ---

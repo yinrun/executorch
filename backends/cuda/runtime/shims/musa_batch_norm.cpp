@@ -115,8 +115,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       NotSupported,
       "MUSA batch norm supports float32, float16, and bfloat16 tensors only");
   ET_CHECK_OR_RETURN_ERROR(
-      input->is_cuda() && weight->is_cuda() && bias->is_cuda() &&
-          running_mean->is_cuda() && running_var->is_cuda(),
+      input->is_gpu() && weight->is_gpu() && bias->is_gpu() &&
+          running_mean->is_gpu() && running_var->is_gpu(),
       InvalidArgument,
       "MUSA batch norm expects device tensors");
   ET_CHECK_OR_RETURN_ERROR(
@@ -210,7 +210,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       output_sizes.data(),
       output_strides.data(),
       static_cast<int32_t>(dtype),
-      static_cast<int32_t>(DeviceType::CUDA),
+      executorch::backends::aoti::slim::c10::device_type_to_aoti(
+          executorch::backends::aoti::slim::c10::kGPU),
       input->device_index(),
       &raw_output);
   ET_CHECK_OK_OR_RETURN_ERROR(error);

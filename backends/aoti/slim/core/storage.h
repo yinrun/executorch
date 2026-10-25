@@ -41,6 +41,7 @@ inline const c10::Device CPU_DEVICE = c10::Device(c10::DeviceType::CPU, 0);
 /// Default CUDA device constant.
 inline const c10::Device DEFAULT_CUDA_DEVICE =
     c10::Device(c10::DeviceType::CUDA, 0);
+inline const c10::Device DEFAULT_GPU_DEVICE = c10::Device(c10::kGPU, 0);
 
 /// DeviceTraits template for device-specific operations.
 /// Device-specific implementations provide allocate(), free(), and memcpy().
@@ -229,6 +230,12 @@ struct DeviceTraits<c10::DeviceType::CUDA> {
 };
 #endif // CUDA_AVAILABLE
 
+#if defined(EXECUTORCH_USE_MUSA)
+template <>
+struct DeviceTraits<c10::DeviceType::MUSA>
+    : DeviceTraits<c10::DeviceType::CUDA> {};
+#endif
+
 /**
  * MaybeOwningStorage - A storage class that manages tensor data memory.
  *
@@ -255,9 +262,9 @@ class MaybeOwningStorage {
     if (device.is_cpu()) {
       data_ = DeviceTraits<c10::DeviceType::CPU>::allocate(nbytes, device);
       deleter_ = DeviceTraits<c10::DeviceType::CPU>::free;
-    } else if (device.is_cuda()) {
-      data_ = DeviceTraits<c10::DeviceType::CUDA>::allocate(nbytes, device);
-      deleter_ = DeviceTraits<c10::DeviceType::CUDA>::free;
+    } else if (device.is_gpu()) {
+      data_ = DeviceTraits<c10::kGPU>::allocate(nbytes, device);
+      deleter_ = DeviceTraits<c10::kGPU>::free;
     } else {
       ET_CHECK_MSG(false, "Unsupported device type: %s", device.str().c_str());
     }
@@ -273,7 +280,7 @@ class MaybeOwningStorage {
         capacity_(nbytes),
         deleter_(detail::noop),
         is_owning_(false) {
-    if (!device.is_cuda() && !device.is_cpu()) {
+    if (!device.is_gpu() && !device.is_cpu()) {
       ET_CHECK_MSG(false, "Unsupported device type: %s", device.str().c_str());
     }
   }
@@ -349,7 +356,7 @@ class MaybeOwningStorage {
           dst_data_ptr, src_data_ptr, nbytes, device_, src_device);
     } else {
       // At least one of the devices is CUDA
-      DeviceTraits<c10::DeviceType::CUDA>::memcpy(
+      DeviceTraits<c10::kGPU>::memcpy(
           dst_data_ptr, src_data_ptr, nbytes, device_, src_device);
     }
   }

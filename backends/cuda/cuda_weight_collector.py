@@ -27,6 +27,7 @@ CUDA_AOTI_METADATA_MAGIC = b"ETCUDAFQN0"
 
 AOTI_DEVICE_TYPE_CPU = 0
 AOTI_DEVICE_TYPE_CUDA = 1
+SERIALIZED_DEVICE_TYPE_MUSA = 2
 
 
 @dataclass(frozen=True)
@@ -155,11 +156,14 @@ def _storage_key(
         device = "cpu"
     elif device_type == AOTI_DEVICE_TYPE_CUDA:
         device = "cuda"
+    elif device_type == SERIALIZED_DEVICE_TYPE_MUSA:
+        device = "musa"
     else:
         raise RuntimeError(f"Unsupported AOTI device type: {device_type}")
     if aoti_library_key is not None:
         fqn = f"{aoti_library_key}:{fqn}"
-    return f"cuda_fqn_weight:{device}:{fqn}"
+    prefix = "musa" if device_type == SERIALIZED_DEVICE_TYPE_MUSA else "cuda"
+    return f"{prefix}_fqn_weight:{device}:{fqn}"
 
 
 def _is_aoti_library_local_fqn(fqn: str) -> bool:

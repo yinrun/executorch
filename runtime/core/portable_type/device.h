@@ -20,10 +20,11 @@ namespace etensor {
 enum class DeviceType : int8_t {
   CPU = 0,
   CUDA = 1,
+  MUSA = 2,
 };
 
 /// Total number of device types, used for fixed-size registry arrays.
-constexpr size_t kNumDeviceTypes = 2;
+constexpr size_t kNumDeviceTypes = 3;
 
 /// An index representing a specific device; e.g. GPU 0 vs GPU 1.
 using DeviceIndex = int8_t;

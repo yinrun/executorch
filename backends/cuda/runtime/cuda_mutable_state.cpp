@@ -45,7 +45,7 @@ struct Desc {
   std::vector<int64_t> sizes;
   std::vector<int64_t> strides;
   slimc10::ScalarType dtype{slimc10::ScalarType::Float};
-  slimc10::Device device{slimc10::DeviceType::CUDA, 0};
+  slimc10::Device device{slimc10::kGPU, 0};
   size_t nbytes{0};
 };
 
@@ -109,7 +109,7 @@ bool handle_has_symbols(CudaDelegateHandle* h) {
 Result<int> tensor_cuda_device_index(const SlimTensor& t) {
   const slimc10::Device device = t.device();
   ET_CHECK_OR_RETURN_ERROR(
-      device.is_cuda(),
+      device.is_gpu(),
       InvalidArgument,
       "mutable_state: mutable buffer template must be on CUDA, got %s",
       device.str().c_str());
@@ -302,7 +302,7 @@ Error build_descriptors(Context& c, CudaDelegateHandle* h) {
     d.sizes.assign(t->sizes().begin(), t->sizes().end());
     d.strides.assign(t->strides().begin(), t->strides().end());
     d.dtype = t->dtype();
-    d.device = slimc10::Device(slimc10::DeviceType::CUDA, device);
+    d.device = slimc10::Device(slimc10::kGPU, device);
     d.nbytes = t->nbytes();
     table.emplace(fqn, std::move(d));
     c.discovered_fqns.insert(fqn);

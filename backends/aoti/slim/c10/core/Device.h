@@ -36,7 +36,7 @@ struct Device final {
   }
 
   /// Constructs a Device from a string description.
-  /// The string must be "cpu", "cpu:0", "cuda", or "cuda:N".
+  /// The string must be "cpu", "cpu:0", "cuda", "cuda:N", "musa", or "musa:N".
   /* implicit */ Device(const std::string& device_string)
       : Device(DeviceType::CPU) {
     ET_CHECK_MSG(!device_string.empty(), "Device string must not be empty");
@@ -55,10 +55,29 @@ struct Device final {
         device_string.substr(0, 5) == "CUDA:") {
       type_ = DeviceType::CUDA;
       index_ = static_cast<DeviceIndex>(device_string.back() - '0');
+    } else if (device_string == "musa" || device_string == "MUSA") {
+      type_ = DeviceType::MUSA;
+      index_ = 0;
+    } else if (
+        device_string.substr(0, 5) == "musa:" ||
+        device_string.substr(0, 5) == "MUSA:") {
+      type_ = DeviceType::MUSA;
+      const auto index = device_string.substr(5);
+      ET_CHECK_MSG(
+          !index.empty() &&
+              index.find_first_not_of("0123456789") == std::string::npos,
+          "Invalid MUSA device index: %s",
+          index.c_str());
+      unsigned parsed = 0;
+      for (char digit : index) {
+        parsed = parsed * 10 + static_cast<unsigned>(digit - '0');
+        ET_CHECK_MSG(parsed <= 127, "MUSA device index out of range: %u", parsed);
+      }
+      index_ = static_cast<DeviceIndex>(parsed);
     } else {
       ET_CHECK_MSG(
           false,
-          "Invalid device string: %s. Supported: 'cpu', 'cuda', 'cuda:N'.",
+          "Invalid device string: %s. Supported: 'cpu', 'cuda', 'cuda:N', 'musa', 'musa:N'.",
           device_string.c_str());
     }
     validate();
@@ -103,6 +122,14 @@ struct Device final {
   /// Returns true if the device is of CUDA type.
   bool is_cuda() const noexcept {
     return type_ == DeviceType::CUDA;
+  }
+
+  bool is_musa() const noexcept {
+    return type_ == DeviceType::MUSA;
+  }
+
+  bool is_gpu() const noexcept {
+    return canonical_device_type(type_) == kGPU;
   }
 
   /// Returns a string representation of the device (e.g., "cpu" or "cuda:0").

@@ -59,7 +59,7 @@ using AOTInductorModelContainerGetConstantDataSizeFunc =
 struct CudaWeightStorage {
   void* data{nullptr};
   size_t nbytes{0};
-  aoti::slim::c10::DeviceType device_type{aoti::slim::c10::DeviceType::CUDA};
+  aoti::slim::c10::DeviceType device_type{aoti::slim::c10::kGPU};
   int device_index{0};
 
   CudaWeightStorage(

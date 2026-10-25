@@ -41,6 +41,9 @@ struct DeviceTypeMapping {
 constexpr DeviceTypeMapping kDeviceTypeMappings[] = {
     {executorch_flatbuffer::DeviceType::CPU, c10::DeviceType::CPU},
     {executorch_flatbuffer::DeviceType::CUDA, c10::DeviceType::CUDA},
+#if defined(EXECUTORCH_USE_MUSA)
+    {executorch_flatbuffer::DeviceType::MUSA, c10::DeviceType::PrivateUse1},
+#endif
 };
 
 } // namespace

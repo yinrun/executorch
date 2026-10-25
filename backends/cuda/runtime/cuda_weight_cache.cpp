@@ -134,6 +134,11 @@ bool is_supported_dtype(int32_t dtype) {
 }
 
 bool is_supported_device_type(int32_t device_type) {
+#if defined(EXECUTORCH_USE_MUSA)
+  if (device_type == 2) {
+    return true;
+  }
+#endif
   return device_type == 0 || device_type == 1; // CPU or CUDA
 }
 
@@ -376,9 +381,9 @@ Error CudaWeightCache::acquire_storage(
       InvalidArgument,
       "CUDA FQN weights require a named data map");
 
-  const auto device_type =
-      static_cast<aoti::slim::c10::DeviceType>(entry.device_type);
-  const bool is_cuda_storage = device_type == aoti::slim::c10::DeviceType::CUDA;
+  const auto device_type = aoti::slim::c10::canonical_device_type(
+      static_cast<aoti::slim::c10::DeviceType>(entry.device_type));
+  const bool is_cuda_storage = device_type == aoti::slim::c10::kGPU;
   const int storage_device_index = is_cuda_storage ? device_index : 0;
   const std::string cache_key = entry.storage_key + "@" +
       std::to_string(logical_scope) +
@@ -637,11 +642,9 @@ Error CudaWeightCache::load(
         aoti::slim::makeArrayRef(entry.strides),
         static_cast<aoti::slim::c10::ScalarType>(entry.dtype),
         Device(
-            static_cast<aoti::slim::c10::DeviceType>(entry.device_type),
-            entry.device_type ==
-                    static_cast<int32_t>(aoti::slim::c10::DeviceType::CUDA)
-                ? device_index
-                : 0),
+            aoti::slim::c10::canonical_device_type(
+                static_cast<aoti::slim::c10::DeviceType>(entry.device_type)),
+            entry.device_type == 0 ? 0 : device_index),
         entry.storage_offset));
     AtenTensorHandle tensor_handle =
         reinterpret_cast<AtenTensorHandle>(tensor.get());

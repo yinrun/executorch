@@ -144,6 +144,137 @@ class TestTensorSnapshots(unittest.TestCase):
     "requires MUSA and EXECUTORCH_MUSA_RUNNER",
 )
 class TestMusaRunner(unittest.TestCase):
+
+    def test_native_musa_device_metadata(self) -> None:
+        from executorch.exir.schema import DeviceType, Tensor
+
+        runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
+        torch.manual_seed(42)
+        model = nn.Sequential(nn.Linear(16, 8), nn.ReLU()).eval().to("musa")
+        example = torch.randn(2, 16, device="musa")
+        exported = export(
+            model, (example,), dynamic_shapes=({0: Dim("batch", min=1, max=3)},)
+        )
+        specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with _serialization_schema():
+                manager = to_edge_transform_and_lower(
+                    exported, partitioner=[MusaPartitioner(specs)]
+                ).to_executorch()
+                plan = manager.executorch_program.execution_plan[0]
+                self.assertEqual(
+                    [delegate.id for delegate in plan.delegates], ["MusaBackend"]
+                )
+                self.assertTrue(plan.non_const_buffer_device)
+                self.assertEqual(
+                    {entry.device_type for entry in plan.non_const_buffer_device},
+                    {DeviceType.MUSA},
+                )
+                gpu_tensors = [
+                    value.val
+                    for value in plan.values
+                    if isinstance(value.val, Tensor)
+                    and value.val.extra_tensor_info is not None
+                    and value.val.extra_tensor_info.device_type != DeviceType.CPU
+                ]
+                self.assertTrue(gpu_tensors)
+                self.assertTrue(
+                    all(
+                        tensor.extra_tensor_info.device_type == DeviceType.MUSA
+                        for tensor in gpu_tensors
+                    )
+                )
+                pte = Path(save_pte_program(manager, "native_musa", directory))
+            for batch in (1, 2, 3):
+                with self.subTest(batch=batch), torch.no_grad():
+                    value = torch.randn(batch, 16, device="musa")
+                    expected = model(value).cpu().flatten()
+                    _write_input(value, root / "input.bin", (3, 16))
+                    _run_runner(
+                        runner,
+                        pte,
+                        root / "aoti_musa_blob.ptd",
+                        root / "input.bin",
+                        root / "output",
+                        tuple(value.shape),
+                    )
+                    actual = torch.frombuffer(
+                        bytearray((root / "output-0.bin").read_bytes()),
+                        dtype=torch.float32,
+                    )
+                    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+            payload = pte.read_bytes()
+            self.assertEqual(payload.count(b"MusaBackend"), 1)
+            foreign = root / "cuda_backend.pte"
+            foreign.write_bytes(payload.replace(b"MusaBackend", b"CudaBackend"))
+            with self.assertRaisesRegex(RuntimeError, "executor_runner failed"):
+                _run_runner(
+                    runner,
+                    foreign,
+                    root / "aoti_musa_blob.ptd",
+                    root / "input.bin",
+                    root / "foreign-output",
+                    (3, 16),
+                )
+
+    def test_legacy_cuda_tagged_musa_metadata(self) -> None:
+        from executorch.backends.cuda.cuda_weight_collector import (
+            decode_cuda_aoti_metadata,
+        )
+        from executorch.exir.backend.compile_spec_schema import CompileSpec
+        from executorch.exir.schema import DeviceType
+
+        runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
+        model = nn.Linear(8, 4).eval().to("musa")
+        example = torch.randn(2, 8, device="musa")
+        with torch.no_grad():
+            expected = model(example).cpu().flatten()
+        exported = export(model, (example,))
+        specs = [
+            MusaBackend.generate_method_name_compile_spec("forward"),
+            CompileSpec("target_device", b"cuda:0"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with _serialization_schema(), mock.patch(
+                "executorch.backends.musa.musa_backend._aoti_device_type_for_weight",
+                side_effect=lambda tensor: 0 if tensor.device.type == "cpu" else 1,
+            ):
+                manager = to_edge_transform_and_lower(
+                    exported, partitioner=[MusaPartitioner(specs)]
+                ).to_executorch()
+                program = manager.executorch_program
+                plan = program.execution_plan[0]
+                self.assertEqual(
+                    [delegate.id for delegate in plan.delegates], ["MusaBackend"]
+                )
+                self.assertEqual(
+                    {entry.device_type for entry in plan.non_const_buffer_device},
+                    {DeviceType.CUDA},
+                )
+                metadata = decode_cuda_aoti_metadata(
+                    program.backend_delegate_data[
+                        plan.delegates[0].processed.index
+                    ].data
+                )
+                self.assertTrue(metadata.entries)
+                self.assertEqual({entry.device_type for entry in metadata.entries}, {1})
+                pte = Path(save_pte_program(manager, "legacy_musa", directory))
+            _write_input(example, root / "input.bin", None)
+            _run_runner(
+                runner,
+                pte,
+                root / "aoti_musa_blob.ptd",
+                root / "input.bin",
+                root / "output",
+            )
+            actual = torch.frombuffer(
+                bytearray((root / "output-0.bin").read_bytes()), dtype=torch.float32
+            )
+            torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
     def test_depthwise_convolution_algorithm_rounding(self) -> None:
         runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
         for dtype in (torch.float32, torch.float16, torch.bfloat16):

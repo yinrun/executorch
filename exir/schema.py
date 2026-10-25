@@ -51,6 +51,7 @@ class TensorDataLocation(IntEnum):
 class DeviceType(IntEnum):
     CPU = 0
     CUDA = 1
+    MUSA = 2
 
 
 @dataclass

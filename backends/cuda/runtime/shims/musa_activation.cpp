@@ -56,7 +56,7 @@ Error run_activation(
       "MUSA activation received a null tensor handle");
   *ret_output = nullptr;
   ET_CHECK_OR_RETURN_ERROR(
-      input->is_cuda(),
+      input->is_gpu(),
       InvalidArgument,
       "MUSA activation expects a device tensor");
   const auto dtype = input->dtype();
@@ -83,7 +83,8 @@ Error run_activation(
       sizes.data(),
       strides.data(),
       static_cast<int32_t>(dtype),
-      static_cast<int32_t>(DeviceType::CUDA),
+      executorch::backends::aoti::slim::c10::device_type_to_aoti(
+          executorch::backends::aoti::slim::c10::kGPU),
       input->device_index(),
       &raw_output));
   std::unique_ptr<SlimTensor> output(raw_output);
