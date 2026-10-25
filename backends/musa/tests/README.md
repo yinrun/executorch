@@ -197,3 +197,19 @@ factory, seed/checkpoint, and saved inputs for the successful replay above.
 The origin of the historical file discrepancy is not established. New runs
 now use the frozen-reference and integrity checks described above; the old
 file is retained as evidence, not silently repaired.
+
+After the artifact checks were added, both fresh ResNet18 BF16 and pretrained
+MobileNetV2 FP16 exports passed their four dynamic shapes with two runner
+executions each, followed by the independent standard-library verifier.
+Maximum errors remained `1.907349e-6` and `0.00048828125`, respectively.
+The complete runner suite passed seven unittest methods (the original 24
+precision runner cases plus four snapshot/artifact test methods), alongside
+eight standalone artifact tests and eight CI orchestration tests. MLP FP32
+export-only mode also passed artifact verification without claiming execution.
+
+A copy of the fresh ResNet report and tensor files passed verification after
+relocation. Zeroing the last 16 BF16 values of its reference without changing
+file length then produced a checksum failure; the original files were not
+modified. Separate tests inject reference, input, or earlier-output mutation
+during runner execution and confirm that acceptance refuses to write
+`result.json` even when numerical comparisons against the frozen reference pass.
