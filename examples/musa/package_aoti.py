@@ -140,7 +140,7 @@ def package(
     manifest = {
         "version": 1,
         "platform": "linux",
-        "requirements": "Matching host architecture, MUSA SDK and GPU driver; no Python/Torch runtime",
+        "requirements": "Matching host architecture and embedded-kernel GPU ISA, compatible MUSA SDK/driver; no Python/Torch runtime",
         "elf": {},
         "files": {},
     }

@@ -290,3 +290,56 @@ monkeypatch was applied to make this suite pass. Resolve the generic
 partitioner/Torch version mismatch before claiming full EXIR regression
 coverage. Standalone deployment packaging, performance baselines, full
 ATen-mode integration, and CUDA/ROCm hardware validation remain separate work.
+
+## Runtime-only validation snapshot (2026-10-25)
+
+Commit `b530b491dc` removes the MUSA AOTI libraries' direct Torch/Python
+dependencies at link time and supplies the previously missing MUSA guard
+and PrivateUse1 symbols in the ExecuTorch runtime. A clean-process check
+initially failed on `aoti_torch_create_musa_stream_guard`; providing the ABI,
+rather than preloading TorchMUSA to supply it, resolved the failure.
+
+On M1000 with the same SDK/TorchMUSA environment:
+
+| Check | Observed result |
+| --- | --- |
+| Deployment CI | Seven packager unit tests and relocated MLP FP32/SimpleCNN BF16 batches 1/2/3 passed; six real clean-environment runner executions |
+| Native CTest | 37 cases, each repeated three times, passed |
+| Existing runner regression suite | All nine methods passed again, including native/legacy device tags, foreign-backend rejection, precision checks, and snapshots |
+| Compiler-context isolation | MUSA AOTI library filtering, unchanged eager/CPU/CUDA/compile-only options, and exception restoration passed |
+| CI orchestration | Nine tests passed |
+| Freshly exported/packaged ResNet18 BF16 and pretrained MobileNetV2 FP16 | Two runs each at `(2,3,64,64)` passed |
+| Full dynamic-spatial package replay | Four shapes per model, two runs each, all 16 passed; maximum errors `1.9073486328125e-6` and `0.00048828125`; top-1 IDs match |
+| Historical Torch-linked model packaging | Rejected with a re-export instruction; no partial package published |
+| Historical Torch-linked MLP execution | Still passes with the development loader environment; maximum error `1.4901161193847656e-8` |
+| MobileNetV2 file-access trace | From `/tmp`, execution passed without accessing the checkout, build tree, Python package directories, or TorchInductor cache |
+
+The full spatial replay uses the earlier frozen-reference reports. Before
+execution, it verifies those tensor manifests and compares the complete
+multiset of PTD buffer SHA-256 hashes against each new package, establishing
+identical weights. The new export-only reports contain only the initial
+input/reference, not four dynamic cases; they are not used to claim a
+16-case fresh-reference run. All relocated processes use `LD_BIND_NOW=1`
+and loader tracing, without Torch/Python preloads. The observed initialized
+libraries are restricted to the package, MUSA SDK, driver, and system libraries.
+
+Local evidence:
+
+- `/tmp/et-musa-deployment-ci-20261025/summary.json`
+- `/tmp/et-musa-deployment-native-20261025/summary.json`
+- `/tmp/et-musa-deployment-runner-20261025/summary.json`
+- `/tmp/et-musa-deployment-models-20261025/summary.json` (four initial-shape executions)
+- `/tmp/et-musa-deployment-spatial-replay-20261025/summary.json` (16 dynamic executions)
+- `/tmp/et-musa-deployment-files-20261025.trace`
+- `/tmp/et-musa-deployment-package-checks-20261025.log`
+- `/tmp/et-musa-deployment-legacy-runner-20261025.log`
+
+A runnable MLP package is retained at `/tmp/et-musa-runtime-package-20261025`;
+relocated CNN packages are under `/tmp/et-musa-deployment-models-20261025`.
+These checks do not claim a different host/GPU ISA, absence of the external
+SDK/driver requirement, dataset-level model accuracy, or performance gains.
+The separate generic EXIR/Torch partitioner mismatch described above remains
+open; no version-compatibility workaround is hidden in this deployment path.
+The now-42-test AOTI compiler suite was not rerun in full in this validation
+round; the new context-isolation test, fresh model compilation, deployment
+suite, native suite, and existing runner suite were executed separately.

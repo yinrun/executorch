@@ -60,7 +60,9 @@ not publish a partial output directory, and existing packages are not
 overwritten. Do not use this tool on untrusted binaries.
 
 The target needs a compatible Linux architecture/glibc/libstdc++, MUSA SDK,
-GPU driver, GPU access, and writable temporary storage. It does **not** need
+GPU driver, GPU ISA matching the embedded kernels, GPU access, and writable
+temporary storage. Cross-GPU-architecture deployment is not validated.
+It does **not** need
 Python, PyTorch, TorchMUSA, the source checkout, or the build directory for
 the tested models. The SDK/driver are not copied or redistributed. The
 shell launcher uses only the package and `$MUSA_HOME/lib` for its library
