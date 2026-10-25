@@ -138,6 +138,7 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
             "-DEXECUTORCH_BUILD_CUDA=OFF",
             "-DEXECUTORCH_BUILD_ROCM=OFF",
             "-DEXECUTORCH_BUILD_TESTS=ON",
+            "-DBUILD_TESTING=ON",
             "-DEXECUTORCH_BUILD_EXECUTOR_RUNNER=ON",
             "-DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON",
             "-DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON",
