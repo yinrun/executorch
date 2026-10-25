@@ -1,8 +1,10 @@
-"""Measure DeepLab MobileNetV3 backbone errors against MUSA eager outputs.
+"""Measure DeepLab MobileNetV3 stage errors against MUSA eager outputs.
 
 Export every backbone stage as an output, or use --stage to isolate one stage
 fed by its eager predecessor. Retaining intermediate outputs can change fusion
 and allocation, so these measurements supplement full-model acceptance.
+Use --include-classifier to observe the complete segmentation pipeline, or
+--classifier-operators to isolate the head with an eager backbone input.
 """
 
 from __future__ import annotations

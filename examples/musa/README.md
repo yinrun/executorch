@@ -930,6 +930,9 @@ executions for each of these shapes:
 
 An additional readback of all eight saved outputs verifies exact segmentation
 labels for all 82,404 pixels, including the repeated executions.
+After these precision fixes, the complete 38-test MUSA AOTI Python suite also
+passes, including the existing convolution, normalization, KV-cache, SDPA,
+Transformer, EfficientNet, DeepLab, and ViT compile regressions.
 
 These checks use the official pretrained weights with generated inputs and
 MUSA eager as the reference; they are not dataset-level segmentation accuracy
@@ -956,7 +959,7 @@ The BatchNorm decomposition now also covers direct `native_batch_norm`,
 `_native_batch_norm_legit`, `_native_batch_norm_legit_no_training`, and
 `_native_batch_norm_legit_functional` inference graphs, plus
 `_batch_norm_no_update`. Their empty saved-stat/reserve-space outputs and
-functional running-stat outputs are preserved; the complete 37-test MUSA AOTI
+functional running-stat outputs are preserved; the complete 38-test MUSA AOTI
 Python suite passes on the current MUSA environment. A `BatchNorm2d` module with
 `track_running_stats=False` also passes a complete PTE/PTD runner check with
 maximum FP32 error `2.38e-7`.
