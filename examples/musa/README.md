@@ -1,6 +1,6 @@
 # MUSA AOTI model acceptance
 
-`aoti_model_acceptance.py` validates the complete MUSA path for twenty-three models:
+`aoti_model_acceptance.py` exercises the complete MUSA path for these models:
 
 - `mlp`: Linear + ReLU + Linear + ReLU;
 - `simple_cnn`: Conv2d + BatchNorm2d + ReLU + MaxPool2d + Conv2d + Flatten + Linear;
@@ -21,11 +21,15 @@
 - `resnet18`: unmodified torchvision ResNet18 with random weights and a 64x64 input;
 - `mobilenet_v2`: torchvision MobileNetV2 with depthwise convolutions and a 64x64 input.
 - `efficientnet_b0`: torchvision EfficientNet-B0 with squeeze-and-excitation, SiLU, and depthwise convolutions;
+- `densenet121`: torchvision DenseNet121 with dense concatenation blocks and transition pooling;
+- `convnext_tiny`: torchvision ConvNeXt-Tiny with depthwise convolutions, LayerNorm, GELU, and residuals;
 - `vit_b_16`: torchvision ViT-B/16 with twelve Transformer blocks, multihead attention, and LayerNorm;
 - `deeplabv3_mobilenet_v3_large`: torchvision DeepLabV3 segmentation with a MobileNetV3 backbone and an output of 21-class pixel logits.
 
-The script writes the PTE, external AOTI data, raw input, expected output, and
-runner output to the selected directory. It compares the `executor_runner`
+The script writes the PTE, external AOTI data, raw input, expected output,
+runner output, and successful `result.json` report to the selected directory.
+Without `--runner`, the report records an export only (`runner` is null).
+It compares the `executor_runner`
 output with the MUSA eager result; no CPU execution is used as a correctness
 baseline. The GPU random input generator is synchronized before taking an
 immutable host snapshot; eager execution and the runner read the same input.
@@ -61,7 +65,14 @@ width between 48 and 80. Both include odd sizes. Dynamic batch and spatial
 dimensions can also be combined for either supported model using
 `--batch-size 2 --dynamic-batch-max 3 --dynamic-spatial-max 80` (use 48 for
 the bilinear U-Net). This accepts a batch of 1–3 with independent bounded
-height and width in one PTE. Other dynamic dimensions are not covered.
+height and width in one PTE.
+For `densenet121`, the tested export range uses `8 * Dim` for independent
+height and width between 32 and 80, checking 64x64, 32x40, 80x80, and 72x64.
+This constraint comes from the current exporter's pooling guards; it is not a
+claim that eager DenseNet cannot process other sizes. The example size and
+maximum must be multiples of 8, and the maximum must exceed 32.
+`convnext_tiny` supports fixed spatial sizes and dynamic batch acceptance.
+Other dynamic dimensions are not covered.
 For torchvision models, `--weights /path/to/state_dict.pth` loads a
 local PyTorch state dictionary (for example, a cached pretrained checkpoint)
 before exporting. Without it, the model uses random weights; the script never
@@ -767,6 +778,67 @@ dynamic batch/spatial shapes and two runner replays when invoked with
 exactly across the four shapes. The wider absolute tolerance is required for
 the accumulated BF16 logits at odd spatial sizes, while the exact label check
 remains strict.
+
+Random-weight DenseNet121 passes FP32 PTE/PTD export and two fresh runner
+executions at 1x3x64x64 (maximum error `2.15e-6`). One combined dynamic PTE
+also passes shapes 2x3x64x64, 1x3x32x40, 3x3x80x80, and 2x3x72x64, with
+two runner executions per shape and maximum error `4.06e-6` at
+`atol=rtol=1e-4`. This exposed a non-contiguous BatchNorm input produced by
+dense-block buffer layouts; the BN shim now materializes contiguous inputs
+and parameters only when necessary. Four native BN tests pass, including
+non-contiguous input and padded-batch/strided-parameter cases.
+
+The same four DenseNet shapes also pass BF16, with two runner executions per
+shape and maximum errors `0`, `1.19e-7`, `0`, and `0.00390625` respectively
+at `atol=rtol=0.04`. Predicted classes match eager for every execution.
+Random-weight ConvNeXt-Tiny passes FP32 and BF16 at 64x64 with dynamic batches
+2/1/3 and two runner executions per batch. The maximum errors are `2.51e-6`
+and `0.0078125` respectively; predicted classes match on the initial runs.
+These random-weight checks establish execution correctness for the tested
+inputs, not pretrained classification accuracy or performance.
+
+Reproduce the DenseNet and ConvNeXt runner checks using the environment above:
+
+```bash
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model densenet121 --dtype fp32 --batch-size 2 \
+  --dynamic-batch-max 3 --dynamic-spatial-max 80 --runner-repeats 2 \
+  --output-dir /tmp/executorch-musa-acceptance/densenet121_fp32 \
+  --runner "$RUNNER"
+
+$PYTHON examples/musa/aoti_model_acceptance.py \
+  --model convnext_tiny --dtype fp32 --batch-size 2 \
+  --dynamic-batch-max 3 --runner-repeats 2 \
+  --output-dir /tmp/executorch-musa-acceptance/convnext_tiny_fp32 \
+  --runner "$RUNNER"
+```
+
+`aoti_backbone_diagnostics.py` measures per-stage DeepLab-MobileNetV3 errors
+against MUSA eager. It exports all backbone stages as outputs and records
+max/mean/p99 absolute errors and NaN/Inf counts in `result.json`.
+Use `--stage 4`, for example, to export just stage 4 with its eager predecessor
+as input; this separates local error from accumulation through the backbone.
+Run the same command with `--dtype fp32` and `--dtype bf16` into separate
+directories. These are diagnostic measurements, not an accuracy acceptance
+threshold. Retaining intermediate outputs can change fusion and allocation,
+so also run the ordinary full-model acceptance path.
+
+With the official pretrained checkpoint, seed 0 and a 2x3x64x64 input,
+the FP32 diagnostic has maximum error at most `4.58e-5` across 17 stages.
+The BF16 diagnostic has stage-0 maximum error `0.015625`, stage-6 error
+`0.3125`, and final-stage error `0.171875`; no NaN/Inf values appear.
+Isolated stage 4 has maximum error `0.0625` (versus `0.1201171875` in the
+cumulative run). This confirms a local BF16 discrepancy as well as propagated
+error; it does not yet identify a particular convolution algorithm as the
+cause. These stage outputs are backbone features, not segmentation logits.
+
+```bash
+$PYTHON examples/musa/aoti_backbone_diagnostics.py \
+  --dtype bf16 --batch-size 2 --height 64 --width 64 \
+  --weights /path/to/deeplabv3_mobilenet_v3_large-fc3c493d.pth \
+  --runner "$RUNNER" \
+  --output-dir /tmp/executorch-musa-acceptance/deeplab_backbone_bf16
+```
 
 The BatchNorm decomposition now also covers direct `native_batch_norm`,
 `_native_batch_norm_legit`, `_native_batch_norm_legit_no_training`, and

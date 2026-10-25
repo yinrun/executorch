@@ -13,6 +13,8 @@ channels; ``resnet18`` is the standard torchvision model with optional weights.
 ``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6;
 ``deeplabv3_mobilenet_v3_large`` covers a pretrained segmentation network.
 ``efficientnet_b0`` covers squeeze-and-excitation and SiLU blocks.
+``densenet121`` covers dense concatenation blocks and transition pooling.
+``convnext_tiny`` covers depthwise convolution, LayerNorm, GELU, and residuals.
 ``vit_b_16`` covers full-depth multihead attention and LayerNorm.
 ``transposed_bmm`` covers a non-contiguous left-hand batch matrix.
 """
@@ -414,6 +416,18 @@ def _torchvision_efficientnet_b0() -> nn.Module:
     return efficientnet_b0(weights=None)
 
 
+def _torchvision_densenet121() -> nn.Module:
+    from torchvision.models import densenet121
+
+    return densenet121(weights=None)
+
+
+def _torchvision_convnext_tiny() -> nn.Module:
+    from torchvision.models import convnext_tiny
+
+    return convnext_tiny(weights=None)
+
+
 def _torchvision_vit_b_16() -> nn.Module:
     from torchvision.models import vit_b_16
 
@@ -476,6 +490,8 @@ MODEL_FACTORIES = {
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
     "efficientnet_b0": (_torchvision_efficientnet_b0, (1, 3, 64, 64)),
+    "densenet121": (_torchvision_densenet121, (1, 3, 64, 64)),
+    "convnext_tiny": (_torchvision_convnext_tiny, (1, 3, 64, 64)),
     "vit_b_16": (_torchvision_vit_b_16, (1, 3, 224, 224)),
 }
 TOKEN_MODEL_NAMES = {"embedding_classifier", "token_encoder", "token_decoder"}
@@ -633,6 +649,8 @@ def export_model(
             "mobilenet_v2",
             "deeplabv3_mobilenet_v3_large",
             "efficientnet_b0",
+            "densenet121",
+            "convnext_tiny",
         ):
             raise ValueError("--input-size is only supported for CNN models")
         if input_size < 32:
@@ -642,6 +660,7 @@ def export_model(
         "bilinear_unet": 24,
         "deeplabv3_mobilenet_v3_large": 48,
         "efficientnet_b0": 48,
+        "densenet121": 32,
     }.get(model_name)
     if dynamic_spatial_max is not None:
         if (
@@ -652,13 +671,25 @@ def export_model(
             raise ValueError(
                 "--dynamic-spatial-max requires bilinear_unet (min=24) or "
                 "deeplabv3_mobilenet_v3_large/efficientnet_b0 (min=48), "
+                "or densenet121 (min=32), "
                 "with max >= input size"
+            )
+        if model_name == "densenet121" and (
+            input_shape[2] % 8 != 0
+            or dynamic_spatial_max % 8 != 0
+            or dynamic_spatial_max <= spatial_minimum
+        ):
+            raise ValueError(
+                "densenet121 dynamic spatial sizes must be divisible by 8 "
+                "and the maximum must exceed 32"
             )
     if weights_path is not None and model_name not in (
         "resnet18",
         "mobilenet_v2",
         "deeplabv3_mobilenet_v3_large",
         "efficientnet_b0",
+        "densenet121",
+        "convnext_tiny",
         "vit_b_16",
     ):
         raise ValueError("--weights is only supported for torchvision models")
@@ -694,12 +725,20 @@ def export_model(
         dynamic_dimensions[0] = Dim("batch", min=1, max=dynamic_batch_max)
         max_shape[0] = dynamic_batch_max
     if dynamic_spatial_max is not None:
-        dynamic_dimensions[2] = Dim(
-            "height", min=spatial_minimum, max=dynamic_spatial_max
-        )
-        dynamic_dimensions[3] = Dim(
-            "width", min=spatial_minimum, max=dynamic_spatial_max
-        )
+        if model_name == "densenet121":
+            dynamic_dimensions[2] = 8 * Dim(
+                "height_div8", min=spatial_minimum // 8, max=dynamic_spatial_max // 8
+            )
+            dynamic_dimensions[3] = 8 * Dim(
+                "width_div8", min=spatial_minimum // 8, max=dynamic_spatial_max // 8
+            )
+        else:
+            dynamic_dimensions[2] = Dim(
+                "height", min=spatial_minimum, max=dynamic_spatial_max
+            )
+            dynamic_dimensions[3] = Dim(
+                "width", min=spatial_minimum, max=dynamic_spatial_max
+            )
         max_shape[2:] = [dynamic_spatial_max, dynamic_spatial_max]
     dynamic_shapes = (dynamic_dimensions,) if dynamic_dimensions else None
     export_model_graph = (
@@ -751,6 +790,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.runner_repeats < 1 or (args.runner_repeats > 1 and args.runner is None):
         parser.error("--runner-repeats requires a runner and a positive count")
+    (args.output_dir / "result.json").unlink(missing_ok=True)
 
     pte_path, ptd_path, input_path, expected, model, input_shape = export_model(
         args.model,
@@ -795,6 +835,15 @@ def main() -> None:
             max_size = args.dynamic_spatial_max
             min_size = 24 if args.model == "bilinear_unet" else 48
             max_batch = args.dynamic_batch_max or args.batch_size
+            if args.model == "densenet121":
+                min_size = 32
+                small_width = min_size + 8
+                alternate_height = max(min_size, max_size - 8)
+                alternate_width = max(min_size, max_size - 16)
+            else:
+                small_width = min_size + 6
+                alternate_height = max_size - 1
+                alternate_width = max_size - 9
             input_shapes = dict.fromkeys(
                 (
                     input_shape,
@@ -802,10 +851,10 @@ def main() -> None:
                         1 if args.dynamic_batch_max else args.batch_size,
                         3,
                         min_size,
-                        min_size + 6,
+                        small_width,
                     ),
                     (max_batch, 3, max_size, max_size),
-                    (args.batch_size, 3, max_size - 1, max_size - 9),
+                    (args.batch_size, 3, alternate_height, alternate_width),
                 )
             )
             max_shape = (max_batch, 3, max_size, max_size)
@@ -881,7 +930,13 @@ def main() -> None:
                 if current_shape == input_shape:
                     result["predicted_token_ids"] = actual_token_ids.tolist()
             if (
-                args.model in ("efficientnet_b0", "vit_b_16")
+                args.model
+                in (
+                    "efficientnet_b0",
+                    "vit_b_16",
+                    "densenet121",
+                    "convnext_tiny",
+                )
                 and not args.vit_layer_tokens
             ):
                 expected_classes = current_expected.argmax(dim=-1).cpu()
@@ -963,7 +1018,9 @@ def main() -> None:
                     }
                 )
 
-    print(json.dumps(result, indent=2, sort_keys=True))
+    result_json = json.dumps(result, indent=2, sort_keys=True)
+    (args.output_dir / "result.json").write_text(result_json + "\n")
+    print(result_json)
 
 
 if __name__ == "__main__":
