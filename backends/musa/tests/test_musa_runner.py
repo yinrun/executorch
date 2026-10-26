@@ -18,6 +18,7 @@ from executorch.exir import to_edge_transform_and_lower
 from executorch.extension.export_util.utils import save_pte_program
 
 from examples.musa.aoti_model_acceptance import (
+    _check_predictions,
     _record_tensor_artifact,
     _run_runner,
     _serialization_schema,
@@ -26,6 +27,100 @@ from examples.musa.aoti_model_acceptance import (
     _write_tensor,
     main as acceptance_main,
 )
+
+
+class TestModelPredictions(unittest.TestCase):
+    def test_first_and_repeated_prediction_mismatches_fail_acceptance(self) -> None:
+        for model_name in (
+            "resnet18",
+            "mobilenet_v2",
+            "efficientnet_b0",
+            "densenet121",
+            "convnext_tiny",
+            "vit_b_16",
+            "token_decoder",
+            "deeplabv3_mobilenet_v3_large",
+        ):
+            for mismatch in (None, 0, 1):
+                with self.subTest(
+                    model=model_name, mismatch=mismatch
+                ), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    shape = (1, 2, 1, 1) if model_name.startswith("deeplab") else (1, 2)
+                    expected = _write_tensor(
+                        torch.tensor([1.0, 1.00001]).reshape(shape),
+                        root / "expected-0.bin",
+                    )
+                    changed = expected.flip(1)
+                    torch.testing.assert_close(changed, expected, atol=1e-4, rtol=1e-4)
+                    input_dtype = (
+                        torch.int64 if model_name == "token_decoder" else torch.float32
+                    )
+                    _write_tensor(
+                        torch.ones(1, 16, dtype=input_dtype), root / "input-0.bin"
+                    )
+                    exported = (
+                        root / "model.pte",
+                        root / "model.ptd",
+                        root / "input-0.bin",
+                        expected,
+                        nn.Identity(),
+                        (1, 16),
+                    )
+                    arguments = [
+                        "acceptance",
+                        "--model",
+                        model_name,
+                        "--output-dir",
+                        str(root),
+                        "--runner",
+                        "/runner",
+                        "--runner-repeats",
+                        "2",
+                    ]
+
+                    def run(runner, pte, ptd, input_path, output_prefix, shape):
+                        repeat = 1 if "repeat" in output_prefix.name else 0
+                        value = changed if mismatch == repeat else expected
+                        _write_tensor(value, Path(f"{output_prefix}-0.bin"))
+                        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+                    with mock.patch("sys.argv", arguments), mock.patch(
+                        "examples.musa.aoti_model_acceptance.export_model",
+                        return_value=exported,
+                    ), mock.patch(
+                        "examples.musa.aoti_model_acceptance._run_runner",
+                        side_effect=run,
+                    ), mock.patch(
+                        "builtins.print"
+                    ):
+                        if mismatch is None:
+                            acceptance_main()
+                            report = json.loads((root / "result.json").read_text())
+                            predictions = _check_predictions(
+                                model_name, expected, expected
+                            )
+                            self.assertTrue(predictions)
+                            self.assertEqual(
+                                report["artifact_cases"][0]["predictions"], predictions
+                            )
+                            for key, value in predictions.items():
+                                self.assertEqual(report[key], value)
+                                self.assertEqual(
+                                    report["runner_repeat_results"][0][key], value
+                                )
+                        else:
+                            with self.assertRaisesRegex(
+                                AssertionError, "predictions differ"
+                            ):
+                                acceptance_main()
+                            self.assertFalse((root / "result.json").exists())
+
+    def test_feature_outputs_do_not_receive_classification_checks(self) -> None:
+        expected = torch.tensor([[1.0, 2.0]])
+        actual = expected.flip(-1)
+        self.assertEqual(_check_predictions("vit_b_16", actual, expected, True), {})
+        self.assertEqual(_check_predictions("mlp", actual, expected), {})
 
 
 class TestTensorSnapshots(unittest.TestCase):

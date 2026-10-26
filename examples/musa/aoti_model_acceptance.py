@@ -540,6 +540,43 @@ def _record_tensor_artifact(tensor: torch.Tensor, path: Path) -> dict:
     return record_artifact(path, payload)
 
 
+def _check_predictions(
+    model_name: str,
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    vit_layer_tokens: bool = False,
+) -> dict:
+    if model_name == "token_decoder":
+        key, dimension = "predicted_token_ids", -1
+    elif model_name == "deeplabv3_mobilenet_v3_large":
+        key, dimension = "segmentation_pixel_labels_match", 1
+    elif (
+        model_name
+        in (
+            "resnet18",
+            "mobilenet_v2",
+            "efficientnet_b0",
+            "vit_b_16",
+            "densenet121",
+            "convnext_tiny",
+        )
+        and not vit_layer_tokens
+    ):
+        key, dimension = "predicted_classes", -1
+    else:
+        return {}
+    actual_ids = actual.argmax(dim=dimension)
+    expected_ids = expected.argmax(dim=dimension)
+    if not torch.equal(actual_ids, expected_ids):
+        mismatched = (actual_ids != expected_ids).sum().item()
+        raise AssertionError(
+            f"{model_name} predictions differ at {mismatched} positions"
+        )
+    return {
+        key: True if key == "segmentation_pixel_labels_match" else actual_ids.tolist()
+    }
+
+
 def _make_input(
     model_name: str, input_shape: tuple[int, ...], dtype: torch.dtype
 ) -> torch.Tensor:
@@ -953,45 +990,16 @@ def main() -> None:
                     )
             torch.testing.assert_close(actual, expected_flat, atol=atol, rtol=rtol)
             max_error = float((actual.float() - expected_flat.float()).abs().max())
-            if args.model == "token_decoder":
-                expected_token_ids = current_expected.argmax(dim=-1).cpu()
-                actual_token_ids = actual.reshape(current_expected.shape).argmax(dim=-1)
-                if not torch.equal(actual_token_ids, expected_token_ids):
-                    raise AssertionError(
-                        f"predicted token IDs differ for batch {current_shape[0]}: "
-                        f"expected {expected_token_ids.tolist()}, "
-                        f"actual {actual_token_ids.tolist()}"
-                    )
+            predictions = _check_predictions(
+                args.model,
+                actual.reshape(current_expected.shape),
+                current_expected,
+                args.vit_layer_tokens,
+            )
+            if predictions:
+                artifact_case["predictions"] = predictions
                 if current_shape == input_shape:
-                    result["predicted_token_ids"] = actual_token_ids.tolist()
-            if (
-                args.model
-                in (
-                    "efficientnet_b0",
-                    "vit_b_16",
-                    "densenet121",
-                    "convnext_tiny",
-                )
-                and not args.vit_layer_tokens
-            ):
-                expected_classes = current_expected.argmax(dim=-1).cpu()
-                actual_classes = actual.reshape(current_expected.shape).argmax(dim=-1)
-                if not torch.equal(actual_classes, expected_classes):
-                    raise AssertionError(
-                        f"{args.model} predicted classes differ for batch {current_shape[0]}"
-                    )
-                if current_shape == input_shape:
-                    result["predicted_classes"] = actual_classes.tolist()
-            if args.model == "deeplabv3_mobilenet_v3_large":
-                expected_labels = current_expected.argmax(dim=1).cpu()
-                actual_labels = actual.reshape(current_expected.shape).argmax(dim=1)
-                if not torch.equal(actual_labels, expected_labels):
-                    mismatched = (actual_labels != expected_labels).sum().item()
-                    raise AssertionError(
-                        f"segmentation pixel labels differ at {mismatched} positions"
-                    )
-                if current_shape == input_shape:
-                    result["segmentation_pixel_labels_match"] = True
+                    result.update(predictions)
             if (
                 args.dynamic_batch_max is not None
                 and args.dynamic_spatial_max is not None
@@ -1046,10 +1054,17 @@ def main() -> None:
                     rtol=rtol,
                     msg=f"{args.model} shape {current_shape} repeat {repeat}",
                 )
+                repeated_predictions = _check_predictions(
+                    args.model,
+                    repeated.reshape(current_expected.shape),
+                    current_expected,
+                    args.vit_layer_tokens,
+                )
                 result.setdefault("runner_repeat_results", []).append(
                     {
                         "shape": list(current_shape),
                         "repeat": repeat,
+                        **repeated_predictions,
                         "max_error": float(
                             (repeated.float() - expected_flat.float()).abs().max()
                         ),
