@@ -20,6 +20,7 @@ from examples.musa.aoti_model_acceptance import (
     _record_tensor_artifact,
     _run_runner,
     _serialization_schema,
+    _snapshot_tensor,
     _write_input,
     _write_tensor,
     main as acceptance_main,
@@ -126,15 +127,95 @@ class TestTensorSnapshots(unittest.TestCase):
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype), tempfile.TemporaryDirectory() as directory:
                 source = torch.arange(2000, device="musa", dtype=torch.float32)
-                source = (source * 0.01 + 1).to(dtype).reshape(1000, 2).transpose(0, 1)
+                source = (source * 0.25 + 1).to(dtype).reshape(1000, 2).transpose(0, 1)
                 path = Path(directory) / "expected.bin"
                 snapshot = _write_tensor(source, path)
-                expected = source.cpu().clone()
+                expected = (
+                    (torch.arange(2000, dtype=torch.float32) * 0.25 + 1)
+                    .to(dtype)
+                    .reshape(1000, 2)
+                    .transpose(0, 1)
+                    .contiguous()
+                )
                 source.zero_()
                 torch.musa.synchronize()
                 torch.testing.assert_close(snapshot, expected, atol=0, rtol=0)
                 self.assertTrue(bool(snapshot[:, -16:].ne(0).all()))
                 _record_tensor_artifact(snapshot, path)
+
+    @unittest.skipUnless(
+        hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
+    )
+    def test_musa_snapshot_pinned_staging_and_owned_result(self) -> None:
+        for dtype in (torch.float32, torch.float16, torch.bfloat16, torch.int64):
+            for shape in ((), (0,), (1001,), (2, 1999)):
+                with self.subTest(dtype=dtype, shape=shape):
+                    source = torch.full(shape, 3, dtype=dtype, device="musa")
+                    if source.ndim == 2:
+                        source = source.transpose(0, 1)
+                    if source.is_floating_point():
+                        source.requires_grad_()
+                    with mock.patch("torch.empty", wraps=torch.empty) as allocate:
+                        snapshot = _snapshot_tensor(source)
+                    self.assertTrue(
+                        any(
+                            call.kwargs.get("pin_memory")
+                            for call in allocate.call_args_list
+                        )
+                    )
+                    self.assertEqual(snapshot.device.type, "cpu")
+                    self.assertFalse(snapshot.requires_grad)
+                    self.assertFalse(snapshot.is_pinned())
+                    self.assertTrue(snapshot.is_contiguous())
+                    with torch.no_grad():
+                        source.zero_()
+                    torch.musa.synchronize(source.device)
+                    torch.testing.assert_close(
+                        snapshot,
+                        torch.full(source.shape, 3, dtype=dtype),
+                        atol=0,
+                        rtol=0,
+                    )
+
+    @unittest.skipUnless(
+        hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
+    )
+    def test_musa_snapshot_pin_allocation_failure_is_not_hidden(self) -> None:
+        source = torch.ones(1001, device="musa")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "expected.bin"
+            with mock.patch(
+                "torch.empty", side_effect=RuntimeError("pinned allocation failed")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "pinned allocation failed"):
+                    _write_tensor(source, path)
+            self.assertFalse(path.exists())
+
+    @unittest.skipUnless(
+        hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
+    )
+    def test_prefill_reference_snapshots_keep_device_cache_unchanged(self) -> None:
+        from examples.musa.aoti_prefill_decode_acceptance import _check_outputs
+
+        logits = torch.tensor([[1.0, 3.0, 2.0]], device="musa")
+        key = torch.ones((1, 2, 3, 8), device="musa")
+        value = torch.full_like(key, 2)
+        expected = (logits, key, value)
+        pointers = tuple(tensor.data_ptr() for tensor in expected)
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / f"output-{index}.bin" for index in range(3)]
+            for tensor, path in zip(expected, paths):
+                _write_tensor(tensor, path)
+            with mock.patch(
+                "examples.musa.aoti_prefill_decode_acceptance._snapshot_tensor",
+                wraps=_snapshot_tensor,
+            ) as snapshot:
+                report = _check_outputs(paths, expected, 0)
+            self.assertEqual(snapshot.call_count, 3)
+            self.assertEqual(report["predicted_token"], [1])
+            self.assertEqual(report["max_errors"], [0, 0, 0])
+            self.assertEqual(tuple(tensor.data_ptr() for tensor in expected), pointers)
+            self.assertTrue(all(tensor.device.type == "musa" for tensor in expected))
 
 
 @unittest.skipUnless(

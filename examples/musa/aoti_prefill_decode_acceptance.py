@@ -20,6 +20,7 @@ from examples.musa.aoti_model_acceptance import (
     TOLERANCES,
     _runner_environment,
     _serialization_schema,
+    _snapshot_tensor,
     _write_tensor,
 )
 
@@ -108,6 +109,7 @@ def _run(
 def _check_outputs(
     paths: list[Path], expected: tuple[torch.Tensor, ...], tolerance: float
 ) -> dict:
+    expected = tuple(_snapshot_tensor(value) for value in expected)
     actual = [
         torch.frombuffer(bytearray(path.read_bytes()), dtype=reference.dtype).reshape(
             reference.shape
@@ -116,15 +118,15 @@ def _check_outputs(
     ]
     for result, reference in zip(actual, expected):
         torch.testing.assert_close(
-            result, reference.cpu(), atol=tolerance, rtol=tolerance
+            result, reference, atol=tolerance, rtol=tolerance
         )
     token = actual[0].argmax(dim=-1)
-    if not torch.equal(token, expected[0].argmax(dim=-1).cpu()):
+    if not torch.equal(token, expected[0].argmax(dim=-1)):
         raise AssertionError("executor_runner predicted a different token")
     return {
         "predicted_token": token.tolist(),
         "max_errors": [
-            float((result.float() - reference.cpu().float()).abs().max())
+            float((result.float() - reference.float()).abs().max())
             for result, reference in zip(actual, expected)
         ],
         "outputs": [str(path) for path in paths],

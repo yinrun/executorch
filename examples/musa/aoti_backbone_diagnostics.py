@@ -28,6 +28,7 @@ from examples.musa.aoti_model_acceptance import (
     DTYPES,
     _run_runner,
     _serialization_schema,
+    _snapshot_tensor,
     _torchvision_mobilenet_v2,
     _write_tensor,
 )
@@ -179,8 +180,8 @@ def main() -> None:
             stage_indices = list(range(len(stages)))
             module = BackboneStages(stages)
         module.eval()
-        original_input = image.detach().cpu().clone()
-        expected = tuple(output.detach().cpu() for output in module(image))
+        original_input = _snapshot_tensor(image)
+        expected = tuple(_snapshot_tensor(output) for output in module(image))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     input_path = args.output_dir / "input.bin"

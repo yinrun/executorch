@@ -523,10 +523,22 @@ def _serialization_schema() -> Iterator[None]:
                 destination.write_bytes(content)
 
 
-def _write_tensor(tensor: torch.Tensor, path: Path) -> torch.Tensor:
-    if tensor.device.type == "musa":
+def _snapshot_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.device.type != "musa":
+        return tensor.detach().to(device="cpu", copy=True).contiguous()
+    with torch.musa.device(tensor.device):
         torch.musa.synchronize(tensor.device)
-    snapshot = tensor.detach().to(device="cpu", copy=True).contiguous()
+        source = tensor.detach().contiguous()
+        staging = torch.empty(
+            source.shape, dtype=source.dtype, device="cpu", pin_memory=True
+        )
+        staging.copy_(source, non_blocking=True)
+        torch.musa.synchronize(tensor.device)
+        return staging.clone()
+
+
+def _write_tensor(tensor: torch.Tensor, path: Path) -> torch.Tensor:
+    snapshot = _snapshot_tensor(tensor)
     payload = snapshot.reshape(-1).view(torch.uint8).numpy().tobytes()
     path.write_bytes(payload)
     if path.read_bytes() != payload:
@@ -734,7 +746,7 @@ def export_model(
         model = VitLayerTokens(model, vit_attention_stages)
     model = model.eval().to(device="musa", dtype=dtype)
     example = _make_input(model_name, input_shape, dtype)
-    original_input = example.detach().cpu().clone()
+    original_input = _snapshot_tensor(example)
     with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
         expected = model(example)
 
@@ -909,7 +921,7 @@ def main() -> None:
                 current_expected_path = args.output_dir / "expected-0.bin"
             else:
                 example = _make_input(args.model, current_shape, DTYPES[args.dtype])
-                original_input = example.detach().cpu().clone()
+                original_input = _snapshot_tensor(example)
                 with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
                     current_expected = model(example)
                 current_input_path = args.output_dir / f"input-{label}.bin"

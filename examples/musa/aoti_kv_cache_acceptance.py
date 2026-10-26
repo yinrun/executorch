@@ -19,6 +19,7 @@ from examples.musa.aoti_model_acceptance import (
     TOLERANCES,
     _runner_environment,
     _serialization_schema,
+    _snapshot_tensor,
     _write_tensor,
 )
 
@@ -114,6 +115,7 @@ def run_acceptance(
         token_ids = torch.tensor([[token]], device="musa", dtype=torch.int64)
         with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
             expected = model(token_ids, past_key, past_value)
+        reference_outputs = tuple(_snapshot_tensor(value) for value in expected)
         input_paths = [output_dir / f"step-{step}-token.bin"]
         _write_tensor(token_ids, input_paths[0])
         if step == 0:
@@ -168,12 +170,12 @@ def run_acceptance(
             )
             for path, reference in zip(output_paths, expected)
         ]
-        for reference, result in zip(expected, actual):
+        for reference, result in zip(reference_outputs, actual):
             torch.testing.assert_close(
-                result, reference.cpu(), atol=tolerance, rtol=tolerance
+                result, reference, atol=tolerance, rtol=tolerance
             )
         predicted = actual[0].argmax(dim=-1)
-        expected_token = expected[0].argmax(dim=-1).cpu()
+        expected_token = reference_outputs[0].argmax(dim=-1)
         if not torch.equal(predicted, expected_token):
             raise AssertionError(
                 f"predicted token differs at step {step}: "
@@ -185,8 +187,8 @@ def run_acceptance(
                 "cache_length": past_key.shape[2],
                 "predicted_token": predicted.tolist(),
                 "max_errors": [
-                    float((result.float() - reference.cpu().float()).abs().max())
-                    for reference, result in zip(expected, actual)
+                    float((result.float() - reference.float()).abs().max())
+                    for reference, result in zip(reference_outputs, actual)
                 ],
                 "outputs": [str(path) for path in output_paths],
             }

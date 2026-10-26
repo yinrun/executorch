@@ -25,6 +25,7 @@ from examples.musa.aoti_model_acceptance import (
     TOLERANCES,
     _runner_environment,
     _serialization_schema,
+    _snapshot_tensor,
     _write_tensor,
 )
 
@@ -179,7 +180,7 @@ def run_acceptance(
                 actual = torch.frombuffer(
                     bytearray(output_path.read_bytes()), dtype=dtype
                 )
-                reference = expected.detach().cpu().flatten()
+                reference = _snapshot_tensor(expected).flatten()
                 torch.testing.assert_close(
                     actual, reference, atol=tolerance, rtol=tolerance
                 )
