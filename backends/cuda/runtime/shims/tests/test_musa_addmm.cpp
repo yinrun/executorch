@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <thread>
 #include <vector>
 
 #include <executorch/backends/aoti/slim/c10/core/Device.h>
@@ -36,12 +39,14 @@ namespace {
 
 using executorch::backends::aoti::slim::c10::DeviceType;
 using executorch::backends::aoti::slim::c10::ScalarType;
-using executorch::backends::cuda::SlimTensor;
 using executorch::backends::cuda::aoti_torch_empty_strided;
 using executorch::backends::cuda::aoti_torch_musa_addmm_out;
 using executorch::backends::cuda::aoti_torch_musa_bmm_out;
 using executorch::backends::cuda::aoti_torch_musa_mm_out;
+using executorch::backends::cuda::clearCurrentCUDAStream;
 using executorch::backends::cuda::getCurrentCUDAStream;
+using executorch::backends::cuda::setCurrentCUDAStream;
+using executorch::backends::cuda::SlimTensor;
 using executorch::runtime::Error;
 
 uint16_t float_to_half_bits(float value) {
@@ -348,6 +353,158 @@ void run_bmm(
   delete mat2;
 }
 
+TEST_F(MusaAddmmTest, ImmutableTensorReadbackTail) {
+  for (int64_t elements : {1000, 1001, 1999}) {
+    auto tensor = std::unique_ptr<SlimTensor>(
+        empty_tensor(ScalarType::Float, {elements}, {1}));
+    copy_to_device(
+        tensor.get(),
+        encode_values(std::vector<float>(elements, 2.5f), ScalarType::Float));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    for (int repeat = 0; repeat < 5000; ++repeat) {
+      const auto actual = copy_from_device(tensor.get(), ScalarType::Float);
+      for (size_t index = 0; index < actual.size(); ++index) {
+        ASSERT_EQ(actual[index], 2.5f)
+            << "elements=" << elements << " repeat=" << repeat
+            << " index=" << index;
+      }
+    }
+  }
+}
+
+TEST_F(MusaAddmmTest, SynchronousPageableAndPinnedReadbackTail) {
+  auto stream = getCurrentCUDAStream(0);
+  ASSERT_TRUE(stream.ok());
+  for (int64_t elements : {1000, 1001, 1999}) {
+    auto tensor = std::unique_ptr<SlimTensor>(
+        empty_tensor(ScalarType::Float, {elements}, {1}));
+    const std::vector<float> expected(elements, 2.5f);
+    copy_to_device(tensor.get(), encode_values(expected, ScalarType::Float));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    void* pinned = nullptr;
+    ASSERT_EQ(cudaMallocHost(&pinned, tensor->nbytes()), cudaSuccess);
+    musaPointerAttributes attributes{};
+    ASSERT_EQ(musaPointerGetAttributes(&attributes, pinned), musaSuccess);
+    EXPECT_EQ(attributes.type, musaMemoryTypeHost);
+    for (int repeat = 0; repeat < 1000; ++repeat) {
+      std::vector<float> pageable(elements, 0.0f);
+      EXPECT_EQ(
+          cudaMemcpy(
+              pageable.data(),
+              tensor->data_ptr(),
+              tensor->nbytes(),
+              cudaMemcpyDeviceToHost),
+          cudaSuccess);
+      EXPECT_EQ(pageable, expected)
+          << "repeat=" << repeat << " elements=" << elements;
+      std::memset(pinned, 0, tensor->nbytes());
+      EXPECT_EQ(
+          cudaMemcpyAsync(
+              pinned,
+              tensor->data_ptr(),
+              tensor->nbytes(),
+              cudaMemcpyDeviceToHost,
+              *stream),
+          cudaSuccess);
+      EXPECT_EQ(cudaStreamSynchronize(*stream), cudaSuccess);
+      EXPECT_EQ(std::memcmp(pinned, expected.data(), tensor->nbytes()), 0)
+          << "repeat=" << repeat << " elements=" << elements;
+    }
+    EXPECT_EQ(cudaFreeHost(pinned), cudaSuccess);
+  }
+}
+
+TEST_F(MusaAddmmTest, BlasQueuedCallsAcrossStreams) {
+  std::thread worker([] {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    ASSERT_EQ(setCurrentCUDAStream(nullptr, 0), Error::Ok);
+    std::array<cudaStream_t, 2> streams{};
+    for (auto& stream : streams) {
+      ASSERT_EQ(
+          musaStreamCreateWithFlags(&stream, musaStreamNonBlocking),
+          musaSuccess);
+    }
+    for (auto dtype :
+         {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+      auto mat1 =
+          std::unique_ptr<SlimTensor>(empty_tensor(dtype, {2, 3}, {3, 1}));
+      auto mat2 =
+          std::unique_ptr<SlimTensor>(empty_tensor(dtype, {3, 2}, {2, 1}));
+      auto bias = std::unique_ptr<SlimTensor>(empty_tensor(dtype, {2}, {1}));
+      copy_to_device(mat1.get(), encode_values({1, 2, 3, 4, 5, 6}, dtype));
+      copy_to_device(mat2.get(), encode_values({7, 8, 9, 10, 11, 12}, dtype));
+      copy_to_device(bias.get(), encode_values({1, 2}, dtype));
+      std::vector<std::unique_ptr<SlimTensor>> outputs;
+      for (size_t index = 0; index < 16; ++index) {
+        outputs.emplace_back(empty_tensor(dtype, {2, 2}, {2, 1}));
+        copy_to_device(
+            outputs.back().get(), encode_values({0, 0, 0, 0}, dtype));
+      }
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+      for (size_t index = 0; index < outputs.size(); ++index) {
+        ASSERT_EQ(
+            setCurrentCUDAStream(streams[index % streams.size()], 0),
+            Error::Ok);
+        ASSERT_EQ(
+            aoti_torch_musa_addmm_out(
+                outputs[index].get(),
+                bias.get(),
+                mat1.get(),
+                mat2.get(),
+                1.0,
+                index % 2 == 0 ? 1.0 : 0.5),
+            Error::Ok);
+      }
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+      for (size_t index = 0; index < outputs.size(); ++index) {
+        expect_values(
+            copy_from_device(outputs[index].get(), dtype),
+            index % 2 == 0 ? std::vector<float>{59, 66, 140, 156}
+                           : std::vector<float>{30, 34, 70.5, 79});
+      }
+    }
+    clearCurrentCUDAStream(0);
+    for (auto stream : streams) {
+      EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+    }
+  });
+  worker.join();
+}
+
+TEST_F(MusaAddmmTest, BlasHandleStreamSwitchAndThreadExit) {
+  std::array<std::thread, 3> workers;
+  for (auto& worker : workers) {
+    worker = std::thread([] {
+      ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+      std::array<cudaStream_t, 2> streams{};
+      for (auto& stream : streams) {
+        ASSERT_EQ(
+            musaStreamCreateWithFlags(&stream, musaStreamNonBlocking),
+            musaSuccess);
+      }
+      for (int repeat = 0; repeat < 3; ++repeat) {
+        for (auto stream : streams) {
+          ASSERT_EQ(setCurrentCUDAStream(stream, 0), Error::Ok);
+          for (auto dtype :
+               {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+            run_addmm(dtype, true, false, false);
+            run_addmm(dtype, false, false, true, 0.0);
+            run_bmm(dtype, true, true, false);
+          }
+        }
+      }
+      EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+      clearCurrentCUDAStream(0);
+      for (auto stream : streams) {
+        EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+      }
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+}
+
 TEST_F(MusaAddmmTest, AddmmDtypesAndTransposedMat2) {
   for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_addmm(dtype, false);
@@ -621,6 +778,16 @@ TEST_F(MusaAddmmTest, VitClassifierProjection) {
             ADD_FAILURE() << "mismatch at " << index << ": " << actual[index];
           }
           ++incorrect;
+        }
+      }
+      if (incorrect != 0) {
+        const auto repeated = copy_from_device(output, dtype);
+        const auto offsets = copy_from_device(bias, dtype);
+        for (size_t index = classes - 16; index < classes; ++index) {
+          ADD_FAILURE() << "tail index=" << index
+                        << " original=" << actual[index]
+                        << " repeated=" << repeated[index]
+                        << " bias=" << offsets[index];
         }
       }
       EXPECT_EQ(incorrect, 0);

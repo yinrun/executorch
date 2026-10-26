@@ -13,6 +13,7 @@
 #if defined(EXECUTORCH_USE_MUSA)
 
 #include <musa_runtime.h>
+#include <cstring>
 
 using cudaError_t = musaError_t;
 using cudaEvent_t = musaEvent_t;
@@ -129,8 +130,59 @@ inline cudaError_t cudaMallocHost(void** ptr, size_t size) {
   return musaMallocHost(ptr, size, musaMemAttachGlobal);
 }
 
+namespace executorch::extension::cuda::detail {
+
+inline musaError_t copy_musa_to_host(
+    void* destination,
+    const void* source,
+    size_t bytes,
+    musaStream_t stream,
+    bool asynchronous) {
+  if (bytes == 0 || destination == nullptr || source == nullptr) {
+    return asynchronous
+        ? musaMemcpyAsync(
+              destination, source, bytes, musaMemcpyDeviceToHost, stream)
+        : musaMemcpy(destination, source, bytes, musaMemcpyDeviceToHost);
+  }
+  musaPointerAttributes attributes{};
+  auto status = musaPointerGetAttributes(&attributes, destination);
+  if (status == musaErrorInvalidValue) {
+    musaGetLastError();
+    attributes.type = musaMemoryTypeUnregistered;
+  } else if (status != musaSuccess) {
+    return status;
+  }
+  if (attributes.type != musaMemoryTypeUnregistered) {
+    return asynchronous
+        ? musaMemcpyAsync(
+              destination, source, bytes, musaMemcpyDeviceToHost, stream)
+        : musaMemcpy(destination, source, bytes, musaMemcpyDeviceToHost);
+  }
+  void* staging = nullptr;
+  status = musaMallocHost(&staging, bytes);
+  if (status != musaSuccess) {
+    return status;
+  }
+  status =
+      musaMemcpyAsync(staging, source, bytes, musaMemcpyDeviceToHost, stream);
+  if (status == musaSuccess) {
+    status = musaStreamSynchronize(stream);
+  }
+  if (status == musaSuccess) {
+    std::memcpy(destination, staging, bytes);
+  }
+  const auto cleanup = musaFreeHost(staging);
+  return status == musaSuccess ? cleanup : status;
+}
+
+}
+
 inline cudaError_t
 cudaMemcpy(void* dst, const void* src, size_t size, cudaMemcpyKind kind) {
+  if (kind == cudaMemcpyDeviceToHost) {
+    return executorch::extension::cuda::detail::copy_musa_to_host(
+        dst, src, size, nullptr, false);
+  }
   return musaMemcpy(dst, src, size, kind);
 }
 
@@ -140,6 +192,10 @@ inline cudaError_t cudaMemcpyAsync(
     size_t size,
     cudaMemcpyKind kind,
     cudaStream_t stream) {
+  if (kind == cudaMemcpyDeviceToHost) {
+    return executorch::extension::cuda::detail::copy_musa_to_host(
+        dst, src, size, stream, true);
+  }
   return musaMemcpyAsync(dst, src, size, kind, stream);
 }
 
