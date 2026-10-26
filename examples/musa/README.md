@@ -216,8 +216,14 @@ the same export and runner path in lower precision. The default absolute and
 relative comparison tolerances are 1e-4 (FP32), 1e-2 (FP16), and 4e-2 (BF16);
 token models always accept raw int64 input IDs and `--dtype` selects the
 weights and output dtype. For `token_decoder`, the script also checks exact
-argmax token IDs against MUSA eager. For EfficientNet-B0 and ViT-B/16 it checks
-predicted class IDs, and for DeepLabV3 it checks exact per-pixel predicted labels.
+argmax token IDs against MUSA eager. For ResNet18, MobileNetV2, EfficientNet-B0,
+DenseNet121, ConvNeXt-Tiny and ViT-B/16 it checks predicted class IDs; for
+DeepLabV3 it checks exact per-pixel predicted labels. These semantic checks
+apply to every shape and every independent runner replay, not only the first
+execution. ViT intermediate-feature diagnostics are not class predictions.
+Passing a logit tolerance alone does not excuse a changed token, class or
+pixel label. Predictions are compared against eager at the same dtype, not
+against another precision or dataset labels.
 Override the tolerances with `--atol` and
 `--rtol` if needed. `--input-size 224` exports a supported torchvision
 image model with a 224x224 input instead of its default size. Except

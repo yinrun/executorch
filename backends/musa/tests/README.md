@@ -635,7 +635,72 @@ eager steps. PTE/PTD, initial inputs and runner cache outputs remain under
 `reports/stateful-final`; the summary records revision `47af3fdf21` and the
 documentation-only dirty state.
 
-The next gate is to refresh the broader pretrained/dtype acceptance matrix
+The next gate at this checkpoint was to refresh the broader pretrained/dtype acceptance matrix
 with these protections, then repeat handle-reuse A/B validation and unprofiled
 benchmarks. The handle cache remains disabled. Neither the diagnostic speedup
 nor old `/tmp` evidence is an accepted performance result for the new code.
+
+## Pretrained matrix and prediction gate (2026-10-26)
+
+Fresh exports at `94c81ce9b7` pass the complete ResNet18/MobileNetV2 matrix
+below using official pretrained state dictionaries, generated inputs and
+MUSA eager references. The checkpoints were downloaded into the persistent
+`artifacts/musa-20261026/checkpoints` directory and verified against the full
+SHA-256 values documented in `examples/musa/README.md`; `manifest.json`
+retains their URLs, paths, sizes and digests. No checkpoint was replaced by
+random weights and no comparison tolerance was relaxed.
+
+| Pretrained model | Dtype | Maximum absolute logit error across eight runs |
+| --- | --- | ---: |
+| ResNet18 | FP32 | `6.67572021484375e-6` |
+| ResNet18 | FP16 | `0.00390625` |
+| ResNet18 | BF16 | `0.0001220703125` |
+| MobileNetV2 | FP32 | `2.384185791015625e-6` |
+| MobileNetV2 | FP16 | `0.00048828125` |
+| MobileNetV2 | BF16 | `7.62939453125e-6` |
+
+Every model/dtype uses one PTE at `[2,3,64,64]`, `[1,3,48,54]`,
+`[3,3,80,80]`, and `[2,3,79,71]`, with two fresh runner processes per shape:
+48 real executions in total. Reports, exported PTE/PTD, frozen inputs and
+references, output tensors and integrity manifests are retained under
+`reports/pretrained-baseline`. A separate audit verifies every recorded
+artifact, repeats the numerical comparison and checks exact top-1 IDs for
+all 48 outputs; its results are in `reports/pretrained-predictions.json`.
+All references are finite and nonzero. This proves agreement with same-dtype
+MUSA eager on these inputs, not ImageNet accuracy or identical class IDs
+across precisions.
+
+Review found that the acceptance script previously checked token/class/pixel
+predictions only on the first execution of each shape, and did not include
+ResNet18/MobileNetV2 in the class-ID check. Commit `d545db6030` centralizes
+these checks and applies them to every replay as well. The first shape's
+predictions remain in the top-level report; per-shape predictions and replay
+predictions are also recorded. ViT intermediate feature outputs remain
+excluded from classification checks.
+
+The focused prediction/snapshot suite passes 11 tests. Its two new methods
+include 24 acceptance scenarios spanning eight model types: matching
+predictions, a first-run mismatch, and a repeated-run mismatch. The changed
+logits deliberately remain inside the FP32 tolerance, so rejection proves
+that the semantic gate is active rather than an incidental allclose failure.
+Failed acceptance does not publish a successful `result.json`.
+Evidence is in `reports/prediction-checks.log`. These tests validate acceptance
+logic with synthetic CPU tensors plus the existing MUSA snapshot tests; they
+do not execute CPU models or add a CPU accuracy baseline.
+
+After committing the semantic gate, MobileNetV2 FP16 was freshly exported and
+executed eight more times at the same four dynamic shapes, with the checks
+integrated into the actual acceptance CLI. All runs pass at `d545db6030`
+(clean source at launch), maximum logit error `0.00048828125`; every replay's
+class IDs match the first run and same-dtype eager. Per-shape IDs are
+`[22, 127]`, `[490]`, `[92, 734, 734]`, and `[420, 23]`, respectively.
+The report, PTE/PTD and tensors are retained under
+`reports/pretrained-prediction-gate/models/mobilenet_v2-fp16`, with the
+overall result in `reports/pretrained-prediction-gate/summary.json`.
+
+The ResNet18/MobileNetV2 pretrained precision gate is now satisfied on the
+current stack. Their retained, checksummed inputs and references can be
+used for handle-reuse A/B testing without changing weights or regenerating
+inputs. Handle reuse remains disabled pending that validation and fresh
+unprofiled measurements. Other backbones, another GPU/SDK, and dataset-level
+accuracy are not covered by this matrix.
