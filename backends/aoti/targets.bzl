@@ -6,6 +6,19 @@ def define_common_targets():
         return
 
     runtime.python_library(
+        name = "host_tensor",
+        srcs = [
+            "host_tensor.py",
+        ],
+        visibility = [
+            "//executorch/...",
+        ],
+        deps = [
+            "//caffe2:torch",
+        ],
+    )
+
+    runtime.python_library(
         name = "aoti_partitioner",
         srcs = [
             "aoti_partitioner.py",

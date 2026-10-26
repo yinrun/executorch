@@ -123,6 +123,7 @@ fbcode_target(
         ":cuda_passes",
         ":triton_replacement_pass",
         "//caffe2:torch",
+        "//executorch/backends/aoti:host_tensor",
         "//executorch/backends/aoti/passes:passes",
         "//executorch/exir/_serialize:lib",
         "//executorch/exir/backend:backend_details",
