@@ -1,5 +1,6 @@
 """Runner regressions; set EXECUTORCH_MUSA_RUNNER to a MUSA executor_runner."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -194,6 +195,56 @@ class TestTensorSnapshots(unittest.TestCase):
     @unittest.skipUnless(
         hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
     )
+    def test_musa_weight_storage_uses_pinned_chunks_and_preserves_views(self) -> None:
+        from executorch.backends.cuda.cuda_weight_collector import _write_tensor_storage
+
+        for size in (1001, 8 * 1024 * 1024 + 1001):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as directory:
+                source = torch.full((size,), 0x5A, dtype=torch.uint8, device="musa")
+                view = source[5::2]
+                identity = (
+                    view.data_ptr(),
+                    view.storage_offset(),
+                    view.shape,
+                    view.stride(),
+                )
+                path = Path(directory) / "weights.bin"
+                with mock.patch(
+                    "executorch.backends.cuda.cuda_weight_collector.snapshot_to_cpu",
+                    wraps=_snapshot_tensor,
+                ) as snapshot:
+                    digest = _write_tensor_storage(view, str(path))
+                payload = bytes([0x5A]) * size
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertEqual(digest, hashlib.sha256(payload).digest())
+                self.assertEqual(snapshot.call_count, 1 if size == 1001 else 2)
+                self.assertEqual(
+                    (view.data_ptr(), view.storage_offset(), view.shape, view.stride()),
+                    identity,
+                )
+                source.zero_()
+                torch.musa.synchronize()
+                self.assertEqual(path.read_bytes(), payload)
+
+    @unittest.skipUnless(
+        hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
+    )
+    def test_musa_weight_storage_failure_removes_partial_file(self) -> None:
+        from executorch.backends.cuda.cuda_weight_collector import _materialize_storage
+
+        source = torch.ones(1001, device="musa")
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch(
+                "executorch.backends.cuda.cuda_weight_collector.snapshot_to_cpu",
+                side_effect=RuntimeError("pinned staging failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "pinned staging failed"):
+                    _materialize_storage(source, directory)
+            self.assertFalse(list(Path(directory).iterdir()))
+
+    @unittest.skipUnless(
+        hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
+    )
     def test_prefill_reference_snapshots_keep_device_cache_unchanged(self) -> None:
         from examples.musa.aoti_prefill_decode_acceptance import _check_outputs
 
@@ -270,7 +321,7 @@ class TestMusaRunner(unittest.TestCase):
             for batch in (1, 2, 3):
                 with self.subTest(batch=batch), torch.no_grad():
                     value = torch.randn(batch, 16, device="musa")
-                    expected = model(value).cpu().flatten()
+                    expected = _snapshot_tensor(model(value)).flatten()
                     _write_input(value, root / "input.bin", (3, 16))
                     _run_runner(
                         runner,
@@ -311,7 +362,7 @@ class TestMusaRunner(unittest.TestCase):
         model = nn.Linear(8, 4).eval().to("musa")
         example = torch.randn(2, 8, device="musa")
         with torch.no_grad():
-            expected = model(example).cpu().flatten()
+            expected = _snapshot_tensor(model(example)).flatten()
         exported = export(model, (example,))
         specs = [
             MusaBackend.generate_method_name_compile_spec("forward"),
@@ -386,7 +437,7 @@ class TestMusaRunner(unittest.TestCase):
                             value = torch.randn(
                                 batch, 32, 32, 32, device="musa", dtype=dtype
                             )
-                            expected = model(value).cpu().flatten()
+                            expected = _snapshot_tensor(model(value)).flatten()
                             self.assertGreater(expected.abs().max().item(), 0.1)
                             _write_input(value, root / "input.bin", (3, 32, 32, 32))
                             _run_runner(
@@ -450,7 +501,7 @@ class TestMusaRunner(unittest.TestCase):
                     for batch in (1, 2, 3):
                         with self.subTest(batch=batch), torch.no_grad():
                             value = row.repeat(batch, 1)
-                            expected = model(value).cpu().flatten()
+                            expected = _snapshot_tensor(model(value)).flatten()
                             _write_input(value, root / "input.bin", (3, row.numel()))
                             _run_runner(
                                 runner,
@@ -482,7 +533,7 @@ class TestMusaRunner(unittest.TestCase):
                         example = torch.tensor(
                             [1.0, small, 1.0, small], device="musa", dtype=dtype
                         ).reshape(shape)
-                        expected = model(example).cpu().flatten()
+                        expected = _snapshot_tensor(model(example)).flatten()
                     torch.testing.assert_close(
                         expected, torch.full_like(expected, small), atol=0, rtol=0
                     )

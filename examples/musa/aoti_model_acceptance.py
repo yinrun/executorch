@@ -38,6 +38,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.export import Dim, export
 
+from executorch.backends.aoti.host_tensor import snapshot_to_cpu as _snapshot_tensor
 from executorch.backends.musa import (
     MusaBackend,
     MusaPartitioner,
@@ -521,20 +522,6 @@ def _serialization_schema() -> Iterator[None]:
                 destination.unlink(missing_ok=True)
             else:
                 destination.write_bytes(content)
-
-
-def _snapshot_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    if tensor.device.type != "musa":
-        return tensor.detach().to(device="cpu", copy=True).contiguous()
-    with torch.musa.device(tensor.device):
-        torch.musa.synchronize(tensor.device)
-        source = tensor.detach().contiguous()
-        staging = torch.empty(
-            source.shape, dtype=source.dtype, device="cpu", pin_memory=True
-        )
-        staging.copy_(source, non_blocking=True)
-        torch.musa.synchronize(tensor.device)
-        return staging.clone()
 
 
 def _write_tensor(tensor: torch.Tensor, path: Path) -> torch.Tensor:

@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 import torch
+from executorch.backends.aoti.host_tensor import snapshot_to_cpu
 from executorch.backends.cuda.passes.lower_offgraph_kv import OFFGRAPH_KV_FQN_PREFIX
 from executorch.exir._serialize._cord import FileBackedData
 from executorch.exir._serialize._named_data_store import NamedDataStore
@@ -100,9 +101,14 @@ def _write_tensor_storage(tensor: torch.Tensor, path: str) -> bytes:
                 storage, 0, (nbytes,), (1,)
             )
             for offset in range(0, nbytes, chunk_size):
-                cpu_chunk = byte_tensor[offset : offset + chunk_size].cpu()
+                chunk = byte_tensor[offset : offset + chunk_size]
+                cpu_chunk = (
+                    snapshot_to_cpu(chunk)
+                    if tensor.device.type == "musa"
+                    else chunk.cpu()
+                )
                 write_chunk(output, memoryview(cpu_chunk.numpy()))
-            del byte_tensor, cpu_chunk
+            del byte_tensor, cpu_chunk, chunk
         elif nbytes:
             raw_array = (ctypes.c_ubyte * nbytes).from_address(storage.data_ptr())
             raw_view = memoryview(raw_array).cast("B")
