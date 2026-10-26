@@ -130,6 +130,38 @@ milliseconds; startup and individual process medians are not mixed into
 the pooled sample distribution. No speedup is implied without a comparable
 baseline using the same weights, shapes, dtypes, and measurement boundaries.
 
+### MUSA API/kernel trace
+
+On the validated MUSA System Profiler 1.9.0 installation, profile the packaged
+binary directly, not `run.sh`: the deployment launcher intentionally clears
+`LD_PRELOAD`, which can remove the profiler's injection library. For example:
+
+```bash
+PACKAGE=/tmp/musa-package
+OUTPUT=/tmp/musa-profile
+mkdir -p "$OUTPUT"
+env -i PATH=/usr/bin:/bin HOME="$OUTPUT" LD_BIND_NOW=1 \
+  LD_LIBRARY_PATH="$PACKAGE/lib:/usr/local/musa/lib" \
+  /usr/bin/msys profile --trace=musa,osrt --output="$OUTPUT/model" \
+  "$PACKAGE/bin/executor_runner" \
+  --model_path="$PACKAGE/model/model.pte" \
+  --data_path="$PACKAGE/model/model.ptd" \
+  --inputs=/tmp/model/input-0.bin --input_shapes=2x16 \
+  --musa_benchmark_output="$OUTPUT/timing.json" \
+  --musa_warmup_executions=3 --num_executions=5 \
+  --output_file="$OUTPUT/output" --print_output=none
+```
+
+Keep the profiler log, `.msys-rep`, timing JSON, and output tensors together.
+Check output accuracy after capture, and do not report instrumented latency
+as the unprofiled performance baseline. The inspected `.msys-rep` is SQLite:
+`all_events.name` references `event_names.id`; event names are not columns
+in `all_events`. Separate the measured iterations from loading, warmup and
+teardown. Host API, driver, OS wait and GPU events overlap, so their durations
+must not be added together as total inference time. The October 26 diagnostic
+and the rejected handle-cache experiment are recorded in
+`backends/musa/tests/README.md`.
+
 ## Model coverage
 
 `aoti_model_acceptance.py` exercises the complete MUSA path for these models:
@@ -167,6 +199,17 @@ baseline. The GPU random input generator is synchronized before taking an
 immutable host snapshot; eager execution and the runner read the same input.
 Without that synchronization, an odd-sized batched input produced a raw file
 with incomplete tail values even though the eager output was finite.
+
+On the observed M1000 SDK/driver stack, synchronization alone is insufficient:
+an SDK-only probe also reproduces incomplete pageable-host readbacks of
+immutable GPU data. Input/reference snapshots therefore use
+`backends/aoti/host_tensor.py`: copy into pinned CPU storage, synchronize, then
+clone into owned ordinary CPU storage. MUSA weight serialization uses the same
+helper in eight-MiB storage chunks. KV tensors reused by later eager steps
+remain on the GPU. Allocation/copy errors fail acceptance instead of falling
+back to an unsafe read or retrying a failed comparison. The C++ runtime has a
+separate pageable-D2H staging workaround; see `backends/musa/tests/README.md`
+for reproduction, costs, and the distinction from unchanged pinned transfers.
 
 Floating inputs and weights default to FP32. `--dtype fp16` or `--dtype bf16` exercises
 the same export and runner path in lower precision. The default absolute and

@@ -33,7 +33,7 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | `deployment` | Package/benchmark validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
-The five native CTest executables contain 37 GoogleTest cases. Each executable
+The five native CTest executables contain 41 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
@@ -421,3 +421,221 @@ changing those paths. The tiny-MLP result alone cannot identify the dominant
 overhead. Stateful KV-cache workloads need their own reset and workload
 protocol rather than reusing these stateless warmups. The generic EXIR/Torch
 partitioner version mismatch remains a separate compatibility task.
+
+## MLP profiling and rejected handle-cache experiment (2026-10-26)
+
+MUSA System Profiler `1.9.0-0a3ca05e9-internal-release-1.9` captured the
+accepted, runtime-only MLP FP32 package on the same M1000. Its output remains
+byte-identical to the previously accepted reference. Three warmups precede
+five profiled iterations. For this capture, the main-thread device-sync API
+events delimit preparation and execution; the extracted execution boundaries
+are checked against every corresponding runner timing sample within 0.05 ms.
+Only those five measured execution intervals are used below, not the entire
+process trace or its 573 ms profiler initialization event.
+
+Each profiled execution contains four `musaMalloc` calls and two `musaFree`
+calls. Their non-overlapping, main-thread API durations account for about
+86.8–87.8% of the 5.56–6.20 ms instrumented execution time. Source inspection
+finds that both Linear calls create and destroy a muBLAS handle on each
+invocation. The trace also contains two SGEMM kernels and two fused pointwise
+kernels per iteration. Host allocation durations and GPU kernel durations
+are separate categories, not additive components of one total.
+
+A bounded thread-local handle-cache experiment reuses a handle only for the
+same device and stream, recreates it on a device/stream switch, and destroys
+it at thread exit. It does not share a workspace across threads or rebind a
+live handle across streams. In the experimental MLP trace, steady-state
+allocation count drops from four to two and synchronous free count from two
+to zero. The five profiled execution samples fall to 0.946–1.020 ms, with
+identical final MLP outputs. These instrumented samples are diagnostic
+evidence, **not an accepted performance improvement**.
+
+The optimization fails its correctness gate and is withdrawn from the
+runtime source. The first complete native regression reports FP32 classifier
+tail zeros, and a subsequent alternating old/new-library fresh-process
+comparison reproduces the failure: the original library passes all 20
+processes; the cached library passes 19 and fails one. That failed process
+reads zero at output positions 996–999 on the second classifier execution;
+an immediate second read, without rerunning GEMM, sees the expected `2.5`,
+and the bias readback is `1`. This does not yet identify whether asynchronous
+GEMM completion, memory visibility, or readback is responsible. No retry is
+used to turn a failed comparison into a pass, and tolerances are unchanged.
+
+Other checks deliberately do not override that failure:
+
+- Thirty same-process repetitions of the three projection tests pass with
+  both old and experimental libraries.
+- Thirty repetitions of all matrix tests except the large attention-score
+  test pass with both libraries.
+- A transfer-only check reads immutable FP32 tensors of 1,000, 1,001 and
+  1,999 elements 5,000 times each, repeated ten times: all 150,000 readbacks
+  pass, without GEMM. However, a later full native run after withdrawing the
+  handle cache fails that same transfer-only check at 1,999 elements,
+  repetition 4,940, index 1,992. This reproduces tail zeros without GEMM or
+  the experimental cache; the initial passing stress run was insufficient.
+
+The retained regressions add queued calls across two nonblocking streams,
+three worker threads switching streams and exiting, and immutable tail
+readback stress. Classifier failures now retain first/second readback and
+bias-tail diagnostics while still failing on the original mismatch. Runtime
+code remains on the per-call-handle path; the separate SDK-only readback
+investigation and staging fix below address the reproduced transfer problem.
+
+Those first traces, experimental patch/binary, and comparison logs were
+captured under `/tmp/et-musa-profile-20261026`. A host restart later on October
+26 removed the temporary directories before the follow-up acceptance finished.
+The figures above are recorded observations from that earlier run, not
+currently replayable artifacts. The experimental cache is absent from the
+runtime source. New SDK-only reproduction and acceptance evidence is stored
+in the persistent workspace location below. A passing rerun does not resolve
+an earlier mismatch; the cache still needs validation with the readback fix
+before it can be enabled or advertised as a performance improvement.
+
+## Pageable-host readback isolation and staging fix (2026-10-26)
+
+`examples/musa/diagnose_readback.cpp` reproduces the issue using only MUSA SDK
+APIs, with no ExecuTorch, Torch, muBLAS, or GPU arithmetic. It uploads a
+constant FP32 tensor once, synchronizes, and repeatedly reads immutable
+device data into host memory. Every API reports success, but some ordinary
+host-buffer readbacks have zero tail values; a second read sees `2.5` without
+any device writes between them. Thus the failure can occur independently of
+the handle-cache experiment and GEMM. This isolates a transfer/visibility
+problem on the observed SDK/driver stack, not its internal vendor root cause.
+
+On M1000, driver `5.2.2-M1000`, SDK `/usr/local/musa-5.1.0`, the standalone
+probe checks 1,000, 1,001 and 1,999 FP32 elements, 100,000 copies per size:
+
+| Raw SDK mode | Copies | Failed readbacks |
+| --- | ---: | ---: |
+| Pageable host, `musaMemcpyAsync` plus stream sync | 300,000 | 0 in this run |
+| Pageable host, blocking `musaMemcpy` | 300,000 | 272, all at 1,001 elements |
+| Pinned host, async copy plus stream sync | 300,000 | 0 |
+| Pinned staging, async copy plus stream sync, then CPU byte copy | 300,000 | 0 |
+
+This table is the persistent post-restart reproduction. The earlier run
+observed 34 blocking-copy failures (23 at 1,001 elements and 11 at 1,999).
+The zero-failure async run does not invalidate the earlier native async
+failure: this is intermittent. Merely replacing async reads with the blocking
+SDK call is demonstrably insufficient. No test retries or tolerance changes
+are used to accept a failed readback.
+
+The MUSA adapter in `extension/cuda/runtime_api.h` now detects an unregistered
+host destination for explicit device-to-host copies. It copies into a pinned
+staging allocation on the requested stream, waits for that stream, and copies
+the completed bytes into the ordinary host destination before freeing the
+staging allocation. This applies to both blocking and async adapter entry
+points, so pageable D2H calls now complete synchronously. Registered/pinned
+destinations retain their original SDK path and asynchronous behavior;
+H2D, D2D, CUDA and ROCm paths are unchanged. Null pointers and zero-byte
+requests retain the original SDK validation, and allocation/copy/sync/free
+errors are propagated rather than converted into successful partial copies.
+
+The workaround temporarily needs one extra pinned buffer of the copy size
+and adds allocation/CPU-copy overhead for pageable D2H. It does not pool
+buffers or promise unchanged performance. It is a correctness workaround
+for the observed stack, not a claim that all MUSA versions or hardware share
+the issue. The raw probe deliberately bypasses the adapter so future SDK
+upgrades can be evaluated independently.
+
+Reproduce the standalone comparison:
+
+```bash
+c++ -std=c++17 -O2 examples/musa/diagnose_readback.cpp \
+  -I/usr/local/musa/include -L/usr/local/musa/lib \
+  -Wl,-rpath,/usr/local/musa/lib -lmusart -o /tmp/diagnose_readback
+for mode in pageable-async pageable-sync pinned-async pageable-staged; do
+  /tmp/diagnose_readback "$mode" 100000 > "/tmp/$mode.jsonl" 2> "/tmp/$mode.stderr"
+  echo "$mode exit=$?"
+done
+```
+
+Exit status 1 denotes an observed mismatch; 2 denotes invalid arguments or
+an SDK error. JSONL retains per-size counts, stderr records the first ten
+failures with first/second readback values. Current evidence is in
+`/home/qianfan/文档/ChatGPT/ETSupport/artifacts/musa-20261026/reports/readback-*.jsonl`
+and matching `.stderr` files. The earlier
+`/tmp/et-musa-profile-safe-native-20261026/summary.json` was a failed native
+run after withdrawing the cache, not a passing acceptance report, and was
+lost during the restart.
+
+### Python references and exported weights
+
+The C++ adapter does not intercept TorchMUSA's own copies. The shared
+`backends/aoti/host_tensor.py` snapshot helper therefore also stages MUSA
+tensors through an explicitly pinned CPU tensor, synchronizes completion,
+and clones to owned, contiguous ordinary CPU storage. It detaches autograd
+history and restores the selected device. Pin-allocation or synchronization
+failures propagate; there is no fallback to an unsafe ordinary D2H copy.
+CPU snapshots retain the previous owned-copy behavior.
+
+Model inputs, eager reference outputs, backbone diagnostics, Llama/KV and
+prefill/decode comparisons, and the runner precision tests use this helper.
+KV-cache tensors used by later eager steps remain on the device: only the
+comparison snapshots move to CPU. CPU tensor comparisons and argmax checks
+are not CPU model execution or a new accuracy baseline.
+
+MUSA weight serialization now uses the same pinned snapshot for each storage
+chunk. The existing eight-MiB chunk bound, full-storage serialization, view
+offset/stride metadata, SHA-256 digest, and failure cleanup remain unchanged.
+CUDA/ROCm weight copies retain their prior path. Tests cover a strided view
+with a nonzero offset, a 1,001-byte tail beyond an eight-MiB chunk, exact saved
+bytes/digests, and removal of the partial file if staging fails. This avoids
+protecting model outputs while leaving exported weights on the unsafe path.
+
+### Post-restart acceptance
+
+The toolchain, clean build, raw SDK reproduction, and follow-up results now
+live under the persistent directory
+`/home/qianfan/文档/ChatGPT/ETSupport/artifacts/musa-20261026`.
+`environment.sh` records the local Python, CMake, flatc, patchelf, build and
+SDK paths. Missing Python build helpers were installed into that directory,
+not into the global TorchMUSA environment. The earlier `/tmp` artifacts are
+not required to reproduce these results.
+
+| Check | Result | Evidence relative to the persistent directory |
+| --- | --- | --- |
+| Native shims and device tests | 41 cases, three complete repetitions, no skips | `reports/native/summary.json`, `reports/native/native.log` |
+| Snapshot and weight-metadata unit tests | 17 passed | `reports/weight-snapshots.log` |
+| Final runner regression | 14 passed, no skips | `reports/runner-final/summary.json`, `reports/runner-final/runner.log` |
+| Final packaging, benchmark, deployment tests | 7 + 4 + 1 passed, no skips | `reports/deployment-final/summary.json` |
+| ResNet18 BF16, random weights | Four dynamic shapes, two fresh runner processes per shape | `reports/models-final/summary.json` |
+| BF16 toy decoder caches and dynamic prefill | Rolling/growing caches, prompt lengths 2/3/4, two decode steps | `reports/stateful-final/summary.json`, `reports/stateful-final.log` |
+
+The snapshot tests are included in the runner suite; these rows must not be
+summed as distinct test coverage. The native source is unchanged from
+`064b05b72a`. Final runner acceptance includes the weight snapshot fix
+`d7af9321ba`; deployment and model acceptance also include the Buck dependency
+declaration in `47af3fdf21`. Reports record their exact revisions and dirty
+state; documentation was still being updated during those runs. Buck itself
+was not available for a build, and the weight-metadata unit tests do not
+constitute CUDA/ROCm hardware regression.
+
+The relocated deployment test runs MLP FP32 and SimpleCNN BF16 at batches
+1/2/3, with and without benchmark flags. Dynamic-loader checks reject loaded
+Torch, Python, c10 and TorchMUSA Python libraries. This validates the runtime
+package on the current host, not deployment to another GPU or SDK version.
+
+ResNet18 uses one PTE for `[2,3,64,64]`, `[1,3,48,54]`, `[3,3,80,80]`, and
+`[2,3,79,71]`. Maximum absolute output errors versus frozen MUSA eager are
+`1.9073486328125e-6`, `0`, `0`, and `0`; each independent replay has the same
+result. The original BF16 tolerances remain `atol=rtol=0.04`. Its PTE/PTD,
+frozen inputs/references, runner outputs and integrity manifest are retained
+in `reports/models-final/models/resnet18-bf16`. This is a random-weight
+functional regression, not pretrained ImageNet accuracy. The full previous
+backbone/dtype matrix has not been rerun after the readback fix.
+
+Stateful acceptance re-exports random-weight toy decoders, not a pretrained
+LLM. Rolling-cache predictions are `[3, 32]`, growing-cache predictions are
+`[40, 32]`, and all match MUSA eager exactly. Dynamic prefill predicts `16`
+for length three, `34` for length two, and `19` for length four; the subsequent
+two decode calls predict `[40, 32]`. Maximum absolute logit error across all
+these checks is `0.0078125`, with zero K/V output error. Comparisons retain
+the original BF16 tolerances and do not change the GPU caches passed to later
+eager steps. PTE/PTD, initial inputs and runner cache outputs remain under
+`reports/stateful-final`; the summary records revision `47af3fdf21` and the
+documentation-only dirty state.
+
+The next gate is to refresh the broader pretrained/dtype acceptance matrix
+with these protections, then repeat handle-reuse A/B validation and unprofiled
+benchmarks. The handle cache remains disabled. Neither the diagnostic speedup
+nor old `/tmp` evidence is an accepted performance result for the new code.
