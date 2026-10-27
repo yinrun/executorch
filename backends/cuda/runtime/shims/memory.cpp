@@ -8,6 +8,7 @@
 
 #include <c10/util/overflows.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
+#include <limits>
 #include <type_traits>
 
 #if defined(CUDA_AVAILABLE)
@@ -347,6 +348,88 @@ AOTITorchError aoti_torch_clone(SlimTensor* self, SlimTensor** ret_new_tensor) {
   return Error::Ok;
 }
 
+AOTITorchError aoti_torch__alloc_from_pool(
+    SlimTensor* self,
+    int64_t offset_bytes,
+    int32_t dtype,
+    int64_t ndim,
+    const int64_t* sizes_ptr,
+    const int64_t* strides_ptr,
+    SlimTensor** ret_new_tensor) {
+  ET_CHECK_OR_RETURN_ERROR(
+      ret_new_tensor != nullptr,
+      InvalidArgument,
+      "aoti_torch__alloc_from_pool: output handle is null");
+  *ret_new_tensor = nullptr;
+  ET_CHECK_OR_RETURN_ERROR(
+      self != nullptr && self->storage() != nullptr &&
+          self->storage_offset() == 0,
+      InvalidArgument,
+      "aoti_torch__alloc_from_pool: expected storage with zero offset");
+  ET_CHECK_OR_RETURN_ERROR(
+      ndim >= 0 && (ndim == 0 || (sizes_ptr && strides_ptr)),
+      InvalidArgument,
+      "aoti_torch__alloc_from_pool: invalid shape or strides");
+  ET_CHECK_OR_RETURN_ERROR(
+      dtype >= 0 && dtype <= static_cast<int32_t>(ScalarType::BFloat16) &&
+          c10::isValidScalarType(static_cast<ScalarType>(dtype)),
+      InvalidArgument,
+      "aoti_torch__alloc_from_pool: unsupported dtype %d",
+      dtype);
+  const auto scalar_type = static_cast<ScalarType>(dtype);
+  const size_t item_size = c10::elementSize(scalar_type);
+  auto storage = self->storage();
+  ET_CHECK_OR_RETURN_ERROR(
+      offset_bytes >= 0 &&
+          static_cast<uint64_t>(offset_bytes) % item_size == 0 &&
+          static_cast<uint64_t>(offset_bytes) <= storage->nbytes(),
+      InvalidArgument,
+      "aoti_torch__alloc_from_pool: invalid byte offset");
+  bool empty = false;
+  size_t numel = 1;
+  const auto max_numel =
+      static_cast<size_t>(std::numeric_limits<int64_t>::max()) / item_size;
+  for (int64_t dimension = 0; dimension < ndim; ++dimension) {
+    ET_CHECK_OR_RETURN_ERROR(
+        sizes_ptr[dimension] >= 0 && strides_ptr[dimension] >= 0,
+        InvalidArgument,
+        "aoti_torch__alloc_from_pool: negative size or stride");
+    empty |= sizes_ptr[dimension] == 0;
+    const auto size = static_cast<size_t>(sizes_ptr[dimension]);
+    ET_CHECK_OR_RETURN_ERROR(
+        size == 0 || numel <= max_numel / size,
+        InvalidArgument,
+        "aoti_torch__alloc_from_pool: tensor size overflows");
+    numel *= size;
+  }
+  if (!empty) {
+    const size_t available_elements =
+        (storage->nbytes() - static_cast<size_t>(offset_bytes)) / item_size;
+    ET_CHECK_OR_RETURN_ERROR(
+        available_elements > 0,
+        InvalidArgument,
+        "aoti_torch__alloc_from_pool: pool is too small");
+    size_t last_element = 0;
+    for (int64_t dimension = 0; dimension < ndim; ++dimension) {
+      const auto size = static_cast<size_t>(sizes_ptr[dimension]);
+      const auto stride = static_cast<size_t>(strides_ptr[dimension]);
+      ET_CHECK_OR_RETURN_ERROR(
+          stride == 0 ||
+              size - 1 <= (available_elements - 1 - last_element) / stride,
+          InvalidArgument,
+          "aoti_torch__alloc_from_pool: view exceeds pool storage");
+      last_element += (size - 1) * stride;
+    }
+  }
+  *ret_new_tensor = new SlimTensor(
+      std::move(storage),
+      IntArrayRef(sizes_ptr, static_cast<size_t>(ndim)),
+      IntArrayRef(strides_ptr, static_cast<size_t>(ndim)),
+      scalar_type,
+      offset_bytes / static_cast<int64_t>(item_size));
+  return Error::Ok;
+}
+
 AOTITorchError aoti_torch__reinterpret_tensor(
     SlimTensor* self,
     int64_t ndim,
@@ -378,12 +461,14 @@ AOTITorchError aoti_torch__reinterpret_tensor(
   IntArrayRef sizes(sizes_ptr, static_cast<size_t>(ndim));
   IntArrayRef strides(strides_ptr, static_cast<size_t>(ndim));
 
-  // Create a new tensor view using as_strided. This creates a tensor that
-  // shares the same underlying storage but with different sizes, strides,
-  // and storage offset. SlimTensor::as_strided() handles this via copy
-  // constructor which shares the SharedPtr<Storage>.
-  *ret_new_tensor =
-      new SlimTensor(self->as_strided(sizes, strides, storage_offset));
+  const int64_t base_offset = self->storage_offset();
+  ET_CHECK_OR_RETURN_ERROR(
+      base_offset >= 0 && storage_offset >= -base_offset &&
+          storage_offset <= std::numeric_limits<int64_t>::max() - base_offset,
+      InvalidArgument,
+      "aoti_torch__reinterpret_tensor: invalid relative storage offset");
+  *ret_new_tensor = new SlimTensor(
+      self->as_strided(sizes, strides, base_offset + storage_offset));
 
   return Error::Ok;
 }
