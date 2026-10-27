@@ -1569,8 +1569,38 @@ outputs still allocate inside the returning shim.
 Evidence is under `artifacts/musa-20261026/batchnorm-out/acceptance-v2/`;
 `summary.json` records the passed native, export, model, trace, deployment
 and runner gates. Earlier build/test-harness failures are retained outside
-that accepted run. The separate legacy-model, dynamic-spatial and balanced
-four-variant latency gates are still in progress/queued at this checkpoint;
-the default environment remains on `build-memory-planning` until that
-acceptance finishes. New out-lowered models need the prototype runner and
-its matching shim library, not the previous runtime without the new ABI.
+that accepted run. The subsequent `legacy-models/summary.json` passes all
+66 frozen-model runs. `spatial-models/summary.json` passes both pretrained
+models at 2x3x64x64, 1x3x48x54, 3x3x80x80 and 2x3x79x71, with two fresh
+processes per shape: all 16 outputs remain byte-identical to the frozen
+references.
+
+The completed `benchmark/summary.json` records four balanced-order rounds
+of the four variants below, at batch 2 and 224x224 on the same M1000. Each
+process uses 10 warmups and 50 measured forwards, giving 200 samples per
+model/variant. All 32 processes finish successfully with byte-identical
+outputs and unchanged artifact/binary hashes. No allocation interposer is
+loaded during timing.
+
+| Model | Variant | Minimum ms | Median ms |
+| --- | --- | --- | --- |
+| ResNet18 BF16 | Previous, planning disabled | 27.082 | 29.970 |
+| ResNet18 BF16 | Previous, combined pool | 16.352 | 29.279 |
+| ResNet18 BF16 | BatchNorm out, planning disabled | 13.780 | 16.790 |
+| ResNet18 BF16 | BatchNorm out, combined pool | 14.226 | 16.241 |
+| MobileNetV2 FP16 | Previous, planning disabled | 34.275 | 51.716 |
+| MobileNetV2 FP16 | Previous, combined pool | 33.576 | 51.696 |
+| MobileNetV2 FP16 | BatchNorm out, planning disabled | 27.492 | 46.314 |
+| MobileNetV2 FP16 | BatchNorm out, combined pool | 24.237 | 26.905 |
+
+Combined-pool median speedups are 1.80x and 1.92x respectively against the
+previous combined-pool artifacts. These are local forward-latency results,
+not end-to-end application throughput or a guarantee across environments.
+The reports retain per-round measurements and host snapshots; the
+MobileNetV2 unpooled variant in particular varies across rounds. Host
+affinity/governors were not changed. The separate convolution-out build
+starts only after these measurements finish.
+
+The default environment has not been promoted at this checkpoint. New
+out-lowered models require a runner and shim library exporting the matching
+out ABI, not the previous runtime without it.
