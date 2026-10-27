@@ -1500,3 +1500,19 @@ byte-identical. The reduction is **43 to 41 allocations**, not elimination
 of all intermediate allocations, and is not evidence of a latency win.
 Compiler-visible batch-norm and convolution out buffers remain the next
 substantial reuse opportunity.
+
+The final regression gate additionally passes all 16 runner tests without
+skips and all 66 frozen-model processes from the selected-stream acceptance
+matrix, including FP32/FP16/BF16 CNNs and one/five-forward invocations. Every
+checked final output is byte-identical to its frozen runner reference and
+passes the saved eager/prediction gates; intermediate forwards are not
+individually checked. Reports are
+`memory-planning/accepted/final-verification.json` and
+`memory-planning/accepted/frozen-models/summary.json`. Nine CI-driver tests
+and 15 package/benchmark tests also pass.
+
+The local `environment.sh` now selects `build-memory-planning` and preserves
+`build-storage-streams` as `POOL_BASELINE_BUILD_DIR`. This promotes the pool
+ABI and relative-view correctness fixes, not a default compiler-planning
+setting or allocator-policy change. CUDA/ROCm hardware, other SDK versions
+and a latency benefit have not been validated by this gate.
