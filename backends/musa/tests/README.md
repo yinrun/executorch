@@ -33,7 +33,7 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | `deployment` | Package/benchmark validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
-The five native CTest executables contain 41 GoogleTest cases. Each executable
+The five native CTest executables contain 42 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
@@ -478,7 +478,7 @@ The retained regressions add queued calls across two nonblocking streams,
 three worker threads switching streams and exiting, and immutable tail
 readback stress. Classifier failures now retain first/second readback and
 bias-tail diagnostics while still failing on the original mismatch. Runtime
-code remains on the per-call-handle path; the separate SDK-only readback
+code at that checkpoint remained on the per-call-handle path; the separate SDK-only readback
 investigation and staging fix below address the reproduced transfer problem.
 
 Those first traces, experimental patch/binary, and comparison logs were
@@ -637,7 +637,7 @@ documentation-only dirty state.
 
 The next gate at this checkpoint was to refresh the broader pretrained/dtype acceptance matrix
 with these protections, then repeat handle-reuse A/B validation and unprofiled
-benchmarks. The handle cache remains disabled. Neither the diagnostic speedup
+benchmarks. The handle cache was still disabled at that checkpoint. Neither the diagnostic speedup
 nor old `/tmp` evidence is an accepted performance result for the new code.
 
 ## Pretrained matrix and prediction gate (2026-10-26)
@@ -701,6 +701,125 @@ overall result in `reports/pretrained-prediction-gate/summary.json`.
 The ResNet18/MobileNetV2 pretrained precision gate is now satisfied on the
 current stack. Their retained, checksummed inputs and references can be
 used for handle-reuse A/B testing without changing weights or regenerating
-inputs. Handle reuse remains disabled pending that validation and fresh
+inputs. Handle reuse was still disabled pending that validation and fresh
 unprofiled measurements. Other backbones, another GPU/SDK, and dataset-level
 accuracy are not covered by this matrix.
+
+## Thread-local muBLAS handle reuse (2026-10-27)
+
+Commit `3faf31def4` replaces per-operation muBLAS handle creation/destruction
+with one bounded cache slot per host thread. A handle is reused only when
+both device and stream match; a change destroys the previous handle on its
+own device before creating another. Different threads never share a handle
+or its workspace. Handles use host pointer mode, retain the existing GEMM
+dtype/compute/alpha/beta choices, and are invalidated after a GEMM error.
+Thread exit destroys the retained handle. Matrix shims select the tensor's
+device for the operation and restore the caller's device afterwards.
+
+This applies to the muBLAS paths in addmm/mm and padded/transposed/broadcast
+bmm. The muDNN paths, operators' math and export format are unchanged. The
+tradeoff is that the handle/workspace stays live until a stream/device switch
+or thread exit, rather than being released after every operator. There is no
+unbounded per-stream map, process-global handle or rebinding of a live
+workspace across streams. Multi-GPU execution and device-reset scenarios
+have not been validated on this single-M1000 host.
+
+The initial native gate passes all 42 cases in each of three complete
+repetitions, without skips. Queued-call coverage now issues groups of four
+operations on the same nonblocking stream before switching, exercising
+actual reuse as well as stream changes. A new regression creates and
+destroys 16 streams within one worker thread while running FP32/FP16/BF16
+addmm and bmm. Existing coverage also exercises three worker threads,
+stream switching, thread exit and immutable readback tails.
+
+The fixed-input A/B gate alternates old/new order over 20 rounds: 40 fresh
+processes each run the three attention/classifier projection regressions,
+with all 120 case executions passing. Loader traces on the first pair verify
+that each process actually loads its intended shim library. The candidate
+then replays all six pretrained ResNet18/MobileNetV2 dtype combinations and
+the fixed MLP FP32 export: 54 fresh processes, covering all recorded dynamic
+shapes. For each shape, one process executes once and another executes five
+times; final outputs match frozen eager references and same-dtype class IDs.
+All 54 final outputs are also byte-identical to the original implementation.
+The multi-execution runs compare the final output, not every intermediate
+forward; queued native tests separately check every queued output.
+
+Persistent evidence under `artifacts/musa-20261026`:
+
+- `reports/handle-cache-native/summary.json` and `native.log` retain the clean
+  candidate build and native repetitions.
+- `reports/handle-cache-ab/summary.json` records commands, binary hashes,
+  projection logs, artifact hashes, numerical errors and prediction checks.
+- `handle-cache/validate.py` reproduces the fixed-artifact gate;
+  `handle-cache/candidate.patch` is byte-identical to the source change in
+  `3faf31def4` (SHA-256 `f919bc7d5be541a88714c9ff68067de8b4490d684a0b4e510eed57745eca3b62`).
+- The baseline `build` directory is retained unchanged; the candidate is
+  built separately in `build-handle-cache`. These are not the withdrawn
+  pre-readback-fix binaries whose `/tmp` artifacts were lost.
+
+The committed implementation also passes 16 runner tests and the 7 package,
+4 benchmark and 1 relocated-deployment tests, with no skips. The deployment
+test again exercises MLP FP32 and SimpleCNN BF16 at batches 1/2/3 without
+loading Torch/Python runtime libraries. See
+`reports/handle-cache-runner-deployment/summary.json`. No binaries were
+rebuilt between the fixed-input A/B gate and the measurements below; their
+hashes are checked before benchmarking. The local `environment.sh` now
+selects the accepted `build-handle-cache` through `BUILD_DIR`, retaining
+`BASELINE_BUILD_DIR` for the original implementation.
+
+### Unprofiled packaged measurements
+
+On the same M1000, driver `5.2.2-M1000`, SDK `/usr/local/musa-5.1.0`, five
+rounds alternate baseline/candidate process order. Every process runs ten
+unmeasured warmups and fifty measured executions. Each model/variant thus
+has 250 samples from five fresh processes, using identical packaged PTE/PTD,
+weights, frozen input bytes and shapes. Both variants use the pinned readback
+fix; only the native handle implementation/device guard differs. All thirty
+final benchmark outputs match the accepted baseline bytes. Timings include
+host dispatch and device-synchronized method execution, not process startup,
+model loading, first-use initialization or output readback.
+
+| Model | Dtype and shape | Baseline min / median (ms) | Cache min / median (ms) | Median speedup |
+| --- | --- | ---: | ---: | ---: |
+| MLP, random weights | FP32, 2x16 | 3.496562 / 4.342714 | 0.641088 / 0.681969 | 6.368x |
+| ResNet18, pretrained | BF16, 2x3x64x64 | 17.600772 / 19.083512 | 15.927030 / 16.946866 | 1.126x |
+| MobileNetV2, pretrained | FP16, 2x3x64x64 | 20.404403 / 22.088569 | 19.072427 / 20.584051 | 1.073x |
+
+The medians including input preparation are respectively
+`4.349054 -> 0.685689`, `19.117333 -> 16.971087`, and
+`22.115668 -> 20.615590` ms. The candidate's median is lower in every paired
+round for all three models, but these are workload/host-specific observations,
+not a speedup guarantee. Individual samples contain scheduling outliers;
+the table reports pooled minimum/median rather than a best round or an average
+of round medians. The CNNs here both use pretrained weights; do not compare
+their numbers directly with a historical random-weight baseline.
+
+`reports/handle-cache-benchmark/summary.json` retains all commands, package
+fingerprints, per-process summaries, pooled statistics and device snapshots.
+Subdirectories retain raw timing samples, frozen inputs/references, final
+output hashes and logs. `handle-cache/benchmark.py` reproduces the paired
+protocol. No profiler is active during these measurements, and intermediate
+timed outputs are not compared individually.
+
+### Fresh trace confirmation
+
+Separate direct-binary MLP captures, with three warmups and five measured
+executions, reproduce the allocation change. Every measured baseline
+iteration contains four `musaMalloc` and two `musaFree` calls; every cached
+iteration contains two and zero, respectively. Non-overlapping main-thread
+allocation/free API durations occupy 84.5–85.5% of the profiled baseline
+execution interval, versus 0.46–0.49% for the cache. These host intervals are
+not added to overlapping GPU/kernel or driver durations.
+
+`handle-cache/analyze_profile.py` joins the SQLite event-name table and
+derives execution intervals from the runner's synchronization boundaries.
+It verifies each of the five intervals against its corresponding timing JSON
+sample within 0.05 ms, excluding load, warmup and teardown. Both profiled
+outputs remain byte-identical to the accepted baseline. Full `.msys-rep`
+files, commands, timing/output data and analysis are retained under
+`reports/handle-cache-profile`, not `/tmp`. The profiled latencies are
+diagnostic only; the accepted speedups come from the unprofiled table above.
+
+This validates the bounded muBLAS cache on the tested stack. Further work
+should profile the remaining dispatch and muDNN costs and expand stateful
+and model/dtype coverage before extending handle reuse to other libraries.

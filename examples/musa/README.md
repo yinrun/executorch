@@ -36,6 +36,15 @@ constant itself. Stream guards accept the default stream and restore nested
 stream selections. Compiler changes are scoped to MUSA AOTI, not eager/JIT,
 CPU, CUDA, or compile-only options.
 
+The native MUSA matrix shims retain one muBLAS handle per host thread for
+repeated operations on the same device and stream. Switching either destroys
+and recreates the handle; threads never share its workspace. The handle is
+also destroyed at thread exit, so workspace can outlive an individual model
+call. This does not change model math, the muDNN paths, or PTE/PTD metadata.
+The readback staging workaround remains necessary and is independent of
+handle reuse. Correctness and performance evidence is tracked in
+`backends/musa/tests/README.md`.
+
 Export on the development machine with the normal TorchMUSA toolchain, then:
 
 ```bash
