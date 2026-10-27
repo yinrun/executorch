@@ -1643,9 +1643,38 @@ Evidence lives under `artifacts/musa-20261026/convolution-out/`.
 The initial broad compile run exposed a test-harness error when inspecting
 file-backed weight buffers, not a compilation failure. The corrected
 symbol check reads both in-memory and file-backed data; the targeted rerun
-passes. The failed run remains outside the fresh `acceptance-v2` run.
-Broad AOTI compile, fresh-model, allocation-capture, deployment and runner
-acceptance is in progress at this checkpoint. No model-level
-allocation reduction or latency gain is claimed for convolution out yet.
+passes. The following `acceptance-v2` run passes all 16 selected compile
+methods and both SimpleCNN BF16 and pretrained ResNet18 BF16 with planning
+disabled/enabled, batches 1/2/3 and two fresh processes per shape. All 12
+ResNet18 outputs are byte-identical to the frozen reference.
+
+ResNet18 allocation captures at batch 2 and 224x224 show 16 allocations per
+warmed forward without planning, down from 28 after BatchNorm out. With
+the combined pool, only one allocation remains, down from 21; the three
+measured forwards each allocate an 8,030,208-byte pool and the final output
+remains byte-identical. This is not a peak-memory or latency claim.
+
+The initial pooled trace hit the diagnostic's timing-alignment tolerance,
+not a model failure. The follow-up interposer records synchronization
+callsites: the runner's begin/pre-execute/post-execute triplet repeats once
+per iteration, while backend/TLS teardown has distinct call stacks.
+Allocation windows now require this exact repeating pattern and exclude
+warmup/teardown, instead of relying on a 50-microsecond timing match. The
+separate `trace-boundaries` capture verifies the single-allocation result.
+The failed captures are retained; `acceptance-v3` reuses the four completed
+model exports only after rechecking their artifact and runner/shim hashes,
+and continues fresh captures, MobileNetV2, deployment and runner gates.
+
+`test_musa_convolution_out.py` adds three end-to-end pooled decoder tests
+for transposed 1D/2D/3D convolution. All pass on FP32/FP16/BF16 with dynamic
+batches 1/2/3: nine exports and 27 runner processes, five forwards per
+process, with final outputs checked against same-dtype MUSA eager. They
+also check the out/pool ABI symbols and absence of the returning symbol.
+Evidence is in `decoder-models/tests.log` and `decoder-models/summary.json`.
+
+Remaining gates include 114 frozen-artifact compatibility runs (including
+BatchNorm-out and older pooled exports), dynamic spatial shapes and an
+uninstrumented balanced latency comparison against the BatchNorm-out build.
+No convolution-out latency gain is claimed before those measurements.
 Fresh exports using this lowering need `build-convolution-out` (or a newer
 matching build); the previous BatchNorm-only build lacks this new symbol.
