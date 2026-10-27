@@ -34,6 +34,8 @@ class TestModelPredictions(unittest.TestCase):
         for model_name in (
             "resnet18",
             "mobilenet_v2",
+            "mobilenet_v3_small",
+            "mobilenet_v3_large",
             "efficientnet_b0",
             "densenet121",
             "convnext_tiny",

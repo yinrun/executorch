@@ -11,6 +11,7 @@ and runner path. It is a correctness smoke test, not a benchmark. The
 ``narrow_resnet18`` model keeps the ResNet-18 block topology but uses narrow
 channels; ``resnet18`` is the standard torchvision model with optional weights.
 ``mobilenet_v2`` exercises depthwise/grouped convolutions and ReLU6;
+``mobilenet_v3_small`` and ``mobilenet_v3_large`` cover hard activations and SE.
 ``deeplabv3_mobilenet_v3_large`` covers a pretrained segmentation network.
 ``efficientnet_b0`` covers squeeze-and-excitation and SiLU blocks.
 ``densenet121`` covers dense concatenation blocks and transition pooling.
@@ -414,6 +415,13 @@ def _torchvision_mobilenet_v2() -> nn.Module:
     return mobilenet_v2(weights=None)
 
 
+def _torchvision_mobilenet_v3(large: bool) -> nn.Module:
+    from torchvision.models import mobilenet_v3_large, mobilenet_v3_small
+
+    factory = mobilenet_v3_large if large else mobilenet_v3_small
+    return factory(weights=None)
+
+
 def _torchvision_efficientnet_b0() -> nn.Module:
     from torchvision.models import efficientnet_b0
 
@@ -493,6 +501,8 @@ MODEL_FACTORIES = {
     "narrow_resnet18": (Resnet18, (1, 3, 32, 32)),
     "resnet18": (_torchvision_resnet18, (1, 3, 64, 64)),
     "mobilenet_v2": (_torchvision_mobilenet_v2, (1, 3, 64, 64)),
+    "mobilenet_v3_small": (partial(_torchvision_mobilenet_v3, False), (1, 3, 64, 64)),
+    "mobilenet_v3_large": (partial(_torchvision_mobilenet_v3, True), (1, 3, 64, 64)),
     "efficientnet_b0": (_torchvision_efficientnet_b0, (1, 3, 64, 64)),
     "densenet121": (_torchvision_densenet121, (1, 3, 64, 64)),
     "convnext_tiny": (_torchvision_convnext_tiny, (1, 3, 64, 64)),
@@ -555,6 +565,8 @@ def _check_predictions(
         in (
             "resnet18",
             "mobilenet_v2",
+            "mobilenet_v3_small",
+            "mobilenet_v3_large",
             "efficientnet_b0",
             "vit_b_16",
             "densenet121",
@@ -699,6 +711,8 @@ def export_model(
             "resnet18",
             "narrow_resnet18",
             "mobilenet_v2",
+            "mobilenet_v3_small",
+            "mobilenet_v3_large",
             "deeplabv3_mobilenet_v3_large",
             "efficientnet_b0",
             "densenet121",
@@ -712,6 +726,8 @@ def export_model(
         "bilinear_unet": 24,
         "resnet18": 48,
         "mobilenet_v2": 48,
+        "mobilenet_v3_small": 48,
+        "mobilenet_v3_large": 48,
         "deeplabv3_mobilenet_v3_large": 48,
         "efficientnet_b0": 48,
         "densenet121": 32,
@@ -724,7 +740,8 @@ def export_model(
         ):
             raise ValueError(
                 "--dynamic-spatial-max requires bilinear_unet (min=24) or "
-                "resnet18/mobilenet_v2/deeplabv3_mobilenet_v3_large/"
+                "resnet18/mobilenet_v2/mobilenet_v3_small/mobilenet_v3_large/"
+                "deeplabv3_mobilenet_v3_large/"
                 "efficientnet_b0 (min=48), "
                 "or densenet121 (min=32), "
                 "with max >= input size"
@@ -741,6 +758,8 @@ def export_model(
     if weights_path is not None and model_name not in (
         "resnet18",
         "mobilenet_v2",
+        "mobilenet_v3_small",
+        "mobilenet_v3_large",
         "deeplabv3_mobilenet_v3_large",
         "efficientnet_b0",
         "densenet121",
@@ -801,7 +820,11 @@ def export_model(
         if model_name in ("transformer_block", "causal_attention", "vit_b_16")
         else export
     )
-    if model_name in ("resnet18", "mobilenet_v2") and dynamic_spatial_max is not None:
+    if (
+        model_name
+        in ("resnet18", "mobilenet_v2", "mobilenet_v3_small", "mobilenet_v3_large")
+        and dynamic_spatial_max is not None
+    ):
         export_model_graph = export_with_musa_pooling_shapes
     exported = export_model_graph(model, (example,), dynamic_shapes=dynamic_shapes)
     compile_spec = [MusaBackend.generate_method_name_compile_spec("forward")]

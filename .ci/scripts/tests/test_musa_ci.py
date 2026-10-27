@@ -65,6 +65,8 @@ class MusaCiTest(unittest.TestCase):
         self.assertIn("executor_runner", commands["build"])
         self.assertIn("export", commands)
         self.assertIn("runner", commands)
+        self.assertIn("test_musa_activation_out", commands)
+        self.assertIn("test_musa_convolution_out", commands)
         self.assertIn("test_musa_package", commands)
         self.assertIn("test_musa_benchmark", commands)
         self.assertIn("test_musa_deployment", commands)
@@ -91,6 +93,34 @@ class MusaCiTest(unittest.TestCase):
             verification = "verify-" + name
             self.assertEqual(names[names.index(name) + 1], verification)
             self.assertTrue(commands[verification][-1].endswith("/result.json"))
+
+    def test_mobilenet_v3_models_include_spatial_and_prediction_gates(self):
+        names = (
+            "mobilenet_v3_small", "mobilenet_v3_large", "deeplabv3_mobilenet_v3_large"
+        )
+        args = self.arguments(
+            "--suite", "models", "--models", *names, "--dtypes", "fp16", "bf16",
+            "--weights", "mobilenet_v3_small", "/checkpoints/small.pth",
+        )
+        commands = dict(
+            musa_ci.commands(args, "cmake", "ctest", "flatc", "/torch/cmake")
+        )
+        for name in names:
+            for dtype in ("fp16", "bf16"):
+                command = commands[f"model-{name}-{dtype}"]
+                self.assertEqual(
+                    command[command.index("--dynamic-spatial-max") + 1], "80"
+                )
+                self.assertIn("--dynamic-batch-max", command)
+                self.assertIn(f"verify-model-{name}-{dtype}", commands)
+                if name == "mobilenet_v3_small":
+                    self.assertEqual(
+                        command[command.index("--weights") + 1],
+                        "/checkpoints/small.pth",
+                    )
+        self.assertEqual(
+            self.arguments().models, ["mlp", "simple_cnn", "resnet18", "mobilenet_v2"]
+        )
 
     def test_environment_does_not_inherit_test_filters(self):
         with patch.dict(
@@ -132,6 +162,8 @@ class MusaCiTest(unittest.TestCase):
         self.assertIn("test_musa_deployment", commands)
         self.assertNotIn("export", commands)
         self.assertFalse(any(name.startswith("model-") for name in commands))
+        self.assertNotIn("test_musa_activation_out", commands)
+        self.assertNotIn("test_musa_convolution_out", commands)
 
     def test_weights_are_forwarded_to_each_selected_dtype(self):
         args = self.arguments(

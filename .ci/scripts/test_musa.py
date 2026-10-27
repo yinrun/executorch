@@ -31,6 +31,9 @@ MODELS = (
     "efficientnet_b0",
     "densenet121",
     "convnext_tiny",
+    "mobilenet_v3_small",
+    "mobilenet_v3_large",
+    "deeplabv3_mobilenet_v3_large",
 )
 UNITTEST_DRIVER = """
 import sys
@@ -205,6 +208,14 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
                 UNITTEST_DRIVER,
                 f"backends.musa.tests.{module}",
             ]
+    if "runner" in selected:
+        for module in ("test_musa_activation_out", "test_musa_convolution_out"):
+            yield module, [
+                sys.executable,
+                "-c",
+                UNITTEST_DRIVER,
+                f"backends.musa.tests.{module}",
+            ]
     if "deployment" in selected:
         for module in ("test_musa_package", "test_musa_benchmark", "test_musa_deployment"):
             yield module, [
@@ -242,6 +253,9 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
                 if model in {
                     "resnet18",
                     "mobilenet_v2",
+                    "mobilenet_v3_small",
+                    "mobilenet_v3_large",
+                    "deeplabv3_mobilenet_v3_large",
                     "efficientnet_b0",
                     "densenet121",
                 }:

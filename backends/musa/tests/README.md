@@ -28,12 +28,12 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | --- | --- |
 | `native` | Build and CTest for addmm/BMM, convolution, BatchNorm, activation shims, native/legacy device metadata, and SlimTensor copy-stream selection |
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
-| `runner` | Frozen tensor snapshots/artifact failures, native MUSA and legacy device tags, foreign-backend rejection, plus convolution and Hardsigmoid precision through PTE/PTD and `executor_runner` |
+| `runner` | Frozen tensor snapshots/artifact failures, native MUSA and legacy device tags, foreign-backend rejection, convolution/Hardsigmoid precision, and activation/decoder output reuse through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
 | `deployment` | Package/benchmark validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
-The five native CTest executables contain 44 GoogleTest cases. Each executable
+The six native CTest executables contain 63 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
@@ -45,7 +45,9 @@ The default model matrix is MLP, SimpleCNN, ResNet18, and MobileNetV2 in FP32,
 FP16, and BF16. All use bounded dynamic batches 1/2/3, with two fresh runner
 executions per shape. ResNet18 and MobileNetV2 additionally exercise bounded
 dynamic spatial sizes. `--models` also accepts EfficientNet-B0, DenseNet121,
-and ConvNeXt-Tiny. DenseNet's spatial dimensions use multiples of eight;
+ConvNeXt-Tiny, MobileNetV3-Small/Large, and DeepLabV3-MobileNetV3-Large.
+Both MobileNetV3 classifiers and DeepLab use bounded dynamic spatial sizes.
+DenseNet's spatial dimensions use multiples of eight;
 ConvNeXt and SimpleCNN keep fixed spatial sizes. These are random-weight
 execution checks, not pretrained or dataset-level accuracy measurements.
 
@@ -1806,3 +1808,43 @@ The default environment still points to the accepted convolution-out build;
 it has not been promoted to this candidate. Fresh activation-out exports
 require the matching new runtime. Real-model allocation/latency measurements
 and broader model compatibility checks remain separate acceptance work.
+
+## MobileNetV3 acceptance entry points (2026-10-27)
+
+`aoti_model_acceptance.py` and the CI `models` suite now accept
+`mobilenet_v3_small` and `mobilenet_v3_large`, with local torchvision
+checkpoints, configurable spatial size, bounded dynamic batches/spatial
+dimensions, and strict top-1 agreement in addition to logit tolerances.
+The existing `deeplabv3_mobilenet_v3_large` exporter is also exposed through
+the CI model selector and retains its per-pixel label gate. The default
+four-model CI matrix is unchanged. The `runner` suite now also includes
+`test_musa_activation_out` and `test_musa_convolution_out` rather than leaving
+these pooled-output regressions as manual-only tests.
+
+Ten CI orchestration tests and two prediction-gate test methods passed
+(`activation-out/model-ci-final.log` and `prediction-tests.log`). The latter
+checks both new classifier names, including prediction mismatches that would
+otherwise pass the numerical tolerance.
+
+The first pretrained model comparison passed: MobileNetV3-Small FP16 at
+224x224, dynamic batches 1/2/3, two fresh processes per shape, with memory
+planning disabled. Both legacy-returning and new out-path exports pass the
+unchanged MUSA eager tolerance and top-1 checks; all six new runner outputs
+are byte-identical to the legacy outputs. The largest eager logit error in
+this configuration is `0.009765625`. This is execution parity on generated
+inputs, not ImageNet accuracy validation.
+
+Evidence lives in `activation-out/models` under the artifact root above.
+For this controlled A/B comparison, `export_variant.py` restores only the
+three activation-lowering functions directly from commit `fd5f60fa18` in
+isolated legacy-export processes. All other compiler code, model weights,
+seeds and inputs are shared. `lowering.json` records this provenance; it is
+not a claim that the entire old compiler checkout was replayed. Legacy
+exports run on `build-convolution-out`; out exports run on
+`build-activation-out`. Checkpoint URLs and SHA-256 digests are recorded in
+`activation-out/checkpoints.json`.
+
+The pooled Small, Large BF16 and DeepLab BF16 comparisons, standalone legacy
+artifact replay, allocation tracing and balanced latency measurements remain
+separate gates. The first classifier result alone does not promote the
+candidate runtime or establish a model speedup.
