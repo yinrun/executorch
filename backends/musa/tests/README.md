@@ -33,7 +33,7 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | `deployment` | Package/benchmark validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
-The five native CTest executables contain 43 GoogleTest cases. Each executable
+The five native CTest executables contain 44 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
@@ -959,3 +959,172 @@ in `reports/cnn-workspace-224`; retained-runner commands, binary hashes,
 loader traces, comparisons and native logs are in
 `reports/cnn-workspace-retained-validation/summary.json` and its directory.
 The local `environment.sh` continues selecting `build-handle-cache`.
+
+## Bounded convolution workspace reuse experiments (2026-10-27)
+
+The next experiment retains one workspace slot per host thread, capped at
+64 MiB. It is reusable only on the same device and stream with sufficient
+capacity; growth or a device/stream change retires the previous allocation.
+Larger requests use a standalone allocation freed before returning. The
+64 MiB limit bounds retained workspace per thread, not total process/device
+memory; a large standalone request may coexist with the retained slot.
+Thread exit releases the slot on its owning device. No muDNN algorithm,
+precision, weights or model artifacts change.
+
+The event-based prototype in `2653ed4927` records completion and enqueues a
+wait before reuse. This protects even against a destroyed stream's raw handle
+being recycled, but its first unprofiled gate is mixed. Five alternating
+rounds with 10 warmups/50 measured executions per process produce 250 samples
+per model/variant, using the same protocol as the earlier experiment:
+
+| Model | Dtype and shape | Baseline min / median (ms) | Event-cache min / median (ms) |
+| --- | --- | ---: | ---: |
+| MLP control | FP32, 2x16 | 0.634368 / 0.731169 | 0.627048 / 0.695588 |
+| Pretrained ResNet18 | BF16, 2x3x64x64 | 16.462847 / 18.770516 | 15.106711 / 17.740624 |
+| Pretrained MobileNetV2 | FP16, 2x3x64x64 | 18.825517 / 22.941410 | 19.500007 / 23.958801 |
+
+ResNet improves by 1.058x median but MobileNet regresses to 0.958x. The MLP
+control also varies despite not using convolution. This is not a broadly
+accepted speedup. `reports/workspace-cache-benchmark` retains all 30 runs and
+their byte-exact final output checks. Fresh traces in
+`reports/workspace-cache-profile` confirm zero workspace malloc/free calls
+after warmup, yet substantial tensor-free costs remain. Event/API and GPU
+intervals must not be added together.
+
+### Stream identity and correctness gates
+
+The follow-up uses `musaStreamGetId` with SDK headers at least 5.1.0. The
+installed SDK documents IDs as unique for the program's lifetime, unlike raw
+stream addresses. Matching device, handle and ID therefore allows same-stream
+reuse without per-convolution event commands. Eviction, thread exit and
+failed-call cleanup synchronize the owning device before freeing memory;
+they never synchronize a potentially destroyed old stream handle. If built
+with older headers, or if the runtime reports `NotSupported`, the event path
+is used instead. Other identity-query errors propagate. Older SDK builds and
+multi-GPU/device-reset behavior are not validated on this host.
+
+The standalone SDK probe verifies 1,000 unique IDs across stream creation and
+destruction. For 10,000 empty-stream API iterations, ID lookup takes 2.824 ms
+of host time versus 757.774 ms for event record/wait pairs. This is a diagnostic
+microbenchmark, not a model speedup. The installed header's event contract
+also specifies that waits capture the recorded state at call time and are
+not changed by subsequent recordings.
+
+Both prototypes pass all 44 native cases in three repetitions, without skips.
+The additional regression retains inputs/outputs while growing and shrinking
+spatial sizes (17/33/25/49/17/41/25/17), both on a stable stream and across
+stream destruction/recreation, for FP32/FP16/BF16. It checks all output values
+after completion and also exercises thread-exit cleanup.
+
+The stream-ID version passes 19 external allocator/SDK fault-injection cases:
+event fallback plus the ID path. Six equal-size requests allocate/free once;
+the forced growth sequence allocates/frees three times. Exactly 64 MiB is
+cacheable; 64 MiB plus one byte allocates/frees on all six requests and never
+creates cache events. Tracked workspace bytes reach zero at process exit.
+Single injected allocation, identity, event creation/record/wait/sync/destroy,
+free and device-synchronization errors propagate as `Error::Internal`; a
+second GoogleTest repetition in the same process succeeds. Fault cases
+intentionally produce one failed first repetition, checked by the harness.
+Forced workspace sizes are never smaller than muDNN's actual request.
+
+Evidence under `artifacts/musa-20261026` includes
+`reports/workspace-cache-native-v2`,
+`reports/workspace-cache-native-stream-id`,
+`reports/workspace-cache-faults-stream-id`, and
+`workspace-cache/probe-stream-id.log`. The interposer and reproducible gate
+are `workspace-cache/faults.cpp` and `workspace-cache/test_faults.py`.
+These fault tests validate the fallback on the current SDK, not installation
+or behavior of an older SDK. Graph capture remains unsupported by the MUSA
+backend; this experiment does not change that boundary.
+
+### Stream-ID unprofiled measurements
+
+Commit `50b806963e` selects the stream-ID path. On the same M1000 and SDK,
+five alternating paired rounds again use 10 warmups and 50 measured
+executions per process. All 30 final outputs remain byte-identical to the
+saved references. The three-model first-shape correctness smoke gate passes
+before timing; this timing gate alone does not replace the broader model
+and deployment matrix.
+
+| Model | Dtype and shape | Baseline min / median (ms) | Stream-ID cache min / median (ms) | Median speedup |
+| --- | --- | ---: | ---: | ---: |
+| MLP control | FP32, 2x16 | 0.641464 / 0.687420 | 0.612338 / 0.676605 | 1.016x |
+| Pretrained ResNet18 | BF16, 2x3x64x64 | 16.068228 / 16.784857 | 14.026851 / 14.677700 | 1.144x |
+| Pretrained MobileNetV2 | FP16, 2x3x64x64 | 18.776112 / 20.202919 | 17.522109 / 19.354622 | 1.044x |
+
+Both CNNs improve in every paired round. MLP remains a non-convolution
+control, and the measured variation there is not a cache-induced speedup.
+Timings are pooled device-synchronized method execution, not startup, load,
+first-use initialization, readback or 224x224 inference. The baseline already
+contains the accepted muBLAS cache and pinned readback fix. See
+`reports/workspace-cache-smoke-stream-id` and
+`reports/workspace-cache-benchmark-stream-id` for commands, hashes, exact
+output checks and raw timing samples. These are host/workload-specific
+measurements, not a performance guarantee across models or SDKs.
+
+### Full gates and 224x224 measurements
+
+The committed stream-ID implementation passes the full frozen matrix:
+54 fresh runner processes across all six pretrained ResNet18/MobileNetV2
+FP32/FP16/BF16 combinations and MLP FP32, with every recorded dynamic shape
+and one/five forwards per process. All final outputs are byte-identical to
+the retained baseline and pass eager-reference and applicable prediction
+checks. Three additional fresh convolution processes pass all 13 cases.
+The 224x224 gate replays ResNet18 BF16 and MobileNetV2 FP16 at batches 1/2/3
+in 12 fresh processes with one/five forwards, again byte-exact to the prior
+accepted outputs. All 44 native cases additionally pass three repetitions
+in that gate. Runner/package/benchmark/relocated-deployment tests pass
+16/7/4/1 methods without skips. See `reports/workspace-cache-full-stream-id`,
+`reports/workspace-cache-224-stream-id`, and
+`reports/workspace-cache-deployment-stream-id`.
+
+A separate 224x224 A/B measurement uses the same frozen exports and the same
+five-round, 10-warmup/50-measured protocol, retaining 250 samples per variant:
+
+| Model | Dtype and shape | Baseline min / median (ms) | Stream-ID cache min / median (ms) | Median speedup |
+| --- | --- | ---: | ---: | ---: |
+| MLP control | FP32, 2x16 | 0.604570 / 0.662511 | 0.626850 / 0.679031 | 0.976x |
+| Pretrained ResNet18 | BF16, 2x3x224x224 | 21.885440 / 22.539007 | 18.160540 / 18.977291 | 1.188x |
+| Pretrained MobileNetV2 | FP16, 2x3x224x224 | 35.275338 / 36.923062 | 32.480695 / 33.743177 | 1.094x |
+
+MobileNet improves in all five paired rounds. ResNet improves in three:
+its candidate process medians are 23.715, 18.764, 23.725, 18.772 and 18.895 ms,
+versus baseline medians 22.748, 22.477, 22.415, 22.483 and 22.867 ms. Thus the
+pooled 1.188x is not a consistent per-process speedup: two rounds regress and
+the candidate p90 is slightly higher (24.328 versus 24.043 ms). No slow rounds
+are discarded. The cause of this process-to-process variation is not yet
+isolated. MLP's control variation is not attributed to the convolution cache.
+All 30 final outputs are byte-identical to the references; raw samples,
+package/binary hashes, commands and device snapshots are retained in
+`reports/workspace-cache-benchmark-224`.
+
+The source/runtime change is accepted on this tested stack with that explicit
+224x224 ResNet variability limitation. The local `environment.sh` selects
+`build-workspace-cache-stream-id`; `WORKSPACE_BASELINE_BUILD_DIR` retains
+`build-handle-cache`, and `BASELINE_BUILD_DIR` still retains the original
+pre-muBLAS-cache implementation. No validated build directory is overwritten.
+
+### Trace confirmation and remaining work
+
+Every measured 64x64 ResNet trace contains 43 mallocs, zero synchronous frees,
+43 async frees, 20 stream-ID lookups and zero stream waits; MobileNet contains
+106/0/106 allocations/frees, 35 ID lookups and zero waits. Each method still
+has one non-workspace event record. Compared with the event-cache prototype,
+20/35 per-convolution record/wait pairs disappear. Tensor allocation/free
+costs remain; this is not an allocation-free runtime.
+
+`reports/workspace-cache-profile-stream-id` retains traces and verified final
+outputs. The first analyzer rejected the additional warmup-growth and
+thread-exit device synchronizations; that failed `analysis.json` is retained.
+The corrected `analysis-timing-matched.json` uniquely aligns all five measured
+intervals to runner timings within 0.05 ms and excludes extra warmup/teardown
+events. It finds four/two extra pre-measurement syncs for ResNet/MobileNet and
+two teardown syncs each. The correction changes trace attribution only, not
+runtime code, timing data or acceptance tolerances.
+
+Next work should isolate 224x224 ResNet process variability, expand standard
+resolution/dtype performance coverage, and investigate the remaining tensor
+allocator costs. Retention is per thread, with no public cache-trim API;
+large thread counts, memory pressure, other GPUs/SDKs and device reset require
+separate validation. The event fallback has correctness coverage on this
+stack but no accepted general speedup claim.
