@@ -26,7 +26,7 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 
 | Suite | Coverage |
 | --- | --- |
-| `native` | Build and CTest for addmm/BMM, convolution, BatchNorm, activation shims, and native/legacy device metadata |
+| `native` | Build and CTest for addmm/BMM, convolution, BatchNorm, activation shims, native/legacy device metadata, and SlimTensor copy-stream selection |
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
 | `runner` | Frozen tensor snapshots/artifact failures, native MUSA and legacy device tags, foreign-backend rejection, plus convolution and Hardsigmoid precision through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
@@ -1319,3 +1319,89 @@ The next allocator experiment must preserve or explicitly establish allocation,
 copy and destruction dependencies, and compare a private pool's retention
 policy against the default pool on actual models. Neither simply selecting an
 async API nor the standalone pool probe establishes a faster, safe allocator.
+
+### Private-pool retention follow-up
+
+A process-local interposer redirects the rejected async-allocation trial's
+`musaMallocAsync` calls into a private device pool. It verifies the stream's
+device, changes only that private pool's release threshold, and checks pool
+counters and the unchanged default-pool threshold. Zero and 64 MiB retention
+both pass the queued storage test three times (216 allocations per process).
+
+The initial global-destructor cleanup ran after SDK shutdown and reported
+error 3; an `atexit` variant crashed at shutdown. The final diagnostic invokes
+cleanup after application `main` returns but before global teardown. It checks
+device synchronization, zero live allocations, trimming to zero and pool
+destruction. This Linux-only interposition technique is diagnostic tooling,
+not a production lifecycle implementation; a future allocator needs explicit
+ownership/teardown while the SDK is still alive.
+
+Sixteen fresh model processes compare retained synchronous allocation,
+default-pool async allocation, private zero retention and private 64 MiB
+retention. Each model has two rounds in opposite variant order, ten warmups
+and 50 measured calls per process, at 2x3x224x224. All final outputs match
+the frozen references byte-for-byte. Pooled minimum/median times are:
+
+| Allocation variant | ResNet18 BF16 (ms) | MobileNetV2 FP16 (ms) |
+| --- | ---: | ---: |
+| Retained synchronous allocation | 18.571 / 20.572 | 32.628 / 34.610 |
+| Default-pool async trial | 20.256 / 22.248 | 37.862 / 44.126 |
+| Private pool, zero retention | 20.206 / 22.285 | 38.315 / 44.122 |
+| Private pool, 64 MiB retention | 20.080 / 23.229 | 37.791 / 43.349 |
+
+The second round is slower across variants; these limited, variable diagnostic
+runs are not a stable speedup estimate. Private-pool variants also include
+interposer bookkeeping, unlike the two controls. Retention has not shown
+sufficient benefit to adopt it. For each private-pool ResNet/MobileNet process,
+2,580/6,360 allocations succeed. The retained pool holds 32/64 MiB at cleanup,
+respectively; all pools report zero used bytes, zero reserved after trimming
+and successful cleanup. Default-pool thresholds remain zero. No pool option
+is enabled in the production backend.
+
+`reports/storage-private-pool-diagnostic` contains all 16 process reports,
+raw timings, byte-exact outputs and cleanup counters.
+`resnet-variance/private_pool.cpp`, `pool_models.py` and `pool-device-v3-*.log`
+retain the final interposer, driver and primitive tests. Earlier cleanup
+failures remain in `pool-device-*.log` and `pool-device-v2-*.log`.
+
+### MUSA selected-stream blocking copies
+
+The stream audit finds a separate correctness gap: SlimTensor allocation and
+operator dispatch use the internally selected stream, but blocking storage
+copies previously used only `CallerStreamGuard` or the default stream. With
+a nonblocking internal stream, default-stream copies do not establish the
+required ordering with work on that selected stream.
+
+For MUSA, `DeviceTraits::memcpy` now selects an explicit caller stream first,
+then the GPU device's existing internally selected stream, and otherwise
+retains the default-stream fallback. It enqueues the copy and synchronizes
+the selected stream to preserve blocking semantics. Looking up the internal
+stream does not create one. Explicit default-stream selections remain distinct
+from an absent selection. The pinned-readback workaround and synchronous
+SlimTensor allocation remain enabled; CUDA/ROCm selection behavior is unchanged.
+
+`test_musa_storage` adds three cases covering H2D, D2D, D2H and scalar readback,
+both native and legacy device tags, nested caller-stream priority (including
+an explicit default stream), and selected/default/unset states. Test-local
+SDK forwarding wrappers record the actual copy API and stream, excluding
+nested SDK implementation calls. All three cases fail against the old copy
+selection and pass three repetitions after the fix. This proves routing and
+returned values, not a reproduction of every possible stale-read race.
+
+The new target is included in the native CI driver. A fresh build passes all
+48 native cases three times without skips, and the nine CI-driver unit tests
+pass. A final rebuild repeats the same gate in
+`reports/storage-stream-native-final`; source change `2edc386d27` contains
+the routing fix and CI coverage. Evidence is in `reports/storage-stream-native`,
+`resnet-variance/storage-before-final-test.log`, `storage-after-test.log` and
+`storage-stream-ci-unit.log`. This fix does not itself make arbitrary
+cross-stream tensor sharing safe or resolve the rejected async allocator's
+raw-copy convolution-test failure.
+
+The 66-process frozen-model validation is tracked separately in
+`reports/storage-stream-models/summary.json`; its status must be `passed`
+before treating that matrix as accepted. The existing environment selection
+is kept until that gate completes. `resnet-variance/validate_storage_streams.py`
+checks all saved numerical/prediction tolerances and exact output bytes;
+`audit_storage_streams.py` combines the native and model gates and fingerprints
+the committed sources and tested binaries.
