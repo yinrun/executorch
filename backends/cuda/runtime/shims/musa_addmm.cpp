@@ -45,9 +45,70 @@ AOTITorchError check_mublas(mublasStatus status, const char* operation) {
   return Error::Internal;
 }
 
-AOTITorchError check_mudnn(
-    ::musa::dnn::Status status,
-    const char* operation) {
+class MusaBlasHandleCache {
+ public:
+  MusaBlasHandleCache() = default;
+  MusaBlasHandleCache(const MusaBlasHandleCache&) = delete;
+  MusaBlasHandleCache& operator=(const MusaBlasHandleCache&) = delete;
+
+  ~MusaBlasHandleCache() {
+    reset();
+  }
+
+  Result<mublasHandle_t> get(int device, cudaStream_t stream) {
+    if (handle_ != nullptr && device_ == device && stream_ == stream) {
+      return handle_;
+    }
+    ET_CHECK_OK_OR_RETURN_ERROR(reset());
+    auto guard = CUDAGuard::create(device);
+    ET_CHECK_OK_OR_RETURN_ERROR(guard.error());
+    auto error = check_mublas(mublasCreate(&handle_), "mublasCreate");
+    if (error != Error::Ok) {
+      handle_ = nullptr;
+      return error;
+    }
+    device_ = device;
+    stream_ = stream;
+    error = check_mublas(
+        mublasSetStream(handle_, reinterpret_cast<MUstream>(stream)),
+        "mublasSetStream");
+    if (error == Error::Ok) {
+      error = check_mublas(
+          mublasSetPointerMode(handle_, MUBLAS_POINTER_MODE_HOST),
+          "mublasSetPointerMode");
+    }
+    if (error != Error::Ok) {
+      reset();
+      return error;
+    }
+    return handle_;
+  }
+
+  Error reset() {
+    if (handle_ == nullptr) {
+      return Error::Ok;
+    }
+    auto guard = CUDAGuard::create(device_);
+    ET_CHECK_OK_OR_RETURN_ERROR(guard.error());
+    const auto previous = handle_;
+    handle_ = nullptr;
+    device_ = -1;
+    stream_ = nullptr;
+    return check_mublas(mublasDestroy(previous), "mublasDestroy");
+  }
+
+ private:
+  mublasHandle_t handle_ = nullptr;
+  int device_ = -1;
+  cudaStream_t stream_ = nullptr;
+};
+
+MusaBlasHandleCache& mublas_handle_cache() {
+  thread_local MusaBlasHandleCache cache;
+  return cache;
+}
+
+AOTITorchError check_mudnn(::musa::dnn::Status status, const char* operation) {
   if (status == ::musa::dnn::Status::SUCCESS) {
     return Error::Ok;
   }
@@ -205,6 +266,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       NotSupported,
       "MUSA addmm dimensions exceed mublas limits");
 
+  auto device_guard = CUDAGuard::create(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
   auto stream_result = getCurrentCUDAStream(out->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   cudaStream_t stream = stream_result.get();
@@ -228,31 +291,14 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
         stream));
   }
 
-  const bool use_mublas =
-      ((dtype == ScalarType::BFloat16 && m <= 8) || mat1_padded_rows ||
-       mat1_broadcast_row) &&
+  const bool use_mublas = ((dtype == ScalarType::BFloat16 && m <= 8) ||
+                           mat1_padded_rows || mat1_broadcast_row) &&
       (beta == 0.0 || beta == 1.0);
   if (use_mublas) {
-    mublasHandle_t handle = nullptr;
-    AOTITorchError error =
-        check_mublas(mublasCreate(&handle), "mublasCreate");
-    if (error != Error::Ok) {
-      return error;
-    }
-    error = check_mublas(
-        mublasSetStream(handle, reinterpret_cast<MUstream>(stream)),
-        "mublasSetStream");
-    if (error != Error::Ok) {
-      mublasDestroy(handle);
-      return error;
-    }
-    error = check_mublas(
-        mublasSetPointerMode(handle, MUBLAS_POINTER_MODE_HOST),
-        "mublasSetPointerMode");
-    if (error != Error::Ok) {
-      mublasDestroy(handle);
-      return error;
-    }
+    auto& cache = mublas_handle_cache();
+    auto handle_result = cache.get(out->device_index(), stream);
+    ET_CHECK_OK_OR_RETURN_ERROR(handle_result.error());
+    const auto handle = handle_result.get();
 
     const float alpha_float = static_cast<float>(alpha);
     const float beta_float = static_cast<float>(beta);
@@ -301,7 +347,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
           stream));
     }
 
-    error = check_mublas(
+    const auto error = check_mublas(
         mublasGemmEx(
             handle,
             mat2_operation,
@@ -323,9 +369,10 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
             compute_type,
             MUBLAS_GEMM_DEFAULT),
         "mublasGemmEx");
-    const AOTITorchError destroy_error =
-        check_mublas(mublasDestroy(handle), "mublasDestroy");
-    return error == Error::Ok ? destroy_error : error;
+    if (error != Error::Ok) {
+      cache.reset();
+    }
+    return error;
   }
 
   ::musa::dnn::Handle handle(out->device_index());
@@ -481,14 +528,15 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
           out->device_index() == mat2->device_index(),
       InvalidArgument,
       "MUSA bmm tensors must use the same device");
+  auto device_guard = CUDAGuard::create(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
   auto stream_result = getCurrentCUDAStream(out->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   cudaStream_t stream = stream_result.get();
 
-  if (batch > 0 && m > 0 && k > 0 && n > 0 &&
-      mat1_strides[1] > 0 && mat2_strides[1] > 0 &&
-      mat1_strides[0] == m * k && mat2_strides[0] == k * n &&
-      out->strides()[0] == m * n) {
+  if (batch > 0 && m > 0 && k > 0 && n > 0 && mat1_strides[1] > 0 &&
+      mat2_strides[1] > 0 && mat1_strides[0] == m * k &&
+      mat2_strides[0] == k * n && out->strides()[0] == m * n) {
     ::musa::dnn::Handle handle(out->device_index());
     AOTITorchError error =
         check_mudnn(handle.SetStream(stream), "Handle.SetStream");
@@ -542,25 +590,11 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
         operation.Run(handle, output, left, right), "BatchMatMul.Run");
   }
 
-  mublasHandle_t handle = nullptr;
-  AOTITorchError error = check_mublas(mublasCreate(&handle), "mublasCreate");
-  if (error != Error::Ok) {
-    return error;
-  }
-  error = check_mublas(
-      mublasSetStream(handle, reinterpret_cast<MUstream>(stream)),
-      "mublasSetStream");
-  if (error != Error::Ok) {
-    mublasDestroy(handle);
-    return error;
-  }
-  error = check_mublas(
-      mublasSetPointerMode(handle, MUBLAS_POINTER_MODE_HOST),
-      "mublasSetPointerMode");
-  if (error != Error::Ok) {
-    mublasDestroy(handle);
-    return error;
-  }
+  auto& cache = mublas_handle_cache();
+  auto handle_result = cache.get(out->device_index(), stream);
+  ET_CHECK_OK_OR_RETURN_ERROR(handle_result.error());
+  const auto handle = handle_result.get();
+  AOTITorchError error = Error::Ok;
 
   const float alpha_float = 1.0f;
   const float beta_float = 0.0f;
@@ -624,9 +658,10 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
     }
   }
 
-  const AOTITorchError destroy_error =
-      check_mublas(mublasDestroy(handle), "mublasDestroy");
-  return error == Error::Ok ? destroy_error : error;
+  if (error != Error::Ok) {
+    cache.reset();
+  }
+  return error;
 }
 
 } // extern "C"

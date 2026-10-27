@@ -443,7 +443,7 @@ TEST_F(MusaAddmmTest, BlasQueuedCallsAcrossStreams) {
       ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
       for (size_t index = 0; index < outputs.size(); ++index) {
         ASSERT_EQ(
-            setCurrentCUDAStream(streams[index % streams.size()], 0),
+            setCurrentCUDAStream(streams[(index / 4) % streams.size()], 0),
             Error::Ok);
         ASSERT_EQ(
             aoti_torch_musa_addmm_out(
@@ -505,8 +505,31 @@ TEST_F(MusaAddmmTest, BlasHandleStreamSwitchAndThreadExit) {
   }
 }
 
+TEST_F(MusaAddmmTest, BlasStreamRecreation) {
+  std::thread worker([] {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    for (int repeat = 0; repeat < 16; ++repeat) {
+      cudaStream_t stream = nullptr;
+      ASSERT_EQ(
+          musaStreamCreateWithFlags(&stream, musaStreamNonBlocking),
+          musaSuccess);
+      ASSERT_EQ(setCurrentCUDAStream(stream, 0), Error::Ok);
+      for (auto dtype :
+           {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+        run_addmm(dtype, repeat % 2 == 0, false, true);
+        run_bmm(dtype, true, true, false);
+      }
+      EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+      clearCurrentCUDAStream(0);
+      EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+    }
+  });
+  worker.join();
+}
+
 TEST_F(MusaAddmmTest, AddmmDtypesAndTransposedMat2) {
-  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+  for (ScalarType dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     run_addmm(dtype, false);
     run_addmm(dtype, true);
     run_addmm(dtype, false, true);
