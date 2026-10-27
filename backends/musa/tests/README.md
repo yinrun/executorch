@@ -1398,10 +1398,32 @@ the routing fix and CI coverage. Evidence is in `reports/storage-stream-native`,
 cross-stream tensor sharing safe or resolve the rejected async allocator's
 raw-copy convolution-test failure.
 
-The 66-process frozen-model validation is tracked separately in
-`reports/storage-stream-models/summary.json`; its status must be `passed`
-before treating that matrix as accepted. The existing environment selection
-is kept until that gate completes. `resnet-variance/validate_storage_streams.py`
-checks all saved numerical/prediction tolerances and exact output bytes;
-`audit_storage_streams.py` combines the native and model gates and fingerprints
-the committed sources and tested binaries.
+The frozen-model gate now passes all 66 fresh runner processes. This comprises
+54 MLP FP32 and pretrained ResNet18/MobileNetV2 FP32/FP16/BF16 processes using
+the saved dynamic-shape cases, plus 12 ResNet18 BF16/MobileNetV2 FP16 processes
+at 224x224 with batches 1/2/3. Each case runs one or five forwards; each final
+output is byte-identical to the previously accepted runner reference and also
+passes the saved MUSA-eager numerical/prediction checks. This does not check
+every intermediate output of the five-forward executions or dataset accuracy.
+
+The delivery gate also passes all 16 runner regressions, seven package tests,
+eight benchmark tests and the relocated deployment test, without skips. The
+runner gate includes fresh export/compile checks for convolution-bias,
+depthwise-convolution and Hardsigmoid rounding plus native/legacy metadata.
+The deployment test re-exports MLP FP32 and SimpleCNN BF16, relocates their
+packages and runs batches 1/2/3 without Torch/Python runtime dependencies.
+
+Evidence is retained in `reports/storage-stream-models/summary.json`,
+`reports/storage-stream-delivery/summary.json` and
+`reports/storage-stream-acceptance.json`. The final audit verifies committed
+source fingerprints, unchanged runtime binaries, all 48 native cases repeated
+three times, and all 66 frozen output comparisons.
+`resnet-variance/validate_storage_streams.py`, `verify_storage_delivery.py` and
+`audit_storage_streams.py` retain the validation drivers.
+
+The local `artifacts/musa-20261026/environment.sh` now selects
+`build-storage-streams` for subsequent work and preserves
+`build-workspace-cache-stream-id` as `STORAGE_BASELINE_BUILD_DIR`. Historical
+builds, packages and reference outputs are not overwritten. This accepts the
+selected-stream correctness fix, not an allocator performance improvement;
+the rejected async/default-pool/private-pool trials remain disabled.
