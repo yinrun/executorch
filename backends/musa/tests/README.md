@@ -1601,7 +1601,7 @@ MobileNetV2 unpooled variant in particular varies across rounds. Host
 affinity/governors were not changed. The separate convolution-out build
 starts only after these measurements finish.
 
-The default environment has not been promoted at this checkpoint. New
+At the BatchNorm-only checkpoint, the default environment was not promoted. New
 out-lowered models require a runner and shim library exporting the matching
 out ABI, not the previous runtime without it.
 
@@ -1695,11 +1695,57 @@ process, with final outputs checked against same-dtype MUSA eager. They
 also check the out/pool ABI symbols and absence of the returning symbol.
 Evidence is in `decoder-models/tests.log` and `decoder-models/summary.json`.
 
-The 114 frozen-artifact compatibility runs (including BatchNorm-out and
-older pooled exports) are now running, followed by dynamic spatial shapes and an
-uninstrumented balanced latency comparison against the BatchNorm-out build.
-The queued final audit also rechecks saved outputs, manifests, binaries and
-all 32 benchmark processes. No convolution-out latency gain is claimed
-before those measurements; the default environment has not been promoted.
-Fresh exports using this lowering need `build-convolution-out` (or a newer
-matching build); the previous BatchNorm-only build lacks this new symbol.
+The subsequent acceptance is complete. All 114 frozen-artifact runs across
+17 manifests, including BatchNorm-out and older pooled exports, are
+byte-identical. Both pretrained models pass pooled dynamic spatial tests
+at 2x3x64x64, 1x3x48x54, 3x3x80x80 and 2x3x79x71, with two processes per
+shape: all 16 outputs are byte-identical to the frozen references.
+
+The uninstrumented benchmark compares the accepted BatchNorm-out build
+against convolution out within the same four balanced-order rounds. Each
+process uses 10 warmups and 50 measured forwards at batch 2 and 224x224,
+giving 200 samples per model/variant. All 32 processes finish successfully
+with byte-identical outputs and unchanged binary/artifact hashes.
+
+| Model | Build / planning | Minimum ms | Median ms |
+| --- | --- | --- | --- |
+| ResNet18 BF16 | BatchNorm out / disabled | 19.485 | 31.554 |
+| ResNet18 BF16 | BatchNorm out / combined | 17.811 | 28.895 |
+| ResNet18 BF16 | Convolution out / disabled | 17.896 | 29.251 |
+| ResNet18 BF16 | Convolution out / combined | 11.969 | 14.589 |
+| MobileNetV2 FP16 | BatchNorm out / disabled | 35.683 | 54.532 |
+| MobileNetV2 FP16 | BatchNorm out / combined | 33.267 | 51.402 |
+| MobileNetV2 FP16 | Convolution out / disabled | 37.752 | 46.942 |
+| MobileNetV2 FP16 | Convolution out / combined | 14.183 | 19.986 |
+
+The combined-pool variants are faster in every paired round, with aggregate
+median speedups of 1.98x and 2.57x respectively. These are local
+host-synchronized method timings, not application throughput guarantees.
+There is appreciable variation: ResNet18's pooled per-round medians range
+from 13.917 to 23.014 ms; without pooling, its small aggregate improvement
+is not consistent in every round.
+
+All before/after host snapshots in this benchmark record launcher CPU
+affinity 0-3, whereas the earlier BatchNorm benchmark recorded 0-11. The
+baseline binaries and model/input paths are verified identical between
+the two campaigns, but host conditions differ. Do not compare their
+absolute timings directly or multiply their speedup ratios. No affinity
+or governor settings are changed by these tests; snapshots also retain
+unreadable frequency-policy entries as errors rather than inventing values.
+
+`final-verification.json` passes an independent recheck of native XML,
+cached validation logs, all six model manifests, pretrained outputs, 114
+compatibility outputs, 16 dynamic-spatial outputs, binary hashes, and all
+32 benchmark processes and aggregate samples. Earlier failed diagnostic
+runs remain preserved outside the accepted checkpoint.
+
+The local `environment.sh` now selects `build-convolution-out` and retains
+the previous builds as `MEMORY_PLANNING_BASELINE_BUILD_DIR` and
+`BATCHNORM_BASELINE_BUILD_DIR`. `promotion-smoke/summary.json` confirms
+dependency resolution against the new shim libraries and byte-identical
+ResNet18/MobileNetV2 outputs after five forwards each using the promoted
+runner. Compiler memory planning remains disabled by default; for the
+validated pooled path, opt in with `TORCHINDUCTOR_MEMORY_PLANNING=1` and
+`TORCHINDUCTOR_MEMORY_POOL=combined` during export. Fresh convolution-out
+exports require this build or a newer matching runtime; the previous
+BatchNorm-only build lacks the new symbol.
