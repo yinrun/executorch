@@ -28,6 +28,15 @@ using MusaBatchNormTensorHandle = SlimTensor*;
 
 extern "C" {
 
+MUSA_BATCH_NORM_EXPORT MusaBatchNormError aoti_torch_musa_batch_norm_out(
+    MusaBatchNormTensorHandle output,
+    MusaBatchNormTensorHandle input,
+    MusaBatchNormTensorHandle weight,
+    MusaBatchNormTensorHandle bias,
+    MusaBatchNormTensorHandle running_mean,
+    MusaBatchNormTensorHandle running_var,
+    double eps);
+
 MUSA_BATCH_NORM_EXPORT MusaBatchNormError aoti_torch_musa_batch_norm(
     MusaBatchNormTensorHandle input,
     MusaBatchNormTensorHandle weight,

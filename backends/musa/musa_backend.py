@@ -121,6 +121,58 @@ except AttributeError:
     )
     _musa_batch_norm_library.impl("batch_norm", _musa_batch_norm_meta, "Meta")
     _MUSA_BATCH_NORM = torch.ops.executorch_musa.batch_norm.default
+
+
+def _musa_batch_norm_out_meta(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    eps: float,
+    *,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    torch._check(out.shape == input.shape)
+    torch._check(out.dtype == input.dtype)
+    torch._check(out.device == input.device)
+    torch._check(out.is_contiguous())
+    return out
+
+
+def _musa_batch_norm_out_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    eps: float,
+    *,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    _musa_batch_norm_out_meta(
+        input, weight, bias, running_mean, running_var, eps, out=out
+    )
+    return out.copy_(
+        _musa_batch_norm_impl(input, weight, bias, running_mean, running_var, eps)
+    )
+
+
+try:
+    _MUSA_BATCH_NORM_OUT = torch.ops.executorch_musa.batch_norm.out
+except AttributeError:
+    _musa_batch_norm_library.define(
+        "batch_norm.out(Tensor input, Tensor weight, Tensor bias, "
+        "Tensor running_mean, Tensor running_var, float eps, "
+        "*, Tensor(a!) out) -> Tensor(a!)"
+    )
+    _musa_batch_norm_library.impl(
+        "batch_norm.out", _musa_batch_norm_out_impl, "PrivateUse1"
+    )
+    _musa_batch_norm_library.impl("batch_norm.out", _musa_batch_norm_out_meta, "Meta")
+    _MUSA_BATCH_NORM_OUT = torch.ops.executorch_musa.batch_norm.out
+
+
 _MUSA_BATCH_NORM_HEADER = os.path.abspath(
     os.path.join(
         os.path.dirname(__file__),
@@ -338,13 +390,13 @@ def _lower_musa_batch_norm(
         ir.FlexibleLayout.contiguous_strides(input.get_size()),
     )
     return ir.TensorBox.create(
-        ir.ExternKernelAlloc(
+        ir.ExternKernelOut(
             layout=layout,
             inputs=[input, weight, bias, running_mean, running_var],
             constant_args=[eps],
-            python_kernel_name="executorch_musa.batch_norm",
-            cpp_kernel_name="aoti_torch_musa_batch_norm",
-            op_overload=_MUSA_BATCH_NORM,
+            python_kernel_name="executorch_musa.batch_norm.out",
+            cpp_kernel_name="aoti_torch_musa_batch_norm_out",
+            op_overload=_MUSA_BATCH_NORM_OUT,
         )
     )
 
@@ -554,6 +606,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_bmm_out": None,
             "aoti_torch_musa_convolution": None,
             "aoti_torch_musa_batch_norm": None,
+            "aoti_torch_musa_batch_norm_out": None,
             "aoti_torch_musa_hardswish": None,
             "aoti_torch_musa_hardsigmoid": None,
         }

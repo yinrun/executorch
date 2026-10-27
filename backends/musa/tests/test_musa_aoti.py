@@ -137,12 +137,62 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertIn("aoti_torch_musa_bmm_out", fallbacks)
         self.assertIn("aoti_torch_musa_convolution", fallbacks)
         self.assertIn("aoti_torch_musa_batch_norm", fallbacks)
+        self.assertIn("aoti_torch_musa_batch_norm_out", fallbacks)
         self.assertIn("aoti_torch_musa_hardswish", fallbacks)
         self.assertIn("aoti_torch_musa_hardsigmoid", fallbacks)
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+
+    def test_batch_norm_out_memory_planning_compile(self) -> None:
+        module = nn.BatchNorm2d(4).eval().to("musa", dtype=torch.bfloat16)
+        example = torch.randn(2, 4, 8, 8, device="musa", dtype=torch.bfloat16)
+        with torch._inductor.config.patch(memory_planning=True, memory_pool="combined"):
+            result = MusaBackend.preprocess(
+                export(module, (example,)),
+                [MusaBackend.generate_method_name_compile_spec("forward")],
+            )
+        for symbol in (
+            b"aoti_torch_musa_batch_norm_out\0",
+            b"aoti_torch__alloc_from_pool\0",
+        ):
+            self.assertTrue(
+                any(
+                    symbol in bytes(buffer)
+                    for buffer in result.data_store_output.buffers
+                ),
+                symbol,
+            )
+
+    def test_batch_norm_out_python_dispatch(self) -> None:
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype), torch.no_grad():
+                value = torch.randn(2, 4, 3, 3, device="musa", dtype=dtype)
+                weight = torch.randn(4, device="musa", dtype=dtype)
+                bias = torch.randn_like(weight)
+                mean = torch.randn_like(weight)
+                variance = torch.rand_like(weight) + 1
+                output = torch.empty_like(value)
+                expected = torch.ops.executorch_musa.batch_norm.default(
+                    value, weight, bias, mean, variance, 1e-5
+                )
+                actual = torch.ops.executorch_musa.batch_norm.out(
+                    value, weight, bias, mean, variance, 1e-5, out=output
+                )
+                self.assertEqual(actual.data_ptr(), output.data_ptr())
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                with self.assertRaises(RuntimeError):
+                    torch.ops.executorch_musa.batch_norm.out(
+                        value,
+                        weight,
+                        bias,
+                        mean,
+                        variance,
+                        1e-5,
+                        out=torch.empty(1, device="musa", dtype=dtype),
+                    )
+
     def test_dynamic_pooling_spatial_shapes(self) -> None:
         from torch import _meta_registrations
 

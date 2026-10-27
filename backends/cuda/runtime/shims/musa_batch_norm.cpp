@@ -83,25 +83,24 @@ struct MudnnContext {
   }
 };
 
-}
-
-extern "C" {
-
-AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
+AOTITorchError batch_norm(
     SlimTensor* input,
     SlimTensor* weight,
     SlimTensor* bias,
     SlimTensor* running_mean,
     SlimTensor* running_var,
     double eps,
+    SlimTensor* output,
     SlimTensor** ret_output) {
   ET_CHECK_OR_RETURN_ERROR(
       input != nullptr && weight != nullptr && bias != nullptr &&
           running_mean != nullptr && running_var != nullptr &&
-          ret_output != nullptr,
+          (ret_output != nullptr || output != nullptr),
       InvalidArgument,
       "MUSA batch norm received a null tensor handle");
-  *ret_output = nullptr;
+  if (ret_output != nullptr) {
+    *ret_output = nullptr;
+  }
 
   const auto dtype = input->dtype();
   const auto parameter_dtype = weight->dtype();
@@ -142,6 +141,62 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       eps >= 0.0,
       InvalidArgument,
       "MUSA batch norm received a negative epsilon");
+
+  if (output != nullptr) {
+    ET_CHECK_OR_RETURN_ERROR(
+        output->storage() != nullptr && output->is_gpu() &&
+            output->device_index() == input->device_index() &&
+            output->dtype() == dtype && output->sizes() == input->sizes() &&
+            output->is_contiguous(),
+        InvalidArgument,
+        "MUSA batch norm output must be contiguous with matching shape, dtype and device");
+    ET_CHECK_OR_RETURN_ERROR(
+        output->storage_offset() >= 0 &&
+            static_cast<uint64_t>(output->storage_offset()) <=
+                output->storage()->nbytes() / output->itemsize() &&
+            output->nbytes() <= output->storage()->nbytes() -
+                    output->storage_offset() * output->itemsize(),
+        InvalidArgument,
+        "MUSA batch norm output exceeds its storage");
+    const auto output_start = reinterpret_cast<uintptr_t>(output->data_ptr());
+    for (auto* source : {input, weight, bias, running_mean, running_var}) {
+      size_t source_bytes = source->nbytes();
+      if (!source->is_contiguous() && source->numel() != 0) {
+        const size_t storage_elements =
+            source->storage()->nbytes() / source->itemsize();
+        ET_CHECK_OR_RETURN_ERROR(
+            source->storage_offset() >= 0 &&
+                static_cast<uint64_t>(source->storage_offset()) <
+                    storage_elements,
+            InvalidArgument,
+            "MUSA batch norm source exceeds its storage");
+        const size_t available_elements =
+            storage_elements - source->storage_offset();
+        size_t last_element = 0;
+        for (int64_t dimension = 0; dimension < source->dim(); ++dimension) {
+          const auto size = source->size(dimension);
+          const auto stride = source->stride(dimension);
+          ET_CHECK_OR_RETURN_ERROR(
+              size > 0 && stride >= 0 &&
+                  (stride == 0 ||
+                   static_cast<uint64_t>(size - 1) <=
+                       (available_elements - 1 - last_element) / stride),
+              InvalidArgument,
+              "MUSA batch norm source strides exceed storage");
+          last_element += (size - 1) * stride;
+        }
+        source_bytes = (last_element + 1) * source->itemsize();
+      }
+      const auto source_start = reinterpret_cast<uintptr_t>(source->data_ptr());
+      ET_CHECK_OR_RETURN_ERROR(
+          output->nbytes() == 0 || source_bytes == 0 ||
+              (output_start <= source_start
+                   ? source_start - output_start >= output->nbytes()
+                   : output_start - source_start >= source_bytes),
+          InvalidArgument,
+          "MUSA batch norm output must not overlap input or parameter storage");
+    }
+  }
 
   std::unique_ptr<SlimTensor> contiguous_input;
   std::unique_ptr<SlimTensor> contiguous_weight;
@@ -197,25 +252,32 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
   std::vector<int> parameter_dims(descriptor_dims, 1);
   parameter_dims[1] = static_cast<int>(channel_count);
 
-  std::vector<int64_t> output_sizes(input->sizes().begin(), input->sizes().end());
-  std::vector<int64_t> output_strides(output_sizes.size(), 1);
-  for (int64_t index = static_cast<int64_t>(output_sizes.size()) - 2;
-       index >= 0;
-       --index) {
-    output_strides[index] = output_strides[index + 1] * output_sizes[index + 1];
+  std::unique_ptr<SlimTensor> allocated_output;
+  auto error = Error::Ok;
+  if (output == nullptr) {
+    std::vector<int64_t> output_sizes(
+        input->sizes().begin(), input->sizes().end());
+    std::vector<int64_t> output_strides(output_sizes.size(), 1);
+    for (int64_t index = static_cast<int64_t>(output_sizes.size()) - 2;
+         index >= 0;
+         --index) {
+      output_strides[index] =
+          output_strides[index + 1] * output_sizes[index + 1];
+    }
+    SlimTensor* raw_output = nullptr;
+    error = aoti_torch_empty_strided(
+        output_sizes.size(),
+        output_sizes.data(),
+        output_strides.data(),
+        static_cast<int32_t>(dtype),
+        executorch::backends::aoti::slim::c10::device_type_to_aoti(
+            executorch::backends::aoti::slim::c10::kGPU),
+        input->device_index(),
+        &raw_output);
+    ET_CHECK_OK_OR_RETURN_ERROR(error);
+    allocated_output.reset(raw_output);
+    output = allocated_output.get();
   }
-  SlimTensor* raw_output = nullptr;
-  auto error = aoti_torch_empty_strided(
-      output_sizes.size(),
-      output_sizes.data(),
-      output_strides.data(),
-      static_cast<int32_t>(dtype),
-      executorch::backends::aoti::slim::c10::device_type_to_aoti(
-          executorch::backends::aoti::slim::c10::kGPU),
-      input->device_index(),
-      &raw_output);
-  ET_CHECK_OK_OR_RETURN_ERROR(error);
-  std::unique_ptr<SlimTensor> output(raw_output);
 
   MudnnContext context;
   error = check_mudnn(mudnnCreate(&context.handle), "mudnnCreate");
@@ -296,10 +358,37 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_batch_norm(
       "mudnnBatchNormForwardInference");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
 
-  *ret_output = output.release();
+  if (ret_output != nullptr) {
+    *ret_output = allocated_output.release();
+  }
   return Error::Ok;
 }
-
 }
 
+extern "C" {
+
+AOTITorchError aoti_torch_musa_batch_norm(
+    SlimTensor* input,
+    SlimTensor* weight,
+    SlimTensor* bias,
+    SlimTensor* running_mean,
+    SlimTensor* running_var,
+    double eps,
+    SlimTensor** ret_output) {
+  return batch_norm(
+      input, weight, bias, running_mean, running_var, eps, nullptr, ret_output);
+}
+
+AOTITorchError aoti_torch_musa_batch_norm_out(
+    SlimTensor* output,
+    SlimTensor* input,
+    SlimTensor* weight,
+    SlimTensor* bias,
+    SlimTensor* running_mean,
+    SlimTensor* running_var,
+    double eps) {
+  return batch_norm(
+      input, weight, bias, running_mean, running_var, eps, output, nullptr);
+}
+}
 }
