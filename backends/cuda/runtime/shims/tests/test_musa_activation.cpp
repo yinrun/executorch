@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <memory>
 #include <vector>
 
+#include <executorch/backends/aoti/slim/cuda/guard.h>
+#include <executorch/backends/aoti/slim/factory/empty.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
 #include <executorch/backends/cuda/runtime/shims/musa_activation.h>
 #include <executorch/extension/cuda/runtime_api.h>
@@ -12,12 +15,17 @@
 
 namespace {
 
+namespace slim = executorch::backends::aoti::slim;
 using executorch::backends::aoti::slim::SlimTensor;
 using executorch::backends::aoti::slim::c10::DeviceType;
 using executorch::backends::aoti::slim::c10::ScalarType;
+using executorch::backends::cuda::aoti_torch__alloc_from_pool;
 using executorch::backends::cuda::aoti_torch_empty_strided;
 using executorch::backends::cuda::aoti_torch_musa_hardsigmoid;
+using executorch::backends::cuda::aoti_torch_musa_hardsigmoid_out;
 using executorch::backends::cuda::aoti_torch_musa_hardswish;
+using executorch::backends::cuda::aoti_torch_musa_hardswish_out;
+using executorch::backends::cuda::CUDAStreamGuard;
 using executorch::runtime::Error;
 using executorch::runtime::etensor::BFloat16;
 using executorch::runtime::etensor::Half;
@@ -98,6 +106,8 @@ void check_values(
 
 class MusaActivationTest : public ::testing::Test {
  protected:
+  cudaStream_t stream = nullptr;
+
   void SetUp() override {
     et_pal_init();
     int count = 0;
@@ -105,7 +115,203 @@ class MusaActivationTest : public ::testing::Test {
       GTEST_SKIP() << "MUSA device is not available";
     }
   }
+
+  void TearDown() override {
+    if (stream != nullptr) {
+      EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+      EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+    }
+  }
 };
+
+TEST_F(MusaActivationTest, OutReusesDisjointPoolViewsAcrossShapesAndDtypes) {
+  ASSERT_EQ(
+      musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  auto guard = CUDAStreamGuard::create(stream, 0);
+  ASSERT_TRUE(guard.ok());
+  for (const bool hard_sigmoid : {false, true}) {
+    const auto allocating =
+        hard_sigmoid ? aoti_torch_musa_hardsigmoid : aoti_torch_musa_hardswish;
+    const auto activation = hard_sigmoid ? aoti_torch_musa_hardsigmoid_out
+                                         : aoti_torch_musa_hardswish_out;
+    for (const auto dtype :
+         {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+      for (const int64_t step : {1, 2}) {
+        for (const std::vector<int64_t>& sizes :
+             {std::vector<int64_t>{}, {0}, {2, 0, 3}, {9}, {1, 3, 3}}) {
+          SCOPED_TRACE(
+              ::testing::Message()
+              << hard_sigmoid << " " << static_cast<int>(dtype) << " " << step
+              << " rank=" << sizes.size());
+          std::vector<int64_t> strides(sizes.size(), 1);
+          for (int64_t dimension = static_cast<int64_t>(sizes.size()) - 2;
+               dimension >= 0;
+               --dimension) {
+            strides[dimension] = strides[dimension + 1] * sizes[dimension + 1];
+          }
+          auto input_strides = strides;
+          for (auto& stride : input_strides) {
+            stride *= step;
+          }
+          auto pool = slim::empty(
+              {256}, ScalarType::Byte, slim::c10::Device(slim::c10::kMUSA, 0));
+          SlimTensor* raw_input = nullptr;
+          SlimTensor* raw_output = nullptr;
+          ASSERT_EQ(
+              aoti_torch__alloc_from_pool(
+                  &pool,
+                  8,
+                  static_cast<int32_t>(dtype),
+                  sizes.size(),
+                  sizes.data(),
+                  input_strides.data(),
+                  &raw_input),
+              Error::Ok);
+          ASSERT_EQ(
+              aoti_torch__alloc_from_pool(
+                  &pool,
+                  128,
+                  static_cast<int32_t>(dtype),
+                  sizes.size(),
+                  sizes.data(),
+                  strides.data(),
+                  &raw_output),
+              Error::Ok);
+          std::unique_ptr<SlimTensor> input(raw_input);
+          std::unique_ptr<SlimTensor> output(raw_output);
+          auto* original_pointer = output->data_ptr();
+          for (int iteration = 0; iteration < 3; ++iteration) {
+            std::vector<uint8_t> initial(256, 0xA5);
+            for (size_t index = 0; index < input->numel(); ++index) {
+              const float value = static_cast<float>(index) - 4 + iteration;
+              const Half half(value);
+              const BFloat16 bfloat(value);
+              const void* encoded = dtype == ScalarType::Float
+                  ? static_cast<const void*>(&value)
+                  : dtype == ScalarType::Half
+                  ? static_cast<const void*>(&half)
+                  : static_cast<const void*>(&bfloat);
+              std::memcpy(
+                  initial.data() + 8 + index * step * input->itemsize(),
+                  encoded,
+                  input->itemsize());
+            }
+            ASSERT_EQ(
+                cudaMemcpyAsync(
+                    pool.data_ptr(),
+                    initial.data(),
+                    initial.size(),
+                    cudaMemcpyHostToDevice,
+                    stream),
+                cudaSuccess);
+            SlimTensor* raw_reference = nullptr;
+            ASSERT_EQ(allocating(input.get(), &raw_reference), Error::Ok);
+            std::unique_ptr<SlimTensor> reference(raw_reference);
+            ASSERT_EQ(activation(output.get(), input.get()), Error::Ok);
+            EXPECT_EQ(output->data_ptr(), original_pointer);
+            std::vector<uint8_t> actual(256);
+            std::vector<uint8_t> expected(output->nbytes());
+            ASSERT_EQ(
+                cudaMemcpyAsync(
+                    actual.data(),
+                    pool.data_ptr(),
+                    actual.size(),
+                    cudaMemcpyDeviceToHost,
+                    stream),
+                cudaSuccess);
+            if (!expected.empty()) {
+              ASSERT_EQ(
+                  cudaMemcpyAsync(
+                      expected.data(),
+                      reference->data_ptr(),
+                      expected.size(),
+                      cudaMemcpyDeviceToHost,
+                      stream),
+                  cudaSuccess);
+            }
+            ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+            for (size_t index = 0; index < actual.size(); ++index) {
+              EXPECT_EQ(
+                  actual[index],
+                  index >= 128 && index < 128 + expected.size()
+                      ? expected[index - 128]
+                      : initial[index])
+                  << index;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(MusaActivationTest, OutRejectsInvalidViewsWithoutWriting) {
+  auto pool = slim::empty(
+      {256}, ScalarType::Byte, slim::c10::Device(slim::c10::kMUSA, 0));
+  SlimTensor input(pool.storage(), {4}, {1}, ScalarType::Float);
+  SlimTensor output(pool.storage(), {4}, {1}, ScalarType::Float, 32);
+  const int64_t wrong_sizes[] = {2, 2};
+  const int64_t wrong_strides[] = {2, 1};
+  SlimTensor wrong_shape(
+      pool.storage(),
+      slim::IntArrayRef(wrong_sizes, 2),
+      slim::IntArrayRef(wrong_strides, 2),
+      ScalarType::Float,
+      32);
+  SlimTensor wrong_dtype(pool.storage(), {4}, {1}, ScalarType::Half, 64);
+  SlimTensor noncontiguous(pool.storage(), {4}, {2}, ScalarType::Float, 32);
+  SlimTensor insufficient(pool.storage(), {4}, {1}, ScalarType::Float, 63);
+  SlimTensor negative_offset(pool.storage(), {4}, {1}, ScalarType::Float, -1);
+  SlimTensor strided_overlap(pool.storage(), {4}, {16}, ScalarType::Float);
+  SlimTensor partial_overlap(pool.storage(), {4}, {1}, ScalarType::Float, 33);
+  SlimTensor invalid_source(pool.storage(), {4}, {64}, ScalarType::Float);
+  SlimTensor undefined;
+  auto host = slim::empty({4}, ScalarType::Float);
+  std::vector<uint8_t> initial(256, 0xA5);
+  ASSERT_EQ(
+      cudaMemcpy(
+          pool.data_ptr(),
+          initial.data(),
+          initial.size(),
+          cudaMemcpyHostToDevice),
+      cudaSuccess);
+  for (const auto activation :
+       {aoti_torch_musa_hardswish_out, aoti_torch_musa_hardsigmoid_out}) {
+    for (auto* destination :
+         {static_cast<SlimTensor*>(nullptr),
+          &undefined,
+          &input,
+          &wrong_shape,
+          &wrong_dtype,
+          &noncontiguous,
+          &insufficient,
+          &negative_offset,
+          &host}) {
+      EXPECT_EQ(activation(destination, &input), Error::InvalidArgument);
+    }
+    for (auto* source :
+         {static_cast<SlimTensor*>(nullptr),
+          &undefined,
+          &output,
+          &strided_overlap,
+          &partial_overlap,
+          &invalid_source,
+          &negative_offset,
+          &host}) {
+      EXPECT_EQ(activation(&output, source), Error::InvalidArgument);
+    }
+  }
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  std::vector<uint8_t> actual(256);
+  ASSERT_EQ(
+      cudaMemcpy(
+          actual.data(),
+          pool.data_ptr(),
+          actual.size(),
+          cudaMemcpyDeviceToHost),
+      cudaSuccess);
+  EXPECT_EQ(actual, initial);
+}
 
 TEST_F(MusaActivationTest, HardswishDtypesAndStridedViews) {
   for (int64_t stride : {1, 2}) {

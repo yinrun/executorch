@@ -142,6 +142,8 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertIn("aoti_torch_musa_batch_norm_out", fallbacks)
         self.assertIn("aoti_torch_musa_hardswish", fallbacks)
         self.assertIn("aoti_torch_musa_hardsigmoid", fallbacks)
+        self.assertIn("aoti_torch_musa_hardswish_out", fallbacks)
+        self.assertIn("aoti_torch_musa_hardsigmoid_out", fallbacks)
 
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
@@ -272,6 +274,46 @@ class TestMusaAoti(unittest.TestCase):
             exported, [MusaBackend.generate_method_name_compile_spec("forward")]
         )
         self.assertGreater(len(result.processed_bytes), 0)
+
+    def test_activation_out_memory_planning_compile(self) -> None:
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                example = torch.randn(2, 8, 4, device="musa", dtype=dtype)
+                exported = export(
+                    nn.Sequential(nn.Hardswish(), nn.Hardsigmoid()).eval(),
+                    (example,),
+                    dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+                )
+                with torch._inductor.config.patch(
+                    memory_planning=True, memory_pool="combined"
+                ):
+                    result = MusaBackend.preprocess(
+                        exported,
+                        [MusaBackend.generate_method_name_compile_spec("forward")],
+                    )
+                payloads = [
+                    (
+                        buffer.prefix(len(buffer))
+                        if isinstance(buffer, FileBackedData)
+                        else bytes(buffer)
+                    )
+                    for buffer in result.data_store_output.buffers
+                ]
+                for symbol in (
+                    b"aoti_torch_musa_hardswish_out\0",
+                    b"aoti_torch_musa_hardsigmoid_out\0",
+                    b"aoti_torch__alloc_from_pool\0",
+                ):
+                    self.assertTrue(
+                        any(symbol in payload for payload in payloads), symbol
+                    )
+                for symbol in (
+                    b"aoti_torch_musa_hardswish\0",
+                    b"aoti_torch_musa_hardsigmoid\0",
+                ):
+                    self.assertFalse(
+                        any(symbol in payload for payload in payloads), symbol
+                    )
 
     def test_hardswish_aoti_compile(self) -> None:
         for dtype in (torch.float32, torch.float16, torch.bfloat16):

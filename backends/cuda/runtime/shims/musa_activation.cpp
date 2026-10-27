@@ -48,13 +48,17 @@ struct UnaryContext {
 
 Error run_activation(
     SlimTensor* input,
+    SlimTensor* output,
     SlimTensor** ret_output,
     mudnnUnaryMode_t mode) {
   ET_CHECK_OR_RETURN_ERROR(
-      input != nullptr && ret_output != nullptr,
+      input != nullptr && input->storage() != nullptr &&
+          (ret_output != nullptr || output != nullptr),
       InvalidArgument,
       "MUSA activation received a null tensor handle");
-  *ret_output = nullptr;
+  if (ret_output != nullptr) {
+    *ret_output = nullptr;
+  }
   ET_CHECK_OR_RETURN_ERROR(
       input->is_gpu(),
       InvalidArgument,
@@ -70,26 +74,90 @@ Error run_activation(
       NotSupported,
       "MUSA activation exceeds the muDNN descriptor size limit");
 
-  std::vector<int64_t> sizes(input->sizes().begin(), input->sizes().end());
-  std::vector<int64_t> strides(sizes.size(), 1);
-  for (int64_t dimension = static_cast<int64_t>(sizes.size()) - 2;
-       dimension >= 0;
-       --dimension) {
-    strides[dimension] = strides[dimension + 1] * sizes[dimension + 1];
+  const size_t storage_elements =
+      input->storage()->nbytes() / input->itemsize();
+  ET_CHECK_OR_RETURN_ERROR(
+      input->storage_offset() >= 0 &&
+          static_cast<uint64_t>(input->storage_offset()) <= storage_elements,
+      InvalidArgument,
+      "MUSA activation input exceeds its storage");
+  size_t source_bytes = 0;
+  if (input->numel() != 0) {
+    const size_t available_elements =
+        storage_elements - input->storage_offset();
+    ET_CHECK_OR_RETURN_ERROR(
+        available_elements > 0,
+        InvalidArgument,
+        "MUSA activation input exceeds its storage");
+    size_t last_element = 0;
+    for (int64_t dimension = 0; dimension < input->dim(); ++dimension) {
+      const auto size = input->size(dimension);
+      const auto stride = input->stride(dimension);
+      ET_CHECK_OR_RETURN_ERROR(
+          size > 0 && stride >= 0 &&
+              (stride == 0 ||
+               static_cast<uint64_t>(size - 1) <=
+                   (available_elements - 1 - last_element) / stride),
+          InvalidArgument,
+          "MUSA activation input strides exceed storage");
+      last_element += (size - 1) * stride;
+    }
+    source_bytes = (last_element + 1) * input->itemsize();
   }
-  SlimTensor* raw_output = nullptr;
-  ET_CHECK_OK_OR_RETURN_ERROR(aoti_torch_empty_strided(
-      sizes.size(),
-      sizes.data(),
-      strides.data(),
-      static_cast<int32_t>(dtype),
-      executorch::backends::aoti::slim::c10::device_type_to_aoti(
-          executorch::backends::aoti::slim::c10::kGPU),
-      input->device_index(),
-      &raw_output));
-  std::unique_ptr<SlimTensor> output(raw_output);
+  if (output != nullptr) {
+    ET_CHECK_OR_RETURN_ERROR(
+        output->storage() != nullptr && output->is_gpu() &&
+            output->device_index() == input->device_index() &&
+            output->dtype() == dtype && output->sizes() == input->sizes() &&
+            output->is_contiguous(),
+        InvalidArgument,
+        "MUSA activation output must be contiguous with matching shape, dtype and device");
+    ET_CHECK_OR_RETURN_ERROR(
+        output->storage_offset() >= 0 &&
+            static_cast<uint64_t>(output->storage_offset()) <=
+                output->storage()->nbytes() / output->itemsize() &&
+            output->nbytes() <= output->storage()->nbytes() -
+                    output->storage_offset() * output->itemsize(),
+        InvalidArgument,
+        "MUSA activation output exceeds its storage");
+    if (source_bytes != 0) {
+      const auto source_start = reinterpret_cast<uintptr_t>(input->data_ptr());
+      const auto output_start = reinterpret_cast<uintptr_t>(output->data_ptr());
+      ET_CHECK_OR_RETURN_ERROR(
+          output_start <= source_start
+              ? source_start - output_start >= output->nbytes()
+              : output_start - source_start >= source_bytes,
+          InvalidArgument,
+          "MUSA activation output must not overlap input storage");
+    }
+  }
+
+  std::unique_ptr<SlimTensor> owned_output;
+  if (output == nullptr) {
+    std::vector<int64_t> sizes(input->sizes().begin(), input->sizes().end());
+    std::vector<int64_t> strides(sizes.size(), 1);
+    for (int64_t dimension = static_cast<int64_t>(sizes.size()) - 2;
+         dimension >= 0;
+         --dimension) {
+      strides[dimension] = strides[dimension + 1] * sizes[dimension + 1];
+    }
+    SlimTensor* raw_output = nullptr;
+    ET_CHECK_OK_OR_RETURN_ERROR(aoti_torch_empty_strided(
+        sizes.size(),
+        sizes.data(),
+        strides.data(),
+        static_cast<int32_t>(dtype),
+        executorch::backends::aoti::slim::c10::device_type_to_aoti(
+            executorch::backends::aoti::slim::c10::kGPU),
+        input->device_index(),
+        &raw_output));
+    owned_output.reset(raw_output);
+    output = raw_output;
+  }
   if (input->numel() == 0) {
-    *ret_output = output.release();
+    if (ret_output != nullptr) {
+      *ret_output = owned_output.release();
+    }
     return Error::Ok;
   }
   std::unique_ptr<SlimTensor> contiguous_input;
@@ -133,7 +201,9 @@ Error run_activation(
       output->data_ptr(),
       context.input,
       input->data_ptr())));
-  *ret_output = output.release();
+  if (ret_output != nullptr) {
+    *ret_output = owned_output.release();
+  }
   return Error::Ok;
 }
 
@@ -141,12 +211,22 @@ Error run_activation(
 
 extern "C" AOTI_SHIM_EXPORT Error
 aoti_torch_musa_hardswish(SlimTensor* input, SlimTensor** ret_output) {
-  return run_activation(input, ret_output, MUDNN_UNARY_HARDSWISH);
+  return run_activation(input, nullptr, ret_output, MUDNN_UNARY_HARDSWISH);
 }
 
 extern "C" AOTI_SHIM_EXPORT Error
 aoti_torch_musa_hardsigmoid(SlimTensor* input, SlimTensor** ret_output) {
-  return run_activation(input, ret_output, MUDNN_UNARY_HARDSIGMOID);
+  return run_activation(input, nullptr, ret_output, MUDNN_UNARY_HARDSIGMOID);
+}
+
+extern "C" AOTI_SHIM_EXPORT Error
+aoti_torch_musa_hardswish_out(SlimTensor* output, SlimTensor* input) {
+  return run_activation(input, output, nullptr, MUDNN_UNARY_HARDSWISH);
+}
+
+extern "C" AOTI_SHIM_EXPORT Error
+aoti_torch_musa_hardsigmoid_out(SlimTensor* output, SlimTensor* input) {
+  return run_activation(input, output, nullptr, MUDNN_UNARY_HARDSIGMOID);
 }
 
 }

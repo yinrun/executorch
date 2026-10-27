@@ -24,6 +24,12 @@ MUSA_ACTIVATION_EXPORT MusaActivationError aoti_torch_musa_hardswish(
 MUSA_ACTIVATION_EXPORT MusaActivationError aoti_torch_musa_hardsigmoid(
     MusaActivationTensorHandle input,
     MusaActivationTensorHandle* ret_output);
+MUSA_ACTIVATION_EXPORT MusaActivationError aoti_torch_musa_hardswish_out(
+    MusaActivationTensorHandle output,
+    MusaActivationTensorHandle input);
+MUSA_ACTIVATION_EXPORT MusaActivationError aoti_torch_musa_hardsigmoid_out(
+    MusaActivationTensorHandle output,
+    MusaActivationTensorHandle input);
 }
 
 #ifndef TORCH_INDUCTOR_CPP_WRAPPER

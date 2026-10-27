@@ -242,12 +242,12 @@ def _lower_musa_activation(input: Any, op: Any, name: str) -> Any:
         ir.FlexibleLayout.contiguous_strides(input.get_size()),
     )
     return ir.TensorBox.create(
-        ir.ExternKernelAlloc(
+        ir.ExternKernelOut(
             layout=layout,
             inputs=[input],
             constant_args=[],
-            python_kernel_name=f"executorch_musa.{name}",
-            cpp_kernel_name=f"aoti_torch_musa_{name}",
+            python_kernel_name=f"aten.{name}.out",
+            cpp_kernel_name=f"aoti_torch_musa_{name}_out",
             op_overload=op,
         )
     )
@@ -255,12 +255,12 @@ def _lower_musa_activation(input: Any, op: Any, name: str) -> Any:
 
 @lowering.register_lowering(_MUSA_HARDSWISH, type_promotion_kind=None)
 def _lower_musa_hardswish(input: Any) -> Any:
-    return _lower_musa_activation(input, _MUSA_HARDSWISH, "hardswish")
+    return _lower_musa_activation(input, torch.ops.aten.hardswish.out, "hardswish")
 
 
 @lowering.register_lowering(_MUSA_HARDSIGMOID, type_promotion_kind=None)
 def _lower_musa_hardsigmoid(input: Any) -> Any:
-    return _lower_musa_activation(input, _MUSA_HARDSIGMOID, "hardsigmoid")
+    return _lower_musa_activation(input, torch.ops.aten.hardsigmoid.out, "hardsigmoid")
 
 
 def _materialize_musa_batch_norm_parameters(
@@ -645,6 +645,8 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_batch_norm_out": None,
             "aoti_torch_musa_hardswish": None,
             "aoti_torch_musa_hardsigmoid": None,
+            "aoti_torch_musa_hardswish_out": None,
+            "aoti_torch_musa_hardsigmoid_out": None,
         }
 
     @classmethod
