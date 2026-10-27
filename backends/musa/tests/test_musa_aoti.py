@@ -47,6 +47,240 @@ from examples.musa.aoti_model_acceptance import (
 from examples.musa.aoti_prefill_decode_acceptance import PromptPrefill
 
 
+class TestMusaPoolCodegen(unittest.TestCase):
+    def _emit(self, device, offset, replacements, fail=False):
+        from types import SimpleNamespace
+
+        import sympy
+        from torch._inductor.codegen import cpp_wrapper_cpu, memory_planning
+        from torch._inductor.sizevars import SizeVarAllocator
+        from torch._inductor.virtualized import V as virtualized
+        from executorch.backends.musa.musa_backend import _musa_aoti_compile_context
+
+        wrapper_type = cpp_wrapper_cpu.CppWrapperCpu
+        original_method = wrapper_type.codegen_alloc_from_pool
+        original_printer = cpp_wrapper_cpu.cexpr
+        original_symbolic_size = memory_planning.TemporalSplit.get_symbolic_size
+        sizevars = SizeVarAllocator()
+        sizevars.replacements.update(replacements)
+        graph = SimpleNamespace(sizevars=sizevars, device_types={device})
+        wrapper = mock.Mock()
+        wrapper.get_codegened_graph.return_value = graph
+        probe = sympy.Symbol("unrelated", integer=True) + 1
+
+        def generate(wrapper, name, received_offset, dtype, shape, stride):
+            self.assertIs(received_offset, offset)
+            rendered = cpp_wrapper_cpu.cexpr(received_offset)
+            cpp_wrapper_cpu.cexpr(probe)
+            if fail:
+                raise RuntimeError("pool codegen failed")
+            return rendered
+
+        try:
+            with mock.patch.object(
+                wrapper_type, "codegen_alloc_from_pool", generate
+            ), virtualized.set_graph_handler(graph), mock.patch.object(
+                sizevars, "simplify", wraps=sizevars.simplify
+            ) as simplify:
+                with _musa_aoti_compile_context():
+                    rendered = wrapper_type.codegen_alloc_from_pool(
+                        wrapper, "pool0", offset, torch.float32, (), ()
+                    )
+                return (
+                    rendered,
+                    [call.args[0] for call in simplify.call_args_list],
+                    probe,
+                )
+        finally:
+            self.assertIs(wrapper_type.codegen_alloc_from_pool, original_method)
+            self.assertIs(cpp_wrapper_cpu.cexpr, original_printer)
+            self.assertIs(
+                memory_planning.TemporalSplit.get_symbolic_size, original_symbolic_size
+            )
+
+    def test_pool_size_max_cache_and_device_isolation(self):
+        from types import SimpleNamespace
+
+        import sympy
+        from torch._inductor.codegen.memory_planning import TemporalSplit
+        from torch._inductor.virtualized import V as virtualized
+        from torch.utils._sympy.functions import Max
+        from executorch.backends.musa.musa_backend import _musa_aoti_compile_context
+
+        height, width = sympy.symbols("height width", integer=True, positive=True)
+        original = TemporalSplit.get_symbolic_size
+        for device in ("musa", "cpu", "cuda"):
+            with self.subTest(device=device):
+                first = mock.Mock()
+                second = mock.Mock()
+                first.get_symbolic_size.return_value = 64 * height
+                second.get_symbolic_size.return_value = 128 * width
+                split = TemporalSplit([first, second])
+                with virtualized.set_graph_handler(
+                    SimpleNamespace(device_types={device})
+                ), _musa_aoti_compile_context():
+                    expression = split.get_symbolic_size()
+                    self.assertIsInstance(
+                        expression, Max if device == "musa" else sympy.Max
+                    )
+                    self.assertIs(split.get_symbolic_size(), expression)
+                    first.get_symbolic_size.assert_called_once()
+                    second.get_symbolic_size.assert_called_once()
+                    first.get_symbolic_size.return_value = 256 * height
+                    split.clear_cache()
+                    updated = split.get_symbolic_size()
+                    self.assertEqual(first.get_symbolic_size.call_count, 2)
+                    self.assertEqual(int(updated.subs({height: 3, width: 2})), 768)
+                    self.assertEqual(TemporalSplit([]).get_symbolic_size(), 0)
+                    self.assertEqual(
+                        TemporalSplit([first]).get_symbolic_size(), 256 * height
+                    )
+                self.assertIs(TemporalSplit.get_symbolic_size, original)
+
+    def test_pool_max_preserves_nested_size_values(self):
+        from types import SimpleNamespace
+
+        import sympy
+        from torch._inductor.codegen.memory_planning import TemporalSplit
+        from torch._inductor.utils import align
+        from torch._inductor.virtualized import V as virtualized
+        from executorch.backends.musa.musa_backend import _musa_aoti_compile_context
+
+        batch, height, width = sympy.symbols(
+            "batch height width", integer=True, positive=True
+        )
+        sizes = [
+            64 * batch * (height + 1),
+            128 * (width + 1),
+            align(32 * batch * (height + 1) * (width + 1)) + 64 * batch,
+        ]
+        blocks = []
+        for size in sizes:
+            block = mock.Mock()
+            block.get_symbolic_size.return_value = size
+            blocks.append(block)
+        inner = TemporalSplit(blocks[:2])
+        outer = TemporalSplit([inner, blocks[2]])
+        with virtualized.set_graph_handler(
+            SimpleNamespace(device_types={"musa"})
+        ), _musa_aoti_compile_context():
+            expression = outer.get_symbolic_size()
+        for batch_value in (1, 2, 3):
+            for height_value, width_value in ((48, 54), (64, 64), (79, 71), (80, 80)):
+                values = {batch: batch_value, height: height_value, width: width_value}
+                self.assertEqual(
+                    int(expression.subs(values)),
+                    max(int(size.subs(values)) for size in sizes),
+                )
+
+    def test_pool_offset_preserves_replacements_without_expansion(self):
+        import sympy
+        from torch._inductor.codegen.cpp_utils import cexpr
+        from torch._inductor.utils import align
+
+        batch, height, width, alias = sympy.symbols(
+            "batch height width alias", integer=True, positive=True
+        )
+        offset = align(sympy.Max(64 * (alias + 1) * (height + 1), 128 * batch * width))
+        replacements = {alias: batch + 1}
+        rendered, calls, probe = self._emit("musa", offset, replacements)
+        self.assertEqual(rendered, cexpr(offset.xreplace(replacements), simplify=False))
+        self.assertNotIn("alias", rendered)
+        self.assertEqual(calls, [probe])
+
+    def test_other_devices_keep_original_pool_printing(self):
+        import sympy
+
+        extent = sympy.Symbol("extent", integer=True, positive=True)
+        offset = (extent + 1) * (extent + 2)
+        for device in ("cpu", "cuda"):
+            with self.subTest(device=device):
+                _, calls, probe = self._emit(device, offset, {})
+                self.assertEqual(calls, [offset, probe])
+
+    def test_pool_printer_restores_after_failure(self):
+        import sympy
+
+        with self.assertRaisesRegex(RuntimeError, "pool codegen failed"):
+            self._emit("musa", sympy.Symbol("offset", integer=True), {}, fail=True)
+
+    def test_factored_pool_offsets_match_compiled_cpp(self):
+        import shutil
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        import sympy
+        from torch._inductor.utils import align
+        from torch.utils._sympy.functions import Max
+
+        compiler = shutil.which("c++")
+        if compiler is None:
+            self.skipTest("requires a C++ compiler")
+        batch, height, width, alias = sympy.symbols(
+            "batch height width alias", integer=True, positive=True
+        )
+        offset = align(
+            Max(
+                64 * (alias + 1) * (height + 1),
+                128 * batch * width,
+                align(32 * batch * (height + 1) * (width + 1)) + 64 * batch,
+            )
+        )
+        replacements = {alias: batch + 1}
+        rendered, calls, probe = self._emit("musa", offset, replacements)
+        self.assertEqual(calls, [probe])
+        cases = [
+            (batch_value, height_value, width_value)
+            for batch_value in (1, 2, 3)
+            for height_value in (48, 54, 64, 71, 79, 80)
+            for width_value in (48, 54, 64, 71, 79, 80)
+        ]
+        expected = [
+            int(
+                offset.xreplace(replacements).subs(
+                    {batch: batch_value, height: height_value, width: width_value}
+                )
+            )
+            for batch_value, height_value, width_value in cases
+        ]
+        source = (
+            """#include <algorithm>
+#include <cstdint>
+#include <iostream>
+int64_t align(int64_t value) { return (value + 63) & -64; }
+int main() {
+    int64_t batch, height, width;
+    while (std::cin >> batch >> height >> width) {
+        std::cout << """
+            + rendered
+            + """ << '\\n';
+    }
+}
+"""
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "offset.cpp"
+            path.write_text(source)
+            compiled = subprocess.run(
+                [compiler, "-std=c++17", str(path), "-o", str(root / "offset")],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(root / "offset")],
+                input="\n".join(" ".join(map(str, case)) for case in cases),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([int(value) for value in result.stdout.split()], expected)
+
+
 class TestMusaAotiFallbacks(unittest.TestCase):
 
     def test_runtime_link_libraries_are_scoped_and_restored(self) -> None:

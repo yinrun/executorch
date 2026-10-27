@@ -1857,3 +1857,54 @@ DeepLab BF16 comparisons, standalone legacy artifact replay, allocation
 tracing and balanced latency measurements remain separate gates. Classifier
 correctness alone does not promote the candidate runtime or establish a
 model speedup.
+
+## Dynamic-spatial pool code generation (2026-10-27)
+
+The first activation-out model campaign exceeded its 1,200-second deadline
+while exporting and validating pooled BF16 DeepLabV3-MobileNetV3-Large with
+dynamic batch and spatial dimensions. Its failed `models/summary.json` is
+preserved; the existence of PTE/PTD and raw outputs does not make that
+unfinished acceptance run successful.
+
+Live Python stack samples identified two compiler costs, not a GPU hang:
+`TemporalSplit.get_symbolic_size` constructed nested generic SymPy maxima,
+invoking pairwise connectivity/factorization, and the C++ pool-offset printer
+expanded those expressions again through `SizeVarAllocator.simplify`.
+Skipping only the latter was insufficient; that diagnostic probe was
+explicitly stopped after sampling the remaining first hotspot.
+
+The MUSA compilation context now uses PyTorch's optimized symbolic `Max`
+for temporal pool sizes, preserving the existing method cache and invalidation
+contract. Pool offsets retain factored expressions when printed as C++, with
+the graph's symbol replacements still applied. Other expressions and non-MUSA
+graphs keep their original paths. Both patches are scoped to the existing
+compilation context and restored on exceptions. This does not change pool
+lifetimes, alignment, dynamic bounds, native allocation APIs, or the default
+memory-planning setting.
+
+Evidence under `activation-out` in the artifact root above:
+
+- `pool-codegen-tests-final.log`: ten compiler-hook/fallback methods passed.
+  Coverage includes CPU/CUDA isolation, symbol replacements, exception
+  restoration, cache invalidation, nested maximum values, and compiling the
+  factored C++ offsets for 108 batch/height/width combinations.
+- `pool-codegen-v2/summary.json`: fresh pooled DeepLab legacy and out exports
+  both passed. Each covers `(2,3,64,64)`, `(1,3,48,54)`, `(3,3,80,80)` and
+  `(2,3,79,71)`, with two fresh runner processes per shape. All 16 outputs
+  pass the unchanged MUSA eager tolerance and pixel-label checks and are
+  byte-identical to their respective unplanned baseline. Both weight
+  payloads have the same digest; compiler source and runtime binary hashes
+  are recorded.
+- The two successful export-and-validation jobs took approximately 270 and
+  423 seconds. These are end-to-end acceptance durations, not isolated
+  compilation timings or inference latency measurements.
+- `pool-codegen-regressions/compile.log`: 13 methods passed, adding pooled
+  activation, batch-normalization and convolution compilation to the hook
+  tests. Runner regressions and replay of the original pre-fix pool-offset
+  artifact are separate gates; their final result belongs in
+  `pool-codegen-verification.json` when complete.
+
+The earlier classifier matrices used the pre-fix pool code generator.
+Fresh pooled classifier exports are required before claiming a complete
+common-compiler model matrix. No runtime promotion or inference speedup is
+claimed by this compiler fix.

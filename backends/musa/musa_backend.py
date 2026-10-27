@@ -411,11 +411,19 @@ lowering.register_lowering(_MUSA_BATCH_NORM, type_promotion_kind=None)(
 
 @contextlib.contextmanager
 def _musa_aoti_compile_context():
+    import sympy
+    from torch._inductor.codegen import cpp_wrapper_cpu, memory_planning
     from torch._inductor.codegen.cpp_wrapper_cpu import CppWrapperCpu
     from torch._inductor.cpp_builder import CppTorchDeviceOptions
     from torch._inductor.kernel import conv
+    from torch._inductor.utils import cache_on_self
+    from torch._inductor.virtualized import V as virtualized
+    from torch.utils._sympy.functions import Max
 
     original_add_device_include = CppWrapperCpu.add_device_include
+    original_alloc_from_pool = CppWrapperCpu.codegen_alloc_from_pool
+    original_cexpr = cpp_wrapper_cpu.cexpr
+    original_symbolic_size = memory_planning.TemporalSplit.get_symbolic_size
     original_get_libraries = CppTorchDeviceOptions.get_libraries
     convolution_op = torch.ops.aten.convolution.default
     original_convolution = lowering.lowerings[convolution_op]
@@ -505,6 +513,29 @@ def _musa_aoti_compile_context():
             self.header.splice(f'#include "{_MUSA_ACTIVATION_HEADER}"')
             self.header.splice(f'#include "{_MUSA_CONVOLUTION_HEADER}"')
 
+    def alloc_from_pool_without_expansion(self, name, offset, dtype, shape, stride):
+        if "musa" not in self.get_codegened_graph().device_types:
+            return original_alloc_from_pool(self, name, offset, dtype, shape, stride)
+
+        def print_pool_offset(expression, **kwargs):
+            if expression is offset and isinstance(expression, sympy.Expr):
+                expression = expression.xreplace(
+                    virtualized.graph.sizevars.replacements
+                )
+                kwargs["simplify"] = False
+            return original_cexpr(expression, **kwargs)
+
+        with mock.patch.object(cpp_wrapper_cpu, "cexpr", print_pool_offset):
+            return original_alloc_from_pool(self, name, offset, dtype, shape, stride)
+
+    @cache_on_self
+    def get_symbolic_size(self):
+        if "musa" not in virtualized.graph.device_types:
+            return original_symbolic_size(self)
+        if not self.allocations:
+            return 0
+        return Max(*(block.get_symbolic_size() for block in self.allocations))
+
     def get_runtime_libraries(self: Any) -> List[str]:
         libraries = original_get_libraries(self)
         if (
@@ -529,6 +560,10 @@ def _musa_aoti_compile_context():
             lowering.lowerings, {convolution_op: convolution_with_preallocated_output}
         ), mock.patch.object(
             CppTorchDeviceOptions, "get_libraries", get_runtime_libraries
+        ), mock.patch.object(
+            CppWrapperCpu, "codegen_alloc_from_pool", alloc_from_pool_without_expansion
+        ), mock.patch.object(
+            memory_planning.TemporalSplit, "get_symbolic_size", get_symbolic_size
         ):
             yield
     finally:
