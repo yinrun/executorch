@@ -1128,3 +1128,84 @@ allocator costs. Retention is per thread, with no public cache-trim API;
 large thread counts, memory pressure, other GPUs/SDKs and device reset require
 separate validation. The event fallback has correctness coverage on this
 stack but no accepted general speedup claim.
+
+## ResNet224 variability diagnostics (2026-10-27)
+
+The two slower 224x224 ResNet candidate processes were not uniformly slow:
+their first ten measured calls had medians 18.924/18.747 ms, followed by
+slower intervals; the second process returned to an 18.867 ms median in its
+last ten calls. This weakens a simple fixed-per-process explanation but does
+not identify the cause. No original samples are replaced or removed.
+
+A read-only, process-local interposer records muDNN workspace-query algorithm
+and size, main-thread synchronization boundaries, thread CPU time, context
+switches, CPU number and sampled CPU/GPU frequency. It does not change
+allocation, algorithm, synchronization mode or system governors. Eight fresh
+processes alternate baseline/candidate order over four rounds, with 10
+warmups and 200 measured executions each. Another four processes repeat the
+experiment with the whole child process restricted to CPU 2. All twelve
+final outputs match the accepted reference bytes. These are instrumented
+diagnostic observations, not replacement acceptance timings.
+
+Findings:
+
+- Every forward has the same 20 workspace queries, using muDNN forward
+  algorithm enum 0 (`IMPLICIT_GEMM`), throughout warmup and measurement in all
+  twelve processes and both variants. Requested sizes are also identical;
+  the maximum is 7,043,584 bytes. This rules out a change in the observed
+  public algorithm/request sequence, not differences inside the SDK's kernel
+  selection or execution.
+- Every measured synchronization-boundary GPU-frequency sample reports
+  730 MHz. Most CPU policy-0 samples report 2.65 GHz. Boundary sampling cannot
+  rule out frequency changes within a method execution.
+- The launcher actually inherits CPU affinity `0-3`, although the host lists
+  twelve online CPUs. The previous reports did not capture this constraint.
+  No affinity is widened and no global power/frequency policy is changed.
+- Slower samples include increased main-thread CPU time as well as off-CPU
+  time. Thread CPU time includes runtime/driver activity and possible busy
+  waiting; it is not CPU model computation and is not additive to GPU time.
+
+| Diagnostic placement | Samples per variant | Baseline median / p90 (ms) | Cache median / p90 (ms) |
+| --- | ---: | ---: | ---: |
+| Inherited CPU 0-3 | 800 | 22.757 / 27.164 | 19.244 / 22.953 |
+| Whole child pinned to CPU 2 | 400 | 24.537 / 25.886 | 20.830 / 21.666 |
+
+Pinning the whole process narrows the observed tail but worsens both medians;
+it is not adopted as a performance fix. It also constrains SDK worker threads,
+so this experiment does not isolate main-thread migration alone. The precise
+cause of the original slow intervals remains open. Next attribution should
+compare GPU work and host/runtime waiting within fast and slow iterations,
+not assume algorithm drift, clock throttling or scheduler migration from
+these observations alone.
+
+Evidence is retained under `artifacts/musa-20261026/reports/resnet-variance-observed`
+and `reports/resnet-variance-cpu2`: summaries, raw synchronization/query TSVs,
+timing samples, logs and byte-exact outputs. Their `analysis.json` files align
+each measured interval to the runner's timing within 0.05 ms and verify the
+full algorithm/workspace sequence. `resnet-variance/observe.cpp`,
+`run_observations.py` and `analyze_observations.py` reproduce the diagnostic.
+
+### Benchmark host context
+
+`examples/musa/benchmark_aoti.py` now records `host_before` and `host_after`
+for every subprocess, plus `last_process_context` even if the runner fails.
+These snapshots contain launcher CPU affinity and available CPU-frequency
+policy/devfreq attributes. CPU frequencies use sysfs kHz values; devfreq
+frequencies use Hz. Reads occur outside the child process's timed method
+intervals; no affinity, clocks or governors are modified.
+
+Unavailable interfaces and individual read failures are explicitly recorded,
+not substituted with zero and not treated as benchmark failures. In this
+environment policy4/policy8 return `Device or resource busy` for some fields;
+global governor-tuning directories are not misidentified as CPU policies.
+Launcher affinity is not proof of the child's eventual affinity if a wrapper
+or runtime changes it. Before/after snapshots are execution context, not
+continuous clock measurements or a root-cause diagnosis.
+
+The benchmark unit suite now contains eight methods, covering readable,
+missing and partially unreadable host data and retaining context on runner
+failure. All eight benchmark and seven package tests pass, as do nine CI
+driver tests and the relocated deployment test. A final `python -S` ResNet18
+BF16 224x224 smoke checks byte-exact output and the real snapshot fields in
+`reports/resnet-variance-host-metadata-final`; its five samples are a tooling
+smoke, not a new performance claim. Native runtime binaries are unchanged.

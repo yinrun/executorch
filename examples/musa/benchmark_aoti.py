@@ -91,6 +91,56 @@ def positive(value: str) -> int:
     return result
 
 
+def host_environment(sysfs_root: Path = Path("/sys")) -> dict:
+    context = {"timestamp_utc": datetime.now(timezone.utc).isoformat()}
+    try:
+        context["launcher_cpu_affinity"] = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError) as error:
+        context["launcher_cpu_affinity_error"] = str(error)
+    for key, relative, attributes in (
+        (
+            "cpu_frequency_policies",
+            "devices/system/cpu/cpufreq",
+            (
+                "affected_cpus",
+                "scaling_driver",
+                "scaling_governor",
+                "scaling_min_freq",
+                "scaling_max_freq",
+                "scaling_cur_freq",
+            ),
+        ),
+        (
+            "device_frequency_policies",
+            "class/devfreq",
+            ("name", "governor", "min_freq", "max_freq", "cur_freq"),
+        ),
+    ):
+        directory = sysfs_root / relative
+        policies = {"path": str(directory), "entries": []}
+        context[key] = policies
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError as error:
+            policies["error"] = str(error)
+            continue
+        for entry in entries:
+            if key == "cpu_frequency_policies" and not entry.name.startswith("policy"):
+                continue
+            if not entry.is_dir():
+                continue
+            record = {"name": entry.name, "values": {}, "errors": {}}
+            for attribute in attributes:
+                try:
+                    record["values"][attribute] = (
+                        (entry / attribute).read_text().strip()
+                    )
+                except OSError as error:
+                    record["errors"][attribute] = str(error)
+            policies["entries"].append(record)
+    return context
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", type=Path, required=True)
@@ -172,18 +222,27 @@ def main() -> int:
                 f"--musa_warmup_executions={args.warmup}",
                 f"--num_executions={args.iterations}",
             ]
-            with (sample / "stdout.log").open("w") as stdout, (
-                sample / "stderr.log"
-            ).open("w") as stderr:
-                subprocess.run(
-                    command,
-                    env=environment,
-                    cwd=sample,
-                    stdout=stdout,
-                    stderr=stderr,
-                    timeout=args.timeout,
-                    check=True,
-                )
+            host_before = host_environment()
+            try:
+                with (sample / "stdout.log").open("w") as stdout, (
+                    sample / "stderr.log"
+                ).open("w") as stderr:
+                    subprocess.run(
+                        command,
+                        env=environment,
+                        cwd=sample,
+                        stdout=stdout,
+                        stderr=stderr,
+                        timeout=args.timeout,
+                        check=True,
+                    )
+            finally:
+                host_after = host_environment()
+                report["last_process_context"] = {
+                    "command": command,
+                    "host_before": host_before,
+                    "host_after": host_after,
+                }
             data = json.loads(timing.read_text())
             validate_samples(data, args.warmup, args.iterations)
             outputs = [
@@ -199,6 +258,8 @@ def main() -> int:
             report["processes"].append(
                 {
                     "command": command,
+                    "host_before": host_before,
+                    "host_after": host_after,
                     "timing": data,
                     "output_fingerprints": [fingerprint(path) for path in outputs],
                     "execute": summarize(data["execute_ms"]),
