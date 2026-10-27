@@ -1900,9 +1900,15 @@ Evidence under `activation-out` in the artifact root above:
   compilation timings or inference latency measurements.
 - `pool-codegen-regressions/compile.log`: 13 methods passed, adding pooled
   activation, batch-normalization and convolution compilation to the hook
-  tests. Runner regressions and replay of the original pre-fix pool-offset
-  artifact are separate gates; their final result belongs in
-  `pool-codegen-verification.json` when complete.
+  tests. `pool-codegen-regressions/runner.log` also records five passing
+  activation/convolution runner methods without skips (63 fresh processes).
+- `pool-codegen-verification.json`: the complete regression gate passed
+  with unchanged compiler source and runtime binary hashes. Four additional
+  standalone processes replayed the original pre-fix DeepLab PTE/PTD, with
+  five forwards per shape and byte-identical final outputs versus the new
+  factored-offset export. All eight raw outputs left by the original job
+  also match. This validates expression equivalence for those artifacts;
+  the original producer remains recorded as `failed_timeout_preserved`.
 
 The earlier classifier matrices used the pre-fix pool code generator.
 Fresh pooled classifier exports are required before claiming a complete
