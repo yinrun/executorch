@@ -10,6 +10,7 @@
 #include <executorch/backends/aoti/slim/c10/core/Device.h>
 #include <executorch/backends/aoti/slim/c10/core/ScalarType.h>
 #include <executorch/backends/aoti/slim/core/slim_tensor.h>
+#include <executorch/backends/aoti/slim/cuda/guard.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/platform/log.h>
@@ -175,12 +176,37 @@ struct MudnnContext {
 };
 
 struct DeviceWorkspace {
+  explicit DeviceWorkspace(cudaStream_t selected_stream)
+      : stream(selected_stream) {}
+
+  DeviceWorkspace(const DeviceWorkspace&) = delete;
+  DeviceWorkspace& operator=(const DeviceWorkspace&) = delete;
+
   void* data = nullptr;
+  cudaStream_t stream;
+  bool stream_ordered = true;
 
   ~DeviceWorkspace() {
-    if (data != nullptr) {
-      cudaFree(data);
+    release();
+  }
+
+  Error release() {
+    if (data == nullptr) {
+      return Error::Ok;
     }
+    void* allocation = data;
+    data = nullptr;
+    const auto status = stream_ordered ? cudaFreeAsync(allocation, stream)
+                                       : cudaFree(allocation);
+    if (status != cudaSuccess) {
+      ET_LOG(
+          Error,
+          "MUSA convolution: %s workspace failed: %s",
+          stream_ordered ? "cudaFreeAsync" : "cudaFree",
+          cudaGetErrorString(status));
+      return Error::Internal;
+    }
+    return Error::Ok;
   }
 };
 
@@ -262,6 +288,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       InvalidArgument,
       "MUSA convolution tensor dimensions are incompatible");
 
+  auto device_guard = CUDAGuard::create(input->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
   std::unique_ptr<SlimTensor> contiguous_input;
   std::unique_ptr<SlimTensor> contiguous_weight;
   std::unique_ptr<SlimTensor> contiguous_bias;
@@ -502,32 +530,42 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       ? MUDNN_CONVOLUTION_BWD_DATA_ALGO_GEMM
       : MUDNN_CONVOLUTION_BWD_DATA_ALGO_IMPLICIT_GEMM;
   size_t workspace_size = 0;
-  error = transposed
-      ? check_mudnn(
-            mudnnGetConvolutionBackwardDataWorkspaceSize(
-                context.handle,
-                context.weight,
-                context.input,
-                context.convolution,
-                context.output,
-                backward_data_algorithm,
-                &workspace_size),
-            "mudnnGetConvolutionBackwardDataWorkspaceSize")
-      : check_mudnn(
-            mudnnGetConvolutionForwardWorkspaceSize(
-                context.handle,
-                context.input,
-                context.weight,
-                context.convolution,
-                context.output,
-                forward_algorithm,
-                &workspace_size),
-            "mudnnGetConvolutionForwardWorkspaceSize");
+  error = transposed ? check_mudnn(
+                           mudnnGetConvolutionBackwardDataWorkspaceSize(
+                               context.handle,
+                               context.weight,
+                               context.input,
+                               context.convolution,
+                               context.output,
+                               backward_data_algorithm,
+                               &workspace_size),
+                           "mudnnGetConvolutionBackwardDataWorkspaceSize")
+                     : check_mudnn(
+                           mudnnGetConvolutionForwardWorkspaceSize(
+                               context.handle,
+                               context.input,
+                               context.weight,
+                               context.convolution,
+                               context.output,
+                               forward_algorithm,
+                               &workspace_size),
+                           "mudnnGetConvolutionForwardWorkspaceSize");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
-  DeviceWorkspace workspace;
+  DeviceWorkspace workspace(stream_result.get());
   if (workspace_size != 0) {
-    if (cudaMalloc(&workspace.data, workspace_size) != cudaSuccess) {
-      ET_LOG(Error, "MUSA convolution: cudaMalloc workspace failed");
+    auto status =
+        cudaMallocAsync(&workspace.data, workspace_size, workspace.stream);
+    if (status == musaErrorNotSupported) {
+      cudaGetLastError();
+      workspace.stream_ordered = false;
+      status = cudaMalloc(&workspace.data, workspace_size);
+    }
+    if (status != cudaSuccess) {
+      ET_LOG(
+          Error,
+          "MUSA convolution: %s workspace failed: %s",
+          workspace.stream_ordered ? "cudaMallocAsync" : "cudaMalloc",
+          cudaGetErrorString(status));
       return Error::Internal;
     }
   }
@@ -641,6 +679,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
     ET_CHECK_OK_OR_RETURN_ERROR(error);
   }
 
+  ET_CHECK_OK_OR_RETURN_ERROR(workspace.release());
   *ret_output = output.release();
   return Error::Ok;
 }
