@@ -47,6 +47,7 @@ class MusaCiTest(unittest.TestCase):
             commands["build"][-len(musa_ci.NATIVE_TARGETS) :],
             list(musa_ci.NATIVE_TARGETS),
         )
+        self.assertIn("test_musa_storage", commands["build"])
         self.assertIn("--no-tests=error", commands["native"])
         self.assertEqual(
             commands["native"][commands["native"].index("--parallel") + 1], "1"

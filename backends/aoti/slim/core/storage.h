@@ -184,15 +184,17 @@ struct DeviceTraits<c10::DeviceType::CUDA> {
           static_cast<int>(dst_device.index()));
     }
 
-    // Plain cudaMemcpy is host-synchronous on the default stream, which a
-    // green context would not confine. When a caller stream is active, copy
-    // on it asynchronously and synchronize it to preserve blocking
-    // semantics; otherwise fall back to the plain synchronous copy.
-    const auto caller_stream = executorch::extension::cuda::getCallerStream();
-    if (caller_stream) {
-      ET_CUDA_CHECK(
-          cudaMemcpyAsync(dst, src, nbytes, direction, *caller_stream));
-      ET_CUDA_CHECK(cudaStreamSynchronize(*caller_stream));
+    auto copy_stream = executorch::extension::cuda::getCallerStream();
+#if defined(EXECUTORCH_USE_MUSA)
+    if (!copy_stream) {
+      const auto& gpu_device = dst_device.is_cpu() ? src_device : dst_device;
+      copy_stream =
+          executorch::backends::cuda::peekCurrentCUDAStream(gpu_device.index());
+    }
+#endif
+    if (copy_stream) {
+      ET_CUDA_CHECK(cudaMemcpyAsync(dst, src, nbytes, direction, *copy_stream));
+      ET_CUDA_CHECK(cudaStreamSynchronize(*copy_stream));
     } else {
       ET_CUDA_CHECK(cudaMemcpy(dst, src, nbytes, direction));
     }

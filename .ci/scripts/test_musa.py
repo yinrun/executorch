@@ -14,7 +14,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 NATIVE_TARGETS = tuple(
     f"test_musa_{name}"
-    for name in ("addmm", "convolution", "batch_norm", "activation", "device")
+    for name in (
+        "addmm",
+        "convolution",
+        "batch_norm",
+        "activation",
+        "device",
+        "storage",
+    )
 )
 MODELS = (
     "mlp",
