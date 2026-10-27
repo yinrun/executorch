@@ -1947,3 +1947,56 @@ artifact compatibility, allocation traces and four-round balanced latency
 measurements are recorded separately in `activation-out/measurements-v2`.
 The model matrix alone does not promote the candidate runtime or prove a
 performance improvement.
+
+## Activation-out model measurements (2026-10-27)
+
+`activation-out/measurements-v2/summary.json` and the independent
+`measurements-v2-verification.json` both passed. The latter rechecks package,
+input/output, source and runtime hashes, raw trace windows/counts/bytes,
+timing samples and all aggregate statistics. The original failed export
+campaign remains preserved; these measurements use the reconciled matrix
+described above, not a relabeled successful original campaign.
+
+Forty fresh standalone processes replayed all legacy/new artifacts on the
+candidate runtime, five forwards per process. Every final output matches
+its saved reference bytes, and dynamic-loader logs confirm the candidate
+shim without any PyTorch/Python runtime library. Twelve instrumented
+processes measured allocations with two warmups and three measured forwards
+each. Runner synchronization boundaries are selected by direct main-callsite
+stacks; allocations inside each window are retained regardless of stack.
+
+| Model | Legacy, unplanned | Out, unplanned | Legacy, pooled | Out, pooled |
+| --- | ---: | ---: | ---: | ---: |
+| MobileNetV3-Small FP16 | 76 | 56 | 29 | 1 |
+| MobileNetV3-Large BF16 | 79 | 57 | 30 | 1 |
+| DeepLabV3-MobileNetV3-Large BF16 | 90 | 68 | 29 | 1 |
+
+These are device allocations per measured forward, identical across all
+three repetitions. Pooled execution is not allocation-free: one device
+allocation remains. Unplanned output reuse also reduces allocations, but
+does not achieve the same reuse as compiler-owned pooled outputs.
+
+Forty-eight separate, uninstrumented benchmark processes cover four balanced
+rotations of the four variants for each model. Each process uses ten warmups
+and fifty measured executions (200 samples per model/variant); all final
+outputs remain byte-identical. The table compares pooled legacy activation
+lowering against pooled out lowering within this campaign:
+
+| Model | Input | Legacy median ms | Out median ms | Median speedup |
+| --- | --- | ---: | ---: | ---: |
+| MobileNetV3-Small FP16 | 2x3x224x224 | 16.745873 | 11.5260415 | 1.45x |
+| MobileNetV3-Large BF16 | 2x3x224x224 | 27.006925 | 20.642292 | 1.31x |
+| DeepLabV3-MobileNetV3-Large BF16 | 2x3x64x64 | 22.802870 | 10.5393995 | 2.16x |
+
+All four per-round pooled medians improve for all three models. Host
+affinity remains CPUs 0-3, with before/after frequency-policy snapshots
+recorded; no governors, affinities or unrelated jobs were changed. These
+are shared-host measurements, not fixed-clock guarantees: DeepLab out-path
+round medians range from 9.992123 to 16.8284445 ms, and some variants have
+large timing tails. Minimum, mean, p90 and maximum values remain in the raw
+summary. Do not combine these ratios with earlier convolution or
+batch-normalization campaigns, or extrapolate them to other shapes/dtypes.
+
+The candidate remains `build-activation-out`; the default environment still
+uses `build-convolution-out`. Deployment/package smoke gates and promotion
+are separate from these successful correctness and performance gates.
