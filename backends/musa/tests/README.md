@@ -2000,3 +2000,23 @@ batch-normalization campaigns, or extrapolate them to other shapes/dtypes.
 The candidate remains `build-activation-out`; the default environment still
 uses `build-convolution-out`. Deployment/package smoke gates and promotion
 are separate from these successful correctness and performance gates.
+
+## Relocated activation deployment regression (2026-10-27)
+
+`TestMusaDeployment.test_relocated_pooled_activation_outputs` now exercises
+packaging and relocation of a Hardswish/Hardsigmoid chain that retains both
+intermediate and final outputs. Six exports cover FP32/FP16/BF16 and
+contiguous/transposed inputs with pooled compiler-owned outputs. Packages
+are moved to paths containing spaces and launched without inherited build
+library paths or Python configuration. Eighteen fresh processes cover
+dynamic batches 1/2/3 and five forwards each; all 36 final output tensors
+match MUSA eager exactly. Loader logs require the relocated shim and reject
+Torch/Python runtime dependencies. The test is included automatically by
+the existing CI deployment suite.
+
+`activation-out/deployment/deployment.log` records both deployment methods
+passing without skips, including the existing four MLP/simple-CNN
+configurations, relocated benchmarking and invalid-argument checks.
+`deployment/package-unit.log` records all fifteen package/benchmark unit
+tests passing. These test results do not alone certify the real-model
+packages or change the default runtime.

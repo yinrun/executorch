@@ -10,8 +10,17 @@ import unittest
 from pathlib import Path
 
 import torch
+from torch.export import Dim, export
+
+from executorch.backends.musa import MusaBackend, MusaPartitioner
+from executorch.exir import to_edge_transform_and_lower
+from executorch.extension.export_util.utils import save_pte_program
+
+from backends.musa.tests.test_musa_activation_out import ActivationChain
 
 from examples.musa.aoti_model_acceptance import (
+    _serialization_schema,
+    _snapshot_tensor,
     _write_input,
     _write_tensor,
     export_model,
@@ -27,6 +36,133 @@ from examples.musa.package_aoti import package
     "requires MUSA, EXECUTORCH_MUSA_RUNNER and EXECUTORCH_MUSA_PATCHELF",
 )
 class TestMusaDeployment(unittest.TestCase):
+    def test_relocated_pooled_activation_outputs(self):
+        runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"]).resolve()
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            for strided in (False, True):
+                with self.subTest(dtype=dtype, strided=strided):
+                    values = torch.tensor(
+                        [
+                            -4,
+                            -3,
+                            -2,
+                            -0.310546875,
+                            0,
+                            0.85546875,
+                            0.99609375,
+                            0.66796875,
+                            1,
+                            2,
+                            3,
+                            4,
+                        ],
+                        device="musa",
+                        dtype=dtype,
+                    ).reshape(1, 3, 4)
+                    model = ActivationChain(strided).eval()
+                    exported = export(
+                        model,
+                        (values.repeat(2, 1, 1),),
+                        dynamic_shapes=({0: Dim("batch", min=1, max=3)},),
+                    )
+                    specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        with _serialization_schema(), torch._inductor.config.patch(
+                            memory_planning=True, memory_pool="combined"
+                        ):
+                            manager = to_edge_transform_and_lower(
+                                exported, partitioner=[MusaPartitioner(specs)]
+                            ).to_executorch()
+                            pte = Path(
+                                save_pte_program(manager, "activations", directory)
+                            )
+                        for symbol in (
+                            "aoti_torch_musa_hardswish_out",
+                            "aoti_torch_musa_hardsigmoid_out",
+                            "aoti_torch__alloc_from_pool",
+                        ):
+                            self.assertIn((symbol + "\0").encode(), pte.read_bytes())
+                        bundle = root / "package"
+                        package(
+                            runner.parent,
+                            pte,
+                            root / "aoti_musa_blob.ptd",
+                            bundle,
+                            os.environ["EXECUTORCH_MUSA_PATCHELF"],
+                            "readelf",
+                        )
+                        relocated = root / "relocated activations"
+                        bundle.rename(relocated)
+                        environment = {
+                            "PATH": "/usr/bin:/bin",
+                            "HOME": str(root),
+                            "MUSA_HOME": os.environ.get("MUSA_HOME", "/usr/local/musa"),
+                            "LD_BIND_NOW": "1",
+                            "LD_DEBUG": "libs",
+                        }
+                        for batch in (1, 2, 3):
+                            with self.subTest(batch=batch), torch.no_grad():
+                                value = values.repeat(batch, 1, 1)
+                                expected = tuple(
+                                    _snapshot_tensor(tensor).flatten()
+                                    for tensor in model(value)
+                                )
+                                _write_input(value, root / "input.bin", (3, 3, 4))
+                                result = subprocess.run(
+                                    [
+                                        str(relocated / "run.sh"),
+                                        f"--inputs={root / 'input.bin'}",
+                                        f"--input_shapes={batch}x3x4",
+                                        f"--output_file={root / 'output'}",
+                                        "--num_executions=5",
+                                        "--print_output=none",
+                                    ],
+                                    cwd=root,
+                                    env=environment,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=120,
+                                )
+                                self.assertEqual(
+                                    result.returncode, 0, result.stdout + result.stderr
+                                )
+                                loaded = re.findall(
+                                    r"calling init: (.+)", result.stderr
+                                )
+                                self.assertTrue(
+                                    any(
+                                        str(relocated / "lib/libaoti_cuda_shims.so")
+                                        in path
+                                        for path in loaded
+                                    )
+                                )
+                                for path in loaded:
+                                    self.assertFalse(
+                                        any(
+                                            name in path
+                                            for name in (
+                                                "libtorch",
+                                                "libc10",
+                                                "libpython",
+                                                "libmusa_python",
+                                                "site-packages",
+                                                "dist-packages",
+                                            )
+                                        ),
+                                        path,
+                                    )
+                                for index, reference in enumerate(expected):
+                                    actual = torch.frombuffer(
+                                        bytearray(
+                                            (root / f"output-{index}.bin").read_bytes()
+                                        ),
+                                        dtype=dtype,
+                                    )
+                                    torch.testing.assert_close(
+                                        actual, reference, atol=0, rtol=0
+                                    )
+
     def test_relocated_runtime_without_torch(self):
         runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"]).resolve()
         patchelf = os.environ["EXECUTORCH_MUSA_PATCHELF"]
