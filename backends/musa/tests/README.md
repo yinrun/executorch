@@ -1826,16 +1826,22 @@ Ten CI orchestration tests and two prediction-gate test methods passed
 checks both new classifier names, including prediction mismatches that would
 otherwise pass the numerical tolerance.
 
-The pretrained MobileNetV3-Small FP16 correctness matrix passed at 224x224:
+Both pretrained classifier correctness matrices passed at 224x224:
 dynamic batches 1/2/3, two fresh processes per shape, legacy/out lowering,
-and planning disabled/enabled. All four exports and 24 recorded runner
-outputs pass the unchanged MUSA eager tolerance and top-1 checks; all 12
-new runner outputs are byte-identical to their legacy counterparts. Input
-and eager-reference bytes match between paired exports, and all four PTD
-weight payloads have the same SHA-256 digest. The largest eager logit error
-is `0.009765625`. `activation-out/small-model-verification.json` independently
-rechecks tensor manifests, model payload hashes and byte equality. This is
-execution parity on generated inputs, not ImageNet accuracy validation.
+and planning disabled/enabled.
+
+| Model | Dtype | Exports | Recorded outputs | New outputs byte-identical to legacy | Largest eager logit error |
+| --- | --- | ---: | ---: | ---: | ---: |
+| MobileNetV3-Small | FP16 | 4 | 24 | 12 | 0.009765625 |
+| MobileNetV3-Large | BF16 | 4 | 24 | 12 | 0.0078125 |
+
+All outputs pass the unchanged MUSA eager tolerance and top-1 checks. Input
+and eager-reference bytes match between paired exports; within each model,
+all four PTD weight payloads have the same SHA-256 digest.
+`activation-out/classifier-model-verification.json` independently rechecks
+tensor manifests, model payload hashes, predictions and byte equality.
+The earlier Small-only audit remains in `small-model-verification.json`.
+This is execution parity on generated inputs, not ImageNet accuracy validation.
 
 Evidence lives in `activation-out/models` under the artifact root above.
 For this controlled A/B comparison, `export_variant.py` restores only the
@@ -1847,7 +1853,7 @@ exports run on `build-convolution-out`; out exports run on
 `build-activation-out`. Checkpoint URLs and SHA-256 digests are recorded in
 `activation-out/checkpoints.json`.
 
-Large BF16 and DeepLab BF16 comparisons, standalone legacy artifact replay,
-allocation tracing and balanced latency measurements remain separate gates.
-The Small classifier correctness matrix alone does not promote the candidate
-runtime or establish a model speedup.
+DeepLab BF16 comparisons, standalone legacy artifact replay, allocation
+tracing and balanced latency measurements remain separate gates. Classifier
+correctness alone does not promote the candidate runtime or establish a
+model speedup.
