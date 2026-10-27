@@ -1648,22 +1648,45 @@ methods and both SimpleCNN BF16 and pretrained ResNet18 BF16 with planning
 disabled/enabled, batches 1/2/3 and two fresh processes per shape. All 12
 ResNet18 outputs are byte-identical to the frozen reference.
 
-ResNet18 allocation captures at batch 2 and 224x224 show 16 allocations per
-warmed forward without planning, down from 28 after BatchNorm out. With
-the combined pool, only one allocation remains, down from 21; the three
-measured forwards each allocate an 8,030,208-byte pool and the final output
-remains byte-identical. This is not a peak-memory or latency claim.
+Allocation captures at batch 2 and 224x224 show the following warmed
+forward counts. Each capture records the same count in all three measured
+forwards, with a byte-identical final output:
+
+| Model | Planning disabled, BN out to convolution out | Combined pool, BN out to convolution out |
+| --- | --- | --- |
+| ResNet18 BF16 | 28 to 16 | 21 to 1 |
+| MobileNetV2 FP16 | 71 to 41 | 53 to 1 |
+
+No convolution or BatchNorm output allocations remain inside their native
+shims. ResNet18's single compiler-side pool allocation is 8,030,208 bytes.
+These counts exclude input preparation, warmup and teardown; they are not
+peak-memory or latency measurements.
 
 The initial pooled trace hit the diagnostic's timing-alignment tolerance,
 not a model failure. The follow-up interposer records synchronization
 callsites: the runner's begin/pre-execute/post-execute triplet repeats once
 per iteration, while backend/TLS teardown has distinct call stacks.
-Allocation windows now require this exact repeating pattern and exclude
-warmup/teardown, instead of relying on a 50-microsecond timing match. The
-separate `trace-boundaries` capture verifies the single-allocation result.
-The failed captures are retained; `acceptance-v3` reuses the four completed
-model exports only after rechecking their artifact and runner/shim hashes,
-and continues fresh captures, MobileNetV2, deployment and runner gates.
+MobileNetV2 also grows its workspace during the first warmup, causing an
+additional synchronization inside the convolution shim. Allocation windows
+therefore select only the three direct runner callsites, require their
+exact repeating pattern, and retain all allocations inside each execution
+window regardless of their call stack. Non-runner synchronizations are
+recorded separately rather than assumed to number exactly two. Four
+diagnostic tests cover timing jitter, nested synchronizations, malformed
+runner sequences and failed runtime calls. This replaces the earlier
+50-microsecond timing-match heuristic without dropping operator work.
+
+The failed captures are retained. `acceptance-v4/summary.json` passes the
+core gates: 61 native cases three times, 16 selected compile methods, all
+six model exports (36 recorded runner outputs), relocated standalone
+deployment and all 16 runner tests, with no skips/errors/failures. All 24
+pretrained ResNet18/MobileNetV2 outputs are byte-identical to the original
+references. Five previously completed exports and unchanged native/compile
+results are reused after checking source identity, artifact/binary hashes,
+native XML and test logs; they are not reported as freshly rerun. The new
+MobileNetV2 pooled export, all four allocation captures, deployment and
+runner tests execute in this final core run. A separate audit rechecks all
+six model manifests, recorded outputs and current runner/shim hashes.
 
 `test_musa_convolution_out.py` adds three end-to-end pooled decoder tests
 for transposed 1D/2D/3D convolution. All pass on FP32/FP16/BF16 with dynamic
@@ -1672,9 +1695,11 @@ process, with final outputs checked against same-dtype MUSA eager. They
 also check the out/pool ABI symbols and absence of the returning symbol.
 Evidence is in `decoder-models/tests.log` and `decoder-models/summary.json`.
 
-Remaining gates include 114 frozen-artifact compatibility runs (including
-BatchNorm-out and older pooled exports), dynamic spatial shapes and an
+The 114 frozen-artifact compatibility runs (including BatchNorm-out and
+older pooled exports) are now running, followed by dynamic spatial shapes and an
 uninstrumented balanced latency comparison against the BatchNorm-out build.
-No convolution-out latency gain is claimed before those measurements.
+The queued final audit also rechecks saved outputs, manifests, binaries and
+all 32 benchmark processes. No convolution-out latency gain is claimed
+before those measurements; the default environment has not been promoted.
 Fresh exports using this lowering need `build-convolution-out` (or a newer
 matching build); the previous BatchNorm-only build lacks this new symbol.
