@@ -26,6 +26,7 @@ from executorch.backends.musa.musa_backend import (
     _decompose_scaled_dot_product_attention,
     _normalize_musa_assert_devices,
 )
+from executorch.exir._serialize._cord import FileBackedData
 from examples.musa.aoti_kv_cache_acceptance import (
     GrowingCacheDecoder,
     RollingCacheDecoder,
@@ -136,6 +137,7 @@ class TestMusaAotiFallbacks(unittest.TestCase):
         self.assertIn("aoti_torch_musa_mm_out", fallbacks)
         self.assertIn("aoti_torch_musa_bmm_out", fallbacks)
         self.assertIn("aoti_torch_musa_convolution", fallbacks)
+        self.assertIn("aoti_torch_musa_convolution_out", fallbacks)
         self.assertIn("aoti_torch_musa_batch_norm", fallbacks)
         self.assertIn("aoti_torch_musa_batch_norm_out", fallbacks)
         self.assertIn("aoti_torch_musa_hardswish", fallbacks)
@@ -144,6 +146,50 @@ class TestMusaAotiFallbacks(unittest.TestCase):
 
 @unittest.skipUnless(torch.musa.is_available(), "MUSA is not available")
 class TestMusaAoti(unittest.TestCase):
+
+    def test_convolution_out_memory_planning_compile(self) -> None:
+        for convolution, shape, with_bias in (
+            (nn.Conv1d, (2, 2, 8), False),
+            (nn.Conv2d, (2, 2, 8, 8), True),
+            (nn.Conv3d, (2, 2, 5, 5, 5), False),
+            (nn.ConvTranspose1d, (2, 2, 8), True),
+            (nn.ConvTranspose2d, (2, 2, 8, 8), False),
+            (nn.ConvTranspose3d, (2, 2, 5, 5, 5), True),
+            (nn.Conv2d, (2, 8, 8), False),
+        ):
+            with self.subTest(convolution=convolution.__name__, bias=with_bias):
+                module = (
+                    convolution(2, 4, 3, stride=2, padding=1, groups=2, bias=with_bias)
+                    .eval()
+                    .to("musa", dtype=torch.float16)
+                )
+                example = torch.randn(*shape, device="musa", dtype=torch.float16)
+                with torch._inductor.config.patch(
+                    memory_planning=True, memory_pool="combined"
+                ):
+                    result = MusaBackend.preprocess(
+                        export(module, (example,)),
+                        [MusaBackend.generate_method_name_compile_spec("forward")],
+                    )
+                payloads = [
+                    buffer.prefix(len(buffer))
+                    if isinstance(buffer, FileBackedData)
+                    else bytes(buffer)
+                    for buffer in result.data_store_output.buffers
+                ]
+                for symbol in (
+                    b"aoti_torch_musa_convolution_out\0",
+                    b"aoti_torch__alloc_from_pool\0",
+                ):
+                    self.assertTrue(
+                        any(symbol in payload for payload in payloads), symbol
+                    )
+                self.assertFalse(
+                    any(
+                        b"aoti_torch_musa_convolution\0" in payload
+                        for payload in payloads
+                    )
+                )
 
     def test_batch_norm_out_memory_planning_compile(self) -> None:
         module = nn.BatchNorm2d(4).eval().to("musa", dtype=torch.bfloat16)

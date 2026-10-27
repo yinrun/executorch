@@ -220,6 +220,9 @@ except AttributeError:
 _MUSA_ACTIVATION_HEADER = os.path.join(
     os.path.dirname(_MUSA_BATCH_NORM_HEADER), "musa_activation.h"
 )
+_MUSA_CONVOLUTION_HEADER = os.path.join(
+    os.path.dirname(_MUSA_BATCH_NORM_HEADER), "musa_convolution.h"
+)
 
 
 def _decompose_musa_hardswish(input: torch.Tensor) -> torch.Tensor:
@@ -417,7 +420,7 @@ def _musa_aoti_compile_context():
     convolution_op = torch.ops.aten.convolution.default
     original_convolution = lowering.lowerings[convolution_op]
 
-    def convolution_with_fused_bias(
+    def convolution_with_preallocated_output(
         input,
         weight,
         bias,
@@ -428,18 +431,39 @@ def _musa_aoti_compile_context():
         output_padding,
         groups,
     ):
-        if input.get_device().type == "musa" and bias is not None and not transposed:
+        if input.get_device().type == "musa":
+            if len(input.get_size()) == len(weight.get_size()) - 1:
+                return lowering.squeeze(
+                    convolution_with_preallocated_output(
+                        lowering.unsqueeze(input, 0),
+                        weight,
+                        bias,
+                        stride,
+                        padding,
+                        dilation,
+                        transposed,
+                        output_padding,
+                        groups,
+                    ),
+                    0,
+                )
             input = ir.ExternKernel.require_contiguous(input)
             weight = ir.ExternKernel.require_contiguous(weight)
-            bias = ir.ExternKernel.require_contiguous(bias)
-            for tensor in (input, weight, bias):
+            inputs = [input, weight]
+            if bias is not None:
+                bias = ir.ExternKernel.require_contiguous(bias)
+                inputs.append(bias)
+            for tensor in inputs:
                 tensor.realize()
+            spatial_dimensions = len(weight.get_size()) - 2
             parameters = {
-                "stride": tuple(stride),
-                "padding": tuple(padding),
-                "dilation": tuple(dilation),
+                "stride": conv.pad_listlike(tuple(stride), spatial_dimensions),
+                "padding": conv.pad_listlike(tuple(padding), spatial_dimensions),
+                "dilation": conv.pad_listlike(tuple(dilation), spatial_dimensions),
                 "transposed": transposed,
-                "output_padding": tuple(output_padding),
+                "output_padding": conv.pad_listlike(
+                    tuple(output_padding), spatial_dimensions
+                ),
                 "groups": groups,
             }
             inferred_layout = conv.conv_layout(input, weight, bias, **parameters)
@@ -449,9 +473,19 @@ def _musa_aoti_compile_context():
                 inferred_layout.size,
                 ir.FlexibleLayout.contiguous_strides(inferred_layout.size),
             )
-            return conv.aten_convolution.bind(
-                [input, weight, bias], layout, list(parameters), **parameters
-            ).output_node()
+            constant_args = list(parameters.values())
+            if bias is None:
+                constant_args.insert(0, None)
+            return ir.TensorBox.create(
+                ir.ExternKernelOut(
+                    layout=layout,
+                    inputs=inputs,
+                    constant_args=constant_args,
+                    python_kernel_name="aten.convolution.out",
+                    cpp_kernel_name="aoti_torch_musa_convolution_out",
+                    op_overload=torch.ops.aten.convolution.out,
+                )
+            )
         return original_convolution(
             input,
             weight,
@@ -469,6 +503,7 @@ def _musa_aoti_compile_context():
         if device == "musa":
             self.header.splice(f'#include "{_MUSA_BATCH_NORM_HEADER}"')
             self.header.splice(f'#include "{_MUSA_ACTIVATION_HEADER}"')
+            self.header.splice(f'#include "{_MUSA_CONVOLUTION_HEADER}"')
 
     def get_runtime_libraries(self: Any) -> List[str]:
         libraries = original_get_libraries(self)
@@ -491,7 +526,7 @@ def _musa_aoti_compile_context():
     CppWrapperCpu.add_device_include = add_device_include_with_musa_shims
     try:
         with mock.patch.dict(
-            lowering.lowerings, {convolution_op: convolution_with_fused_bias}
+            lowering.lowerings, {convolution_op: convolution_with_preallocated_output}
         ), mock.patch.object(
             CppTorchDeviceOptions, "get_libraries", get_runtime_libraries
         ):
@@ -605,6 +640,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_mm_out": None,
             "aoti_torch_musa_bmm_out": None,
             "aoti_torch_musa_convolution": None,
+            "aoti_torch_musa_convolution_out": None,
             "aoti_torch_musa_batch_norm": None,
             "aoti_torch_musa_batch_norm_out": None,
             "aoti_torch_musa_hardswish": None,

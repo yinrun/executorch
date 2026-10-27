@@ -10,37 +10,21 @@
 #include <executorch/backends/aoti/slim/c10/core/Device.h>
 #include <executorch/backends/aoti/slim/c10/core/ScalarType.h>
 #include <executorch/backends/aoti/slim/cuda/guard.h>
+#include <executorch/backends/aoti/slim/factory/empty.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
+#include <executorch/backends/cuda/runtime/shims/musa_convolution.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/platform/platform.h>
 
-namespace executorch::backends::cuda {
-extern "C" {
-AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
-    SlimTensor*,
-    SlimTensor*,
-    SlimTensor* const*,
-    const int64_t*,
-    int64_t,
-    const int64_t*,
-    int64_t,
-    const int64_t*,
-    int64_t,
-    int32_t,
-    const int64_t*,
-    int64_t,
-    int64_t,
-    SlimTensor**);
-}
-}
-
 namespace {
 
+using executorch::backends::aoti::slim::IntArrayRef;
 using executorch::backends::aoti::slim::c10::DeviceType;
 using executorch::backends::aoti::slim::c10::ScalarType;
-using executorch::backends::cuda::SlimTensor;
 using executorch::backends::cuda::aoti_torch_empty_strided;
 using executorch::backends::cuda::aoti_torch_musa_convolution;
+using executorch::backends::cuda::aoti_torch_musa_convolution_out;
+using executorch::backends::cuda::SlimTensor;
 using executorch::runtime::Error;
 
 uint16_t float_to_half_bits(float value) {
@@ -175,6 +159,8 @@ void expect_values(
 
 class MusaConvolutionTest : public ::testing::Test {
  protected:
+  cudaStream_t stream = nullptr;
+
   void SetUp() override {
     et_pal_init();
     int device_count = 0;
@@ -182,7 +168,307 @@ class MusaConvolutionTest : public ::testing::Test {
       GTEST_SKIP() << "MUSA device is not available";
     }
   }
+
+  void TearDown() override {
+    if (stream != nullptr) {
+      EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+      EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+    }
+  }
 };
+
+TEST_F(MusaConvolutionTest, OutMatchesAllocatingAcrossRanksAndDtypes) {
+  ASSERT_EQ(
+      musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  auto guard = executorch::backends::cuda::CUDAStreamGuard::create(stream, 0);
+  ASSERT_TRUE(guard.ok());
+  auto strides_for = [](const std::vector<int64_t>& sizes) {
+    std::vector<int64_t> strides(sizes.size(), 1);
+    for (size_t dimension = sizes.size() - 1; dimension > 0; --dimension) {
+      strides[dimension - 1] = strides[dimension] * sizes[dimension];
+    }
+    return strides;
+  };
+  for (auto dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    for (int64_t rank : {3, 4, 5}) {
+      for (bool transposed : {false, true}) {
+        for (int64_t groups : {1, 2}) {
+          for (bool with_bias : {false, true}) {
+            SCOPED_TRACE(
+                ::testing::Message()
+                << static_cast<int>(dtype) << ":" << rank << ":" << transposed
+                << ":" << groups << ":" << with_bias);
+            std::vector<int64_t> input_sizes(rank, 3);
+            input_sizes[0] = 1;
+            input_sizes[1] = 2;
+            std::vector<int64_t> weight_sizes(rank, 2);
+            weight_sizes[1] = 2 / groups;
+            std::unique_ptr<SlimTensor> input(
+                empty_tensor(dtype, input_sizes, strides_for(input_sizes)));
+            std::unique_ptr<SlimTensor> weight(
+                empty_tensor(dtype, weight_sizes, strides_for(weight_sizes)));
+            std::unique_ptr<SlimTensor> bias(empty_tensor(dtype, {2}, {1}));
+            copy_to_device(
+                input.get(),
+                encode_values(std::vector<float>(input->numel(), 0.5f), dtype));
+            copy_to_device(
+                weight.get(),
+                encode_values(
+                    std::vector<float>(weight->numel(), 0.25f), dtype));
+            copy_to_device(bias.get(), encode_values({0.5f, 1.0f}, dtype));
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const std::vector<int64_t> stride(rank - 2, transposed ? 2 : 1);
+            const std::vector<int64_t> padding(rank - 2, 1);
+            const std::vector<int64_t> dilation(rank - 2, rank == 3 ? 2 : 1);
+            const std::vector<int64_t> output_padding(
+                rank - 2, transposed ? 1 : 0);
+            SlimTensor* bias_handle = with_bias ? bias.get() : nullptr;
+            SlimTensor* const* bias_argument =
+                !with_bias && transposed ? nullptr : &bias_handle;
+            SlimTensor* raw_reference = nullptr;
+            ASSERT_EQ(
+                aoti_torch_musa_convolution(
+                    input.get(),
+                    weight.get(),
+                    bias_argument,
+                    stride.data(),
+                    rank - 2,
+                    padding.data(),
+                    rank - 2,
+                    dilation.data(),
+                    rank - 2,
+                    transposed,
+                    output_padding.data(),
+                    rank - 2,
+                    groups,
+                    &raw_reference),
+                Error::Ok);
+            std::unique_ptr<SlimTensor> reference(raw_reference);
+            ASSERT_NE(reference, nullptr);
+            const int64_t pool_size = reference->nbytes() + 64;
+            std::unique_ptr<SlimTensor> pool(
+                empty_tensor(ScalarType::Byte, {pool_size}, {1}));
+            std::vector<uint8_t> initial(pool_size, 0xA5);
+            copy_to_device(pool.get(), initial);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            std::vector<uint8_t> expected(reference->nbytes());
+            ASSERT_EQ(
+                cudaMemcpy(
+                    expected.data(),
+                    reference->data_ptr(),
+                    expected.size(),
+                    cudaMemcpyDeviceToHost),
+                cudaSuccess);
+            SlimTensor output(
+                pool->storage(),
+                reference->sizes(),
+                reference->strides(),
+                dtype,
+                32 / itemsize(dtype));
+            const auto output_pointer = output.data_ptr();
+            for (int repeat = 0; repeat < 3; ++repeat) {
+              ASSERT_EQ(
+                  aoti_torch_musa_convolution_out(
+                      &output,
+                      input.get(),
+                      weight.get(),
+                      bias_argument,
+                      stride.data(),
+                      rank - 2,
+                      padding.data(),
+                      rank - 2,
+                      dilation.data(),
+                      rank - 2,
+                      transposed,
+                      output_padding.data(),
+                      rank - 2,
+                      groups),
+                  Error::Ok);
+              ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+              EXPECT_EQ(output.data_ptr(), output_pointer);
+              std::vector<uint8_t> actual(output.nbytes());
+              ASSERT_EQ(
+                  cudaMemcpy(
+                      actual.data(),
+                      output.data_ptr(),
+                      actual.size(),
+                      cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+              EXPECT_EQ(actual, expected);
+            }
+            std::vector<uint8_t> actual(pool_size);
+            ASSERT_EQ(
+                cudaMemcpy(
+                    actual.data(),
+                    pool->data_ptr(),
+                    actual.size(),
+                    cudaMemcpyDeviceToHost),
+                cudaSuccess);
+            for (size_t index = 0; index < actual.size(); ++index) {
+              if (index < 32 || index >= 32 + reference->nbytes()) {
+                EXPECT_EQ(actual[index], initial[index]) << index;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(MusaConvolutionTest, OutSupportsDisjointStridedPoolViews) {
+  std::unique_ptr<SlimTensor> pool(empty_tensor(ScalarType::Float, {64}, {1}));
+  const std::vector<int64_t> sizes{1, 1, 3, 3};
+  const std::vector<int64_t> input_strides{18, 18, 6, 2};
+  const std::vector<int64_t> output_sizes{1, 1, 2, 2};
+  const std::vector<int64_t> output_strides{4, 4, 2, 1};
+  SlimTensor input(
+      pool->storage(),
+      IntArrayRef(sizes.data(), sizes.size()),
+      IntArrayRef(input_strides.data(), input_strides.size()),
+      ScalarType::Float);
+  SlimTensor output(
+      pool->storage(),
+      IntArrayRef(output_sizes.data(), output_sizes.size()),
+      IntArrayRef(output_strides.data(), output_strides.size()),
+      ScalarType::Float,
+      24);
+  std::vector<float> physical(64, -1);
+  for (size_t index = 0; index < 9; ++index) {
+    physical[index * 2] = index + 1;
+  }
+  copy_to_device(pool.get(), encode_values(physical, ScalarType::Float));
+  std::unique_ptr<SlimTensor> weight(
+      empty_tensor(ScalarType::Float, {1, 1, 2, 2}, {8, 8, 4, 2}));
+  copy_to_device(
+      weight.get(), encode_values({1, -1, 2, -1, 3, -1, 4}, ScalarType::Float));
+  std::unique_ptr<SlimTensor> bias(empty_tensor(ScalarType::Float, {1}, {1}));
+  copy_to_device(bias.get(), encode_values({1}, ScalarType::Float));
+  SlimTensor* bias_handle = bias.get();
+  const int64_t stride[] = {1, 1};
+  const int64_t padding[] = {0, 0};
+  ASSERT_EQ(
+      aoti_torch_musa_convolution_out(
+          &output,
+          &input,
+          weight.get(),
+          &bias_handle,
+          stride,
+          2,
+          padding,
+          2,
+          stride,
+          2,
+          false,
+          padding,
+          2,
+          1),
+      Error::Ok);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  expect_values(copy_from_device(&output, ScalarType::Float), {38, 48, 68, 78});
+  const auto actual = copy_from_device(pool.get(), ScalarType::Float);
+  for (size_t index = 0; index < actual.size(); ++index) {
+    if (index < 24 || index >= 28) {
+      EXPECT_EQ(actual[index], physical[index]);
+    }
+  }
+}
+
+TEST_F(MusaConvolutionTest, OutRejectsInvalidDestinationsAndOverlap) {
+  std::unique_ptr<SlimTensor> input(
+      empty_tensor(ScalarType::Float, {1, 1, 2, 2}, {4, 4, 2, 1}));
+  std::unique_ptr<SlimTensor> weight(
+      empty_tensor(ScalarType::Float, {1, 1, 1, 1}, {1, 1, 1, 1}));
+  std::unique_ptr<SlimTensor> output(
+      empty_tensor(ScalarType::Float, {1, 1, 2, 2}, {4, 4, 2, 1}));
+  copy_to_device(input.get(), encode_values({1, 2, 3, 4}, ScalarType::Float));
+  copy_to_device(weight.get(), encode_values({1}, ScalarType::Float));
+  copy_to_device(output.get(), encode_values({7, 7, 7, 7}, ScalarType::Float));
+  const int64_t stride[] = {1, 1};
+  const int64_t padding[] = {0, 0};
+  auto run = [&](SlimTensor* destination,
+                 SlimTensor* bias = nullptr,
+                 SlimTensor* selected_weight = nullptr) {
+    return aoti_torch_musa_convolution_out(
+        destination,
+        input.get(),
+        selected_weight == nullptr ? weight.get() : selected_weight,
+        &bias,
+        stride,
+        2,
+        padding,
+        2,
+        stride,
+        2,
+        false,
+        padding,
+        2,
+        1);
+  };
+  EXPECT_EQ(run(nullptr), Error::InvalidArgument);
+  EXPECT_EQ(run(input.get()), Error::InvalidArgument);
+  SlimTensor undefined;
+  EXPECT_EQ(run(&undefined), Error::InvalidArgument);
+  std::unique_ptr<SlimTensor> wrong_shape(
+      empty_tensor(ScalarType::Float, {1, 1, 1, 2}, {2, 2, 2, 1}));
+  EXPECT_EQ(run(wrong_shape.get()), Error::InvalidArgument);
+  std::unique_ptr<SlimTensor> wrong_dtype(
+      empty_tensor(ScalarType::Half, {1, 1, 2, 2}, {4, 4, 2, 1}));
+  EXPECT_EQ(run(wrong_dtype.get()), Error::InvalidArgument);
+  const std::vector<int64_t> sizes{1, 1, 2, 2};
+  const std::vector<int64_t> strides{4, 4, 2, 1};
+  const std::vector<int64_t> strided{4, 4, 1, 2};
+  auto host_output = executorch::backends::aoti::slim::empty(
+      IntArrayRef(sizes.data(), sizes.size()),
+      ScalarType::Float,
+      executorch::backends::aoti::slim::c10::Device(DeviceType::CPU));
+  EXPECT_EQ(run(&host_output), Error::InvalidArgument);
+  SlimTensor noncontiguous(
+      output->storage(),
+      IntArrayRef(sizes.data(), sizes.size()),
+      IntArrayRef(strided.data(), strided.size()),
+      ScalarType::Float);
+  EXPECT_EQ(run(&noncontiguous), Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_musa_convolution_out(
+          output.get(),
+          &noncontiguous,
+          weight.get(),
+          nullptr,
+          stride,
+          2,
+          padding,
+          2,
+          stride,
+          2,
+          false,
+          padding,
+          2,
+          1),
+      Error::InvalidArgument);
+  SlimTensor insufficient(
+      output->storage(),
+      IntArrayRef(sizes.data(), sizes.size()),
+      IntArrayRef(strides.data(), strides.size()),
+      ScalarType::Float,
+      1);
+  EXPECT_EQ(run(&insufficient), Error::InvalidArgument);
+  SlimTensor bias_alias(output->storage(), {1}, {1}, ScalarType::Float, 2);
+  EXPECT_EQ(run(output.get(), &bias_alias), Error::InvalidArgument);
+  const std::vector<int64_t> weight_sizes{1, 1, 1, 1};
+  SlimTensor weight_alias(
+      output->storage(),
+      IntArrayRef(weight_sizes.data(), weight_sizes.size()),
+      IntArrayRef(weight_sizes.data(), weight_sizes.size()),
+      ScalarType::Float,
+      1);
+  EXPECT_EQ(run(output.get(), nullptr, &weight_alias), Error::InvalidArgument);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  EXPECT_EQ(
+      copy_from_device(output.get(), ScalarType::Float),
+      std::vector<float>({7, 7, 7, 7}));
+}
 
 TEST_F(MusaConvolutionTest, QueuedWorkspaceAcrossStreamsAndThreads) {
   std::array<std::thread, 2> workers;

@@ -1604,3 +1604,48 @@ starts only after these measurements finish.
 The default environment has not been promoted at this checkpoint. New
 out-lowered models require a runner and shim library exporting the matching
 out ABI, not the previous runtime without it.
+
+### Compiler-owned convolution outputs (2026-10-27)
+
+MUSA convolution now lowers through `ExternKernelOut` and
+`aoti_torch_musa_convolution_out`. The compiler owns the contiguous output,
+so ordinary buffer reuse and combined-pool planning can include convolution
+results. The native out shim and the retained returning shim call the same
+muDNN implementation, preserving fused forward bias, transposed bias,
+workspace-cache behavior and selected-stream routing. This does not change
+the synchronous SlimTensor allocator policy or the pinned-readback path.
+
+The borrowed destination must match the inferred output shape, dtype and
+device and have sufficient contiguous storage. Byte-range checks reject
+overlap with input, weight or bias before cloning noncontiguous sources or
+launching muDNN. Disjoint shared-pool views are accepted; overlapping
+bounding spans of strided sources are conservatively rejected. The out
+interface covers forward/transposed 1D/2D/3D, groups and optional bias;
+the lowering also preserves unbatched-input handling.
+
+The isolated `build-convolution-out` runner and shims build successfully.
+All 16 native convolution tests pass three consecutive times, preserving
+the 13 returning-shim tests and adding three out-path tests. The positive
+matrix exercises 72 combinations of rank, FP32/FP16/BF16, forward versus
+transposed, dense versus depthwise groups and bias presence. It uses a
+nonblocking selected stream, a nonzero pooled output offset, three writes
+per destination, byte-exact comparison with the returning shim and canary
+checks. Separate tests cover strided shared-pool inputs/weights with an
+analytic reference and reject malformed destinations or input/parameter
+overlap without modifying output. The full native suite now passes 61
+cases three times, with no skips/errors/failures. Four Python
+fallback/context tests also pass. The targeted AOTI test passes all seven
+pooled export cases: forward/transposed 1D/2D/3D plus unbatched Conv2d,
+checking the new symbol and pool ABI and absence of the old returning
+convolution symbol.
+
+Evidence lives under `artifacts/musa-20261026/convolution-out/`.
+The initial broad compile run exposed a test-harness error when inspecting
+file-backed weight buffers, not a compilation failure. The corrected
+symbol check reads both in-memory and file-backed data; the targeted rerun
+passes. The failed run remains outside the fresh `acceptance-v2` run.
+Broad AOTI compile, fresh-model, allocation-capture, deployment and runner
+acceptance is in progress at this checkpoint. No model-level
+allocation reduction or latency gain is claimed for convolution out yet.
+Fresh exports using this lowering need `build-convolution-out` (or a newer
+matching build); the previous BatchNorm-only build lacks this new symbol.

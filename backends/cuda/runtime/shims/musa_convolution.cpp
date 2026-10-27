@@ -12,11 +12,13 @@
 #include <executorch/backends/aoti/slim/core/slim_tensor.h>
 #include <executorch/backends/aoti/slim/cuda/guard.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
+#include <executorch/backends/cuda/runtime/shims/musa_convolution.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/platform/log.h>
 
 namespace executorch::backends::cuda {
 
+using executorch::backends::aoti::slim::IntArrayRef;
 using executorch::backends::aoti::slim::SlimTensor;
 using executorch::backends::aoti::slim::c10::DeviceType;
 using executorch::backends::aoti::slim::c10::ScalarType;
@@ -341,11 +343,8 @@ struct DeviceWorkspace {
   MusaConvolutionWorkspaceCache* cache_ = nullptr;
   bool finished_ = false;
 };
-}
 
-extern "C" {
-
-AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
+AOTITorchError convolution(
     SlimTensor* input,
     SlimTensor* weight,
     SlimTensor* const* bias_handle,
@@ -359,12 +358,16 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
     const int64_t* output_padding,
     int64_t output_padding_len,
     int64_t groups,
+    SlimTensor* output,
     SlimTensor** ret_output) {
   ET_CHECK_OR_RETURN_ERROR(
-      input != nullptr && weight != nullptr && ret_output != nullptr,
+      input != nullptr && weight != nullptr &&
+          (ret_output != nullptr || output != nullptr),
       InvalidArgument,
       "MUSA convolution received a null tensor handle");
-  *ret_output = nullptr;
+  if (ret_output != nullptr) {
+    *ret_output = nullptr;
+  }
   SlimTensor* bias = bias_handle != nullptr ? *bias_handle : nullptr;
 
   const auto dtype = input->dtype();
@@ -419,28 +422,6 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       InvalidArgument,
       "MUSA convolution tensor dimensions are incompatible");
 
-  auto device_guard = CUDAGuard::create(input->device_index());
-  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
-  std::unique_ptr<SlimTensor> contiguous_input;
-  std::unique_ptr<SlimTensor> contiguous_weight;
-  std::unique_ptr<SlimTensor> contiguous_bias;
-  const SlimTensor* input_for_mudnn = input;
-  const SlimTensor* weight_for_mudnn = weight;
-  const SlimTensor* bias_for_mudnn = bias;
-  if (!input->is_contiguous()) {
-    contiguous_input = std::make_unique<SlimTensor>(input->clone_contiguous());
-    input_for_mudnn = contiguous_input.get();
-  }
-  if (!weight->is_contiguous()) {
-    contiguous_weight =
-        std::make_unique<SlimTensor>(weight->clone_contiguous());
-    weight_for_mudnn = contiguous_weight.get();
-  }
-  if (bias != nullptr && !bias->is_contiguous()) {
-    contiguous_bias = std::make_unique<SlimTensor>(bias->clone_contiguous());
-    bias_for_mudnn = contiguous_bias.get();
-  }
-
   const int64_t batch = input->size(0);
   const int64_t input_channels = input->size(1);
   const int64_t output_channels =
@@ -484,18 +465,101 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
         NotSupported,
         "MUSA convolution dimensions exceed muDNN limits");
   }
-  SlimTensor* raw_output = nullptr;
-  auto error = aoti_torch_empty_strided(
-      output_sizes.size(),
-      output_sizes.data(),
-      output_strides.data(),
-      static_cast<int32_t>(dtype),
-      executorch::backends::aoti::slim::c10::device_type_to_aoti(
-          executorch::backends::aoti::slim::c10::kGPU),
-      input->device_index(),
-      &raw_output);
-  ET_CHECK_OK_OR_RETURN_ERROR(error);
-  std::unique_ptr<SlimTensor> output(raw_output);
+  if (output != nullptr) {
+    ET_CHECK_OR_RETURN_ERROR(
+        output->storage() != nullptr && output->is_gpu() &&
+            output->device_index() == input->device_index() &&
+            output->dtype() == dtype &&
+            output->sizes() ==
+                IntArrayRef(output_sizes.data(), output_sizes.size()) &&
+            output->is_contiguous(),
+        InvalidArgument,
+        "MUSA convolution output must be contiguous with matching shape, dtype and device");
+    ET_CHECK_OR_RETURN_ERROR(
+        output->storage_offset() >= 0 &&
+            static_cast<uint64_t>(output->storage_offset()) <=
+                output->storage()->nbytes() / output->itemsize() &&
+            output->nbytes() <= output->storage()->nbytes() -
+                    output->storage_offset() * output->itemsize(),
+        InvalidArgument,
+        "MUSA convolution output exceeds its storage");
+    const auto output_start = reinterpret_cast<uintptr_t>(output->data_ptr());
+    for (auto* source : {input, weight, bias}) {
+      if (source == nullptr) {
+        continue;
+      }
+      ET_CHECK_OR_RETURN_ERROR(
+          source->storage() != nullptr && source->storage_offset() >= 0,
+          InvalidArgument,
+          "MUSA convolution source has invalid storage");
+      const size_t storage_elements =
+          source->storage()->nbytes() / source->itemsize();
+      ET_CHECK_OR_RETURN_ERROR(
+          static_cast<uint64_t>(source->storage_offset()) < storage_elements,
+          InvalidArgument,
+          "MUSA convolution source exceeds its storage");
+      const size_t available_elements =
+          storage_elements - source->storage_offset();
+      size_t last_element = 0;
+      for (int64_t dimension = 0; dimension < source->dim(); ++dimension) {
+        const auto size = source->size(dimension);
+        const auto source_stride = source->stride(dimension);
+        ET_CHECK_OR_RETURN_ERROR(
+            size > 0 && source_stride >= 0 &&
+                (source_stride == 0 ||
+                 static_cast<uint64_t>(size - 1) <=
+                     (available_elements - 1 - last_element) / source_stride),
+            InvalidArgument,
+            "MUSA convolution source strides exceed storage");
+        last_element += (size - 1) * source_stride;
+      }
+      const auto source_start = reinterpret_cast<uintptr_t>(source->data_ptr());
+      const size_t source_bytes = (last_element + 1) * source->itemsize();
+      ET_CHECK_OR_RETURN_ERROR(
+          output_start <= source_start
+              ? source_start - output_start >= output->nbytes()
+              : output_start - source_start >= source_bytes,
+          InvalidArgument,
+          "MUSA convolution output must not overlap input or parameter storage");
+    }
+  }
+
+  auto device_guard = CUDAGuard::create(input->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
+  std::unique_ptr<SlimTensor> contiguous_input;
+  std::unique_ptr<SlimTensor> contiguous_weight;
+  std::unique_ptr<SlimTensor> contiguous_bias;
+  const SlimTensor* input_for_mudnn = input;
+  const SlimTensor* weight_for_mudnn = weight;
+  const SlimTensor* bias_for_mudnn = bias;
+  if (!input->is_contiguous()) {
+    contiguous_input = std::make_unique<SlimTensor>(input->clone_contiguous());
+    input_for_mudnn = contiguous_input.get();
+  }
+  if (!weight->is_contiguous()) {
+    contiguous_weight =
+        std::make_unique<SlimTensor>(weight->clone_contiguous());
+    weight_for_mudnn = contiguous_weight.get();
+  }
+  if (bias != nullptr && !bias->is_contiguous()) {
+    contiguous_bias = std::make_unique<SlimTensor>(bias->clone_contiguous());
+    bias_for_mudnn = contiguous_bias.get();
+  }
+  std::unique_ptr<SlimTensor> allocated_output;
+  auto error = Error::Ok;
+  if (output == nullptr) {
+    error = aoti_torch_empty_strided(
+        output_sizes.size(),
+        output_sizes.data(),
+        output_strides.data(),
+        static_cast<int32_t>(dtype),
+        executorch::backends::aoti::slim::c10::device_type_to_aoti(
+            executorch::backends::aoti::slim::c10::kGPU),
+        input->device_index(),
+        &output);
+    ET_CHECK_OK_OR_RETURN_ERROR(error);
+    allocated_output.reset(output);
+  }
 
   MudnnContext context;
   error = check_mudnn(mudnnCreate(&context.handle), "mudnnCreate");
@@ -796,8 +860,79 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
   }
 
   ET_CHECK_OK_OR_RETURN_ERROR(workspace.finish());
-  *ret_output = output.release();
+  if (ret_output != nullptr) {
+    *ret_output = allocated_output.release();
+  }
   return Error::Ok;
+}
+}
+
+extern "C" {
+
+AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
+    SlimTensor* input,
+    SlimTensor* weight,
+    SlimTensor* const* bias,
+    const int64_t* stride,
+    int64_t stride_len,
+    const int64_t* padding,
+    int64_t padding_len,
+    const int64_t* dilation,
+    int64_t dilation_len,
+    int32_t transposed,
+    const int64_t* output_padding,
+    int64_t output_padding_len,
+    int64_t groups,
+    SlimTensor** ret_output) {
+  return convolution(
+      input,
+      weight,
+      bias,
+      stride,
+      stride_len,
+      padding,
+      padding_len,
+      dilation,
+      dilation_len,
+      transposed,
+      output_padding,
+      output_padding_len,
+      groups,
+      nullptr,
+      ret_output);
+}
+
+AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution_out(
+    SlimTensor* output,
+    SlimTensor* input,
+    SlimTensor* weight,
+    SlimTensor* const* bias,
+    const int64_t* stride,
+    int64_t stride_len,
+    const int64_t* padding,
+    int64_t padding_len,
+    const int64_t* dilation,
+    int64_t dilation_len,
+    int32_t transposed,
+    const int64_t* output_padding,
+    int64_t output_padding_len,
+    int64_t groups) {
+  return convolution(
+      input,
+      weight,
+      bias,
+      stride,
+      stride_len,
+      padding,
+      padding_len,
+      dilation,
+      dilation_len,
+      transposed,
+      output_padding,
+      output_padding_len,
+      groups,
+      output,
+      nullptr);
 }
 }
 }
