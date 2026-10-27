@@ -1914,3 +1914,36 @@ The earlier classifier matrices used the pre-fix pool code generator.
 Fresh pooled classifier exports are required before claiming a complete
 common-compiler model matrix. No runtime promotion or inference speedup is
 claimed by this compiler fix.
+
+## Reconciled activation-out model matrix (2026-10-27)
+
+`activation-out/models-v2/summary.json` and the independent
+`model-matrix-v2-verification.json` now pass for all twelve configurations:
+three pretrained models, legacy/out activation lowering, planning off/on,
+and two fresh processes per tested shape. The original failed campaign is
+unchanged. Six unplanned exports are reused with their original provenance
+and hashes after verifying that they contain no pool-allocation symbol;
+all six planned exports use the new factored-pool compiler. The two DeepLab
+exports come from `pool-codegen-v2`, and all four planned classifier exports
+were regenerated in `models-v2`. Package paths, manifest and payload hashes,
+compiler sources and runtime binaries are recorded explicitly.
+
+| Model | Dtype | Shapes | Recorded outputs | Out outputs byte-identical to legacy | Maximum eager error |
+| --- | --- | ---: | ---: | ---: | ---: |
+| MobileNetV3-Small | FP16 | 3 | 24 | 12 | 0.009765625 |
+| MobileNetV3-Large | BF16 | 3 | 24 | 12 | 0.0078125 |
+| DeepLabV3-MobileNetV3-Large | BF16 | 4 | 32 | 16 | 0.03125 |
+
+The auditor independently rechecks all 80 outputs against saved same-dtype
+MUSA eager tensors with unchanged tolerances, classification top-1 or
+segmentation pixel-label gates, and input/reference byte equality. All 40
+out-path outputs are byte-identical to their legacy counterparts. Each
+model's four PTD payloads have the same digest. The two modified compiler
+Python files are tied to the new regression verification; unchanged native
+source, binary and test-log hashes retain the prior native acceptance.
+
+This is correctness on generated inputs, not dataset accuracy. Standalone
+artifact compatibility, allocation traces and four-round balanced latency
+measurements are recorded separately in `activation-out/measurements-v2`.
+The model matrix alone does not promote the candidate runtime or prove a
+performance improvement.
