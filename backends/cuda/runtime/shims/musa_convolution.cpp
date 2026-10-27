@@ -197,20 +197,38 @@ class MusaConvolutionWorkspaceCache {
   }
 
   Result<void*> get(size_t size, int device, cudaStream_t stream) {
+    unsigned long long stream_id = 0;
+    bool use_stream_id = false;
+#if MUSART_VERSION >= 50100
+    const auto identity_status = musaStreamGetId(stream, &stream_id);
+    if (identity_status == musaSuccess) {
+      use_stream_id = true;
+    } else if (identity_status == musaErrorNotSupported) {
+      cudaGetLastError();
+    } else {
+      return check_workspace_runtime(identity_status, "musaStreamGetId");
+    }
+#endif
     if ((data_ != nullptr || completion_ != nullptr) &&
         (!reusable_ || data_ == nullptr || device_ != device ||
-         stream_ != stream || size > capacity_)) {
+         stream_ != stream || size > capacity_ ||
+         use_stream_id_ != use_stream_id ||
+         (use_stream_id && stream_id_ != stream_id))) {
       ET_CHECK_OK_OR_RETURN_ERROR(reset());
     }
     if (data_ == nullptr) {
       device_ = device;
       stream_ = stream;
+      stream_id_ = stream_id;
+      use_stream_id_ = use_stream_id;
       ET_CHECK_OK_OR_RETURN_ERROR(
           check_workspace_runtime(cudaMalloc(&data_, size), "cudaMalloc"));
       capacity_ = size;
-      ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
-          cudaEventCreateWithFlags(&completion_, cudaEventDisableTiming),
-          "cudaEventCreateWithFlags"));
+      if (!use_stream_id_) {
+        ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
+            cudaEventCreateWithFlags(&completion_, cudaEventDisableTiming),
+            "cudaEventCreateWithFlags"));
+      }
     }
     reusable_ = false;
     if (recorded_) {
@@ -222,9 +240,11 @@ class MusaConvolutionWorkspaceCache {
   }
 
   Error finish() {
-    ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
-        cudaEventRecord(completion_, stream_), "cudaEventRecord"));
-    recorded_ = true;
+    if (!use_stream_id_) {
+      ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
+          cudaEventRecord(completion_, stream_), "cudaEventRecord"));
+      recorded_ = true;
+    }
     reusable_ = true;
     return Error::Ok;
   }
@@ -254,6 +274,8 @@ class MusaConvolutionWorkspaceCache {
     recorded_ = false;
     device_ = -1;
     stream_ = nullptr;
+    stream_id_ = 0;
+    use_stream_id_ = false;
     return Error::Ok;
   }
 
@@ -263,6 +285,8 @@ class MusaConvolutionWorkspaceCache {
   int device_ = -1;
   cudaStream_t stream_ = nullptr;
   cudaEvent_t completion_ = nullptr;
+  unsigned long long stream_id_ = 0;
+  bool use_stream_id_ = false;
   bool recorded_ = false;
   bool reusable_ = false;
 };
