@@ -33,7 +33,7 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | `deployment` | Package/benchmark validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
-The five native CTest executables contain 42 GoogleTest cases. Each executable
+The five native CTest executables contain 43 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
@@ -823,3 +823,139 @@ diagnostic only; the accepted speedups come from the unprofiled table above.
 This validates the bounded muBLAS cache on the tested stack. Further work
 should profile the remaining dispatch and muDNN costs and expand stateful
 and model/dtype coverage before extending handle reuse to other libraries.
+
+## Rejected stream-ordered workspace experiment (2026-10-27)
+
+The experiment in `11b488ded3` allocates nonempty muDNN convolution workspace with
+`musaMallocAsync` and releases it with `musaFreeAsync` on the convolution's
+stream. This covers forward and transposed convolution without changing
+algorithm selection, dtype, accumulation or model artifacts. A device guard
+selects the input device before contiguous copies and allocations and restores
+the caller's device after cleanup. muDNN handles are still per operation;
+there is no new process-global or cross-stream workspace cache.
+
+**Not enabled:** `59f45a3378` restores the original convolution implementation
+after the unprofiled A/B measurements below failed to show a benefit. The
+queued multi-thread/multi-stream regression remains. The local default stays
+`build-handle-cache`; the trial binaries and evidence are preserved separately.
+
+Only `musaErrorNotSupported` falls back to synchronous allocation and matching
+synchronous free. Allocation failures such as OOM are returned to the caller,
+not retried using another allocator. Successful calls check the explicit
+workspace release before publishing the output; error exits retain RAII
+cleanup. Device memory-pool retention/reuse is controlled by the SDK rather
+than an application-level unbounded map.
+
+The compatibility build passes all 43 native cases in three repetitions,
+without skips. The new convolution regression uses two host threads with
+two nonblocking streams each, FP32/FP16/BF16, and twelve queued convolutions
+per thread/dtype. It retains and checks every output against analytically
+computed border/interior values, exercising both same-stream reuse and
+stream switches. The standalone SDK probe also passes 100 repetitions of
+async allocation, memset, pinned readback and async free on a nonblocking
+stream. These checks do not establish support on other devices or SDKs.
+
+An external allocator interposer validates the compatibility/error branches:
+all 12 convolution tests pass with 63 injected `NotSupported` results and
+63 synchronous fallbacks. Two injected OOM results make the queued test return
+`Error::Internal`, with zero synchronous fallback allocations. Its nonzero
+GoogleTest exit is expected by the fault-injection harness. The first harness
+incorrectly required an error log from a build with `ET_LOG_ENABLED=0`; that
+failed report is retained, and the corrected gate checks return values and
+allocator call counts instead of disabled logging.
+
+Evidence under `artifacts/musa-20261026` includes
+`reports/cnn-workspace-compat-regression/native.log`,
+`reports/cnn-workspace-allocator-faults-v2/summary.json`,
+`cnn-workspace/test_allocator_faults.py`, and `cnn-workspace/probe_async.log`.
+The retained `build-handle-cache` remains the synchronous-workspace baseline;
+`build-cnn-workspace-compat` contains the withdrawn trial implementation. The
+earlier `build-cnn-workspace` trial did not yet include the compatibility
+fallback and is not the final candidate.
+
+The final trial candidate also passes ten fresh processes of the complete
+12-case convolution executable and 54 fixed-artifact model processes:
+pretrained ResNet18 and MobileNetV2 in FP32/FP16/BF16, plus MLP FP32. Each
+recorded dynamic shape is executed in separate processes with one and five
+forwards. All 54 final outputs match the same-dtype MUSA eager references,
+applicable prediction checks, and the baseline bytes exactly. Every queued
+native output is checked, whereas these multi-forward model replays check
+the final output only. No CPU model baseline or dataset-level accuracy is
+claimed. `reports/cnn-workspace-compat-validation/summary.json` retains all
+commands, artifact/binary hashes and comparisons. The source patch SHA-256
+is `fe5cd5a6c72a94ed9fac90a5667eeab1ecfb059c6da1feac23121f1a19b8029f`.
+
+The same binaries pass all 16 runner, 7 package, 4 benchmark and 1 relocated
+deployment tests without skips. The deployment gate covers MLP FP32 and
+SimpleCNN BF16 at batches 1/2/3 without Torch/Python runtime libraries;
+`reports/cnn-workspace-runner-deployment/summary.json` records this gate.
+These tests do not rebuild the binaries used for correctness or timing.
+
+### A/B result and withdrawal
+
+Five rounds alternate baseline/candidate process order; each process runs
+10 warmups and 50 measured executions, yielding 250 samples per model/variant.
+The baseline already includes the accepted muBLAS handle cache and pinned
+readback fix. Identical packaged PTE/PTD and frozen inputs are used; all 30
+final outputs match their reference bytes. No profiler runs during timing.
+The table reports pooled device-synchronized method execution, excluding
+process startup, model loading, first-use initialization and output readback.
+
+| Model | Dtype and shape | Baseline min / median (ms) | Trial min / median (ms) | Median latency change |
+| --- | --- | ---: | ---: | ---: |
+| MLP, random weights | FP32, 2x16 | 0.598928 / 0.672329 | 0.644809 / 0.691050 | +2.8% |
+| ResNet18, pretrained | BF16, 2x3x64x64 | 16.009417 / 17.221234 | 16.898470 / 18.250748 | +6.0% |
+| MobileNetV2, pretrained | FP16, 2x3x64x64 | 18.635453 / 20.472178 | 20.812643 / 22.900090 | +11.9% |
+
+Individual rounds are noisy: the trial median is higher in three of five
+ResNet rounds and four of five MobileNet rounds. MLP has no convolution and
+is a control, not evidence of a convolution-induced slowdown. These results
+do not establish a universal SDK regression; they provide no dependable
+reason to replace the simpler allocator on the tested workload/stack.
+Raw samples, commands, device snapshots and package fingerprints are in
+`reports/cnn-workspace-benchmark/summary.json` and its subdirectories.
+
+Fresh traces confirm that synchronous workspace frees disappear, but host
+allocation/free time does not. In every measured ResNet iteration,
+`musaFree` goes from 20 to zero and `musaFreeAsync` from 43 to 63; in MobileNet
+they change from 35 to zero and 106 to 141. The ResNet allocation/free
+interval union is approximately 17.5-18.9 ms before versus 19.0-19.5 ms after;
+MobileNet is 20.8-22.7 versus 25.5-28.9 ms. Renaming the allocation/free API
+does not eliminate its observed host cost. These are main-thread profiler
+interval unions, not GPU execution time or unprofiled benchmark latencies;
+they are not summed with overlapping driver/kernel intervals.
+
+`reports/cnn-workspace-profile-baseline` and
+`reports/cnn-workspace-profile-candidate` retain both traces, verified output
+bytes and timing JSON. `cnn-workspace/analyze_profile.py` verifies measured
+intervals against runner timing samples and computes the non-overlapping
+API durations. A future experiment should test bounded device/stream-local
+workspace reuse that actually reduces allocator calls, including memory
+retention, stream/device changes, thread exit and failure-path coverage,
+rather than assume async APIs alone improve performance.
+
+### Retained implementation and standard-size inputs
+
+After withdrawal, the retained synchronous-workspace shim passes all 43
+native cases three times, including the new queued convolution regression.
+The new test executables are run with the retained `build-handle-cache`
+libraries, with loader traces verifying the selected shim in all five
+processes. The tested runtime source is restored exactly; trial binaries
+are not overwritten or relabeled as the retained implementation.
+
+New pretrained exports cover standard 224x224 spatial inputs at batches
+1/2/3: ResNet18 BF16 and MobileNetV2 FP16. First the trial passes two fresh
+runner processes for every shape; then the retained implementation replays
+the same artifacts in 12 fresh processes, with one and five forwards per
+shape. All final outputs match their same-dtype MUSA eager references and
+class IDs and are byte-identical to the trial outputs. Maximum absolute
+errors are `0.00390625` for ResNet18 and `0.00048828125` for MobileNetV2.
+These are generated-input correctness checks, not ImageNet accuracy or
+224x224 performance measurements. FP32 and the other low-precision pairing
+are not newly validated at this size by this gate.
+
+Exports, checksummed weights/inputs/references and trial runner outputs are
+in `reports/cnn-workspace-224`; retained-runner commands, binary hashes,
+loader traces, comparisons and native logs are in
+`reports/cnn-workspace-retained-validation/summary.json` and its directory.
+The local `environment.sh` continues selecting `build-handle-cache`.
