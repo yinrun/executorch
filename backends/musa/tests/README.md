@@ -1209,3 +1209,113 @@ driver tests and the relocated deployment test. A final `python -S` ResNet18
 BF16 224x224 smoke checks byte-exact output and the real snapshot fields in
 `reports/resnet-variance-host-metadata-final`; its five samples are a tooling
 smoke, not a new performance claim. Native runtime binaries are unchanged.
+
+### Fast/slow trace attribution and allocator trial
+
+Four fresh `msys profile --trace=musa,osrt` captures use ResNet18 BF16,
+2x3x224x224, ten warmups and 100 measured calls per process, in
+baseline/cache/cache/baseline order. The baseline here already has the BLAS
+handle cache but not the convolution workspace cache. All four final outputs
+are byte-identical to the frozen reference. Trace synchronization boundaries
+match the runner's measured intervals within 0.009 ms.
+
+All 400 measured calls have the same ordered sequence of 118 named kernels
+and five device-copy activities. The baseline makes 63 `musaMalloc`, 20
+`musaFree` and 43 `musaFreeAsync` calls per forward; the workspace-cache
+candidate makes 43 allocations, zero synchronous frees and 43 async frees.
+This rules out changes in the captured named-kernel sequence in these runs,
+not every possible SDK dispatch detail or all causes of the earlier variance.
+
+For each process, compare the means of its fastest and slowest quartiles
+(25 calls each). Partition each method interval into disjoint portions:
+the union of this process's captured GPU activities, time inside free APIs
+not covered by that GPU union, and the remaining time. Do not add overlapping
+API, driver synchronization, OS-runtime and GPU totals.
+
+| Process | Slow minus fast method (ms) | GPU union delta (ms) | Free without own GPU activity delta (ms) | Remaining delta (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline 0 | 5.400 | 0.126 | 3.974 | 1.300 |
+| Workspace cache 1 | 6.723 | 0.310 | 5.079 | 1.334 |
+| Workspace cache 2 | 3.830 | 0.155 | 2.869 | 0.805 |
+| Baseline 3 | 5.073 | 0.152 | 3.830 | 1.091 |
+
+About 74-76% of the within-process slow-quartile excess falls inside the free
+APIs without overlapping captured GPU activity from that process. This points
+to the allocation/free path for the next experiment; it does not establish
+whether scheduling, driver work or waiting causes that time. Nor does absence
+of this process's GPU activities prove that the whole GPU is idle. All raw
+samples are retained; quartile selection is diagnostic, not a performance
+acceptance result. Profiled timings do not replace the unprofiled A/B results.
+
+The embedded profiler logs contain clock-calibration warnings at capture
+startup/shutdown, unavailable GPU metadata, and permission-denied lookups for
+other process names. No dropped/lost/overflow message was found. This is not
+proof of complete trace coverage or perfect clock correlation. The analysis
+retains those warnings and excludes other processes and the separate hardware
+event stream from the GPU-activity totals.
+
+An SDK-only allocation probe also confirms memory-pool support on this M1000
+stack. Legacy allocation, default-pool async allocation, and private pools with
+zero/64 MiB release thresholds all pass 20 pinned-readback byte checks over
+1-8 MiB buffers. Each mode then records ten warmups and 200 allocation/memset/
+free/synchronize cycles. Their single-process median cycle times are
+0.516/0.492/0.488/0.497 ms respectively: retaining a private pool does not show
+a clear benefit in this synchronization-heavy microtest. The retained pool
+reports 32 MiB reserved and zero used before trimming, and zero reserved after
+trimming. The device default pool's release threshold stays zero. A release
+threshold is a retention policy, not a hard memory-cap guarantee.
+
+Trace evidence is in `reports/resnet-variance-traces/{summary,analysis}.json`
+and the four `.msys-rep` files under `artifacts/musa-20261026`.
+`resnet-variance/capture_traces.py` and `analyze_traces.py` reproduce capture
+and analysis. `resnet-variance/allocator_probe.cpp`, `probe-*.tsv` and
+`probe-*.log` retain the standalone SDK probe, raw samples and pool counters.
+
+A separate build changes only MUSA SlimTensor allocation from synchronous
+`allocate` to `allocate_async` using the default pool. It retains the accepted
+workspace cache and pinned-readback fix. This is a rejected diagnostic, not
+an enabled backend option:
+
+- The 19 matrix, four BatchNorm, four activation and four existing device tests
+  each pass three times. The first queued multi-thread/multi-stream convolution
+  test reports error 999 from the host-to-device copy and stops making progress;
+  that failing child is terminated explicitly, and the native gate fails.
+- The convolution helper uses a default-stream `cudaMemcpy` after allocating
+  on a selected nonblocking stream. Switching allocation semantics therefore
+  requires a stream-dependency audit, not deleting this failure or assuming
+  pool support implies safe drop-in replacement. The precise cause of error
+  999 is not established by this experiment.
+- Eight fresh, unprofiled model processes still produce byte-exact final
+  outputs: each model runs baseline/trial/trial/baseline with ten warmups and
+  100 measured executions. Here baseline means the accepted workspace-cache
+  build, not the older baseline in the trace table. Pooled minimum/median
+  ResNet18 BF16 times worsen from 18.409/19.035 to 20.056/21.220 ms, and
+  MobileNetV2 FP16 from 32.674/33.961 to 37.594/40.286 ms. Both use
+  2x3x224x224 inputs. These narrow model checks do not override the failed
+  native gate or establish correctness for every intermediate execution.
+
+The default-pool allocation switch is reverted. Evidence remains in
+`reports/storage-async-native`, `reports/storage-async-model-diagnostic`,
+`build-storage-async` and `resnet-variance/async-storage-trial.patch`.
+No production build/environment path is redirected to that trial.
+
+`MusaDeviceTest.QueuedStorageReadbackBeforeRelease` adds explicit same-stream
+storage-lifetime coverage: two nonblocking streams, 36 allocations per stream,
+six changing byte lengths, queued fills and pinned-host readbacks, and storage
+destruction before the final synchronization. It verifies every returned byte.
+It passes three repetitions in the async trial, so the primitive same-stream
+path works in that limited case despite the broader convolution failure.
+This is not a cross-stream ownership or multi-device guarantee.
+
+On the retained production implementation, all five device tests pass three
+repetitions, and the other 40 native cases pass three fresh-process repetitions
+per suite (45 cases total, through separate device and CTest invocations).
+The updated device test executable is built separately against the retained
+libraries, leaving the accepted runtime and runner binaries unchanged. Logs
+and compile/link commands are retained under `resnet-variance/device-retained-*`
+and `resnet-variance/native-retained-test.log`.
+
+The next allocator experiment must preserve or explicitly establish allocation,
+copy and destruction dependencies, and compare a private pool's retention
+policy against the default pool on actual models. Neither simply selecting an
+async API nor the standalone pool probe establishes a faster, safe allocator.

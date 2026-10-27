@@ -1,5 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <vector>
+
 #include <executorch/backends/aoti/common_shims_slim.h>
 #include <executorch/backends/aoti/slim/factory/empty.h>
 #include <executorch/backends/cuda/runtime/shims/cuda_guard.h>
@@ -169,5 +174,80 @@ TEST_F(MusaDeviceTest, AotiGuardsRestoreNestedAndDefaultStreams) {
       aoti_torch_delete_musa_stream_guard(nullptr), Error::InvalidArgument);
   clearCurrentCUDAStream(0);
   EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
+TEST_F(MusaDeviceTest, QueuedStorageReadbackBeforeRelease) {
+  struct Batch {
+    cudaStream_t stream{nullptr};
+    std::vector<void*> readbacks;
+    std::vector<size_t> sizes;
+
+    ~Batch() {
+      if (stream != nullptr) {
+        cudaStreamSynchronize(stream);
+      }
+      for (void* readback : readbacks) {
+        cudaFreeHost(readback);
+      }
+      if (stream != nullptr) {
+        cudaStreamDestroy(stream);
+      }
+    }
+  };
+
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+  std::array<Batch, 2> batches;
+  const std::array<int64_t, 6> sizes{1, 1000, 65537, 524289, 1999, 262147};
+  for (auto& batch : batches) {
+    ASSERT_EQ(
+        musaStreamCreateWithFlags(&batch.stream, musaStreamNonBlocking),
+        musaSuccess);
+  }
+  for (int iteration = 0; iteration < 36; ++iteration) {
+    for (size_t stream_index = 0; stream_index < batches.size();
+         ++stream_index) {
+      auto& batch = batches[stream_index];
+      auto guard =
+          executorch::backends::cuda::CUDAStreamGuard::create(batch.stream, 0);
+      ASSERT_TRUE(guard.ok());
+      const auto elements = sizes[iteration % sizes.size()];
+      void* readback = nullptr;
+      ASSERT_EQ(cudaMallocHost(&readback, elements), cudaSuccess);
+      batch.readbacks.push_back(readback);
+      batch.sizes.push_back(elements);
+      auto tensor = slim::empty(
+          {elements},
+          slimc10::ScalarType::Byte,
+          slimc10::Device(slimc10::kMUSA, 0));
+      const int expected = 1 + iteration + 64 * stream_index;
+      ASSERT_EQ(
+          musaMemsetAsync(tensor.data_ptr(), expected, elements, batch.stream),
+          musaSuccess);
+      ASSERT_EQ(
+          cudaMemcpyAsync(
+              readback,
+              tensor.data_ptr(),
+              elements,
+              cudaMemcpyDeviceToHost,
+              batch.stream),
+          cudaSuccess);
+    }
+  }
+  for (size_t stream_index = 0; stream_index < batches.size(); ++stream_index) {
+    const auto& batch = batches[stream_index];
+    ASSERT_EQ(cudaStreamSynchronize(batch.stream), cudaSuccess);
+    for (size_t iteration = 0; iteration < batch.readbacks.size();
+         ++iteration) {
+      const auto* bytes =
+          static_cast<const uint8_t*>(batch.readbacks[iteration]);
+      const auto expected =
+          static_cast<uint8_t>(1 + iteration + 64 * stream_index);
+      EXPECT_TRUE(std::all_of(
+          bytes,
+          bytes + batch.sizes[iteration],
+          [expected](uint8_t value) { return value == expected; }))
+          << "stream " << stream_index << ", iteration " << iteration;
+    }
+  }
 }
 }
