@@ -30,18 +30,30 @@ class TestMusaDeployment(unittest.TestCase):
     def test_relocated_runtime_without_torch(self):
         runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"]).resolve()
         patchelf = os.environ["EXECUTORCH_MUSA_PATCHELF"]
-        for name, dtype in (("mlp", torch.float32), ("simple_cnn", torch.bfloat16)):
-            with self.subTest(model=name), tempfile.TemporaryDirectory() as directory:
+        for name, dtype, memory_planning in (
+            ("mlp", torch.float32, False),
+            ("simple_cnn", torch.bfloat16, False),
+            ("mlp", torch.float32, True),
+            ("simple_cnn", torch.bfloat16, True),
+        ):
+            with self.subTest(
+                model=name, memory_planning=memory_planning
+            ), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                pte, ptd, _, _, model, shape = export_model(
-                    name,
-                    root / "export",
-                    dtype,
-                    None,
-                    None,
-                    batch_size=2,
-                    dynamic_batch_max=3,
-                )
+                with torch._inductor.config.patch(
+                    memory_planning=memory_planning, memory_pool="combined"
+                ):
+                    pte, ptd, _, _, model, shape = export_model(
+                        name,
+                        root / "export",
+                        dtype,
+                        None,
+                        None,
+                        batch_size=2,
+                        dynamic_batch_max=3,
+                    )
+                if memory_planning:
+                    self.assertIn(b"aoti_torch__alloc_from_pool", pte.read_bytes())
                 bundle = root / "package"
                 manifest = package(runner.parent, pte, ptd, bundle, patchelf, "readelf")
                 self.assertTrue(

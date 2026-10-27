@@ -1427,3 +1427,76 @@ The local `artifacts/musa-20261026/environment.sh` now selects
 builds, packages and reference outputs are not overwritten. This accepts the
 selected-stream correctness fix, not an allocator performance improvement;
 the rejected async/default-pool/private-pool trials remain disabled.
+
+### Compiler-managed pool views (2026-10-27)
+
+An allocation-origin trace of the accepted ResNet18 BF16 runner at
+`2x3x224x224` records 43 successful `musaMalloc` calls in each of three
+measured forwards after two warmups: 20 convolution outputs, 20 batch-norm
+outputs and three direct wrapper allocations. The final output is byte-equal
+to the frozen reference. This is an instrumented call-origin diagnostic, not
+a latency benchmark. Its driver, stacks, synchronization alignment and hashes
+are retained in `artifacts/musa-20261026/memory-planning/`, including
+`resnet-allocation-analysis.json`.
+
+The installed Inductor planner groups `AllocateLine` buffers but explicitly
+does not support reuse of `ExternKernelAlloc` outputs. Consequently enabling
+`memory_planning` alone cannot pool those 40 extern outputs. Reducing them
+requires compiler-visible output buffers and matching out-parameter shims,
+not just changing the allocator or its retention threshold.
+
+There was also a concrete compatibility gap: exporting MLP FP32 with
+`TORCHINDUCTOR_MEMORY_PLANNING=1 TORCHINDUCTOR_MEMORY_POOL=combined` emitted
+`aoti_torch__alloc_from_pool`, which the SlimTensor runtime did not provide.
+The development runner fell through to the libtorch implementation and
+aborted when given a SlimTensor handle. The original PTE/PTD and failure log
+are retained under `memory-planning/mlp-before*`.
+
+The shim now returns a shared-storage SlimTensor view without a device
+allocation or copy. Byte offsets are converted to elements of the requested
+dtype; the pool must have zero storage offset. Bounds, alignment, supported
+dtypes, negative sizes/strides and size arithmetic are validated before view
+construction. Scalar, empty, noncontiguous and zero-stride views are covered,
+as is retaining storage after the pool handle is destroyed. Non-owning pool
+storage retains its existing external-owner contract.
+
+The CNN gate also exposed an existing reinterpret ABI mismatch: its offset
+is relative to the input tensor, whereas SlimTensor's `as_strided` accepts
+an absolute storage offset. ResNet18's pooled average-pool output has a
+nonzero offset, and flattening it with a zero increment incorrectly read
+the beginning of the pool. A targeted native regression reproduced the
+mismatch before the fix. The shim now adds the input storage offset and
+rejects negative totals and signed overflow; direct `as_strided` semantics
+are unchanged.
+
+`test_musa_storage` includes five pool-view tests in addition to its three
+copy-stream tests. The deployment regression exports both MLP FP32 and
+SimpleCNN BF16 with memory planning off and on (`combined`), checks that
+planned PTEs really reference the pool ABI, and exercises relocated packages
+at batches 1/2/3 without Torch/Python runtime libraries. Compiler memory
+planning remains opt-in; this change does not enable the rejected async
+allocator or private-pool trials, nor establish a CNN speedup.
+
+The isolated `build-memory-planning` build passes all 53 native cases three
+times without skips. The original failing MLP artifact runs for five
+forwards with maximum error `1.4901161193847656e-08` against its saved MUSA
+eager output. The original failing pooled ResNet18 artifact now produces
+byte-identical frozen-reference outputs in separate one- and five-forward
+processes, without re-exporting the artifact.
+
+Fresh pooled pretrained ResNet18 BF16 and MobileNetV2 FP16 exports at 224x224
+pass batches 1/2/3 in two fresh processes per shape: all 12 outputs are
+byte-identical to the previously accepted unpooled runner outputs and pass
+the eager-tolerance and prediction checks. Relocated deployment passes all
+four export configurations (two models, planning off/on) with no test skips,
+errors or failures. The model/native/deployment results are in
+`memory-planning/accepted/validation.json`; failed intermediate diagnostics
+are retained separately and are not acceptance evidence.
+
+Tracing the same pooled ResNet18 artifact after the offset fix records 41
+allocations in each of three measured forwards: 20 convolution outputs,
+20 batch-norm outputs and one wrapper pool. Its final output remains
+byte-identical. The reduction is **43 to 41 allocations**, not elimination
+of all intermediate allocations, and is not evidence of a latency win.
+Compiler-visible batch-norm and convolution out buffers remain the next
+substantial reuse opportunity.
