@@ -1516,3 +1516,61 @@ The local `environment.sh` now selects `build-memory-planning` and preserves
 ABI and relative-view correctness fixes, not a default compiler-planning
 setting or allocator-policy change. CUDA/ROCm hardware, other SDK versions
 and a latency benefit have not been validated by this gate.
+
+### Compiler-owned BatchNorm outputs (2026-10-27)
+
+MUSA BatchNorm inference now lowers through `ExternKernelOut` and the new
+`aoti_torch_musa_batch_norm_out` shim. Inductor allocates the output and can
+reuse it through ordinary buffer reuse or compiler-managed pools. The old
+returning shim remains exported and uses the same muDNN implementation for
+previously compiled models. There is no allocator-policy change.
+
+The out shim borrows its destination: it requires matching shape, dtype and
+device, contiguous layout and sufficient storage, and rejects overlapping
+input/parameter ranges. Disjoint views into the same pool are allowed,
+including strided inputs whose physical extent ends before the output.
+Noncontiguous inputs/parameters still require their existing contiguous
+copies, so this is not a promise of zero allocations for every input layout.
+The Python `executorch_musa.batch_norm.out` overload preserves the out
+signature for dispatch/codegen; its eager implementation computes then
+copies a result and is not the allocation-saving native runtime path.
+
+The `build-batchnorm-out` prototype passes all 58 native cases three times,
+eight BatchNorm export/dispatch tests, all 16 runner tests, and relocated
+deployment without Torch/Python runtime libraries. There are no skips,
+errors or failures in those gates. Its nine native BatchNorm cases include
+the original four allocating-shim tests plus out-buffer coverage for ranks
+2/3/4/5, FP32/FP16/BF16 with FP32 parameters, nonblocking streams, nonzero
+pool offsets, shared strided pools, byte canaries, repeated use, invalid
+destinations and overlapping parameters.
+
+Fresh SimpleCNN BF16, pretrained ResNet18 BF16 and MobileNetV2 FP16 exports
+pass with planning disabled and with `memory_planning=True,
+memory_pool="combined"`. Each export runs batches 1/2/3 in two fresh
+processes per shape: 36 model executions in total. All pass the MUSA eager
+checks; the 24 ResNet18/MobileNetV2 outputs are additionally byte-identical
+to their accepted frozen-reference outputs. Exported PTEs are checked for
+the new out symbol and absence of the old returning BatchNorm symbol.
+
+At batch 2 and 224x224, allocation-origin captures after two warmups record
+the following counts in each of three measured forwards:
+
+| Model | Planning disabled | Combined pool |
+| --- | --- | --- |
+| ResNet18 BF16 | 20 convolution + 8 wrapper = 28 | 20 convolution + 1 pool = 21 |
+| MobileNetV2 FP16 | 52 convolution + 19 wrapper = 71 | 52 convolution + 1 pool = 53 |
+
+ResNet18's corresponding pre-change counts were 43 and 41. No BatchNorm
+output allocations remain in these warmed contiguous-input captures, and
+the final captured outputs remain byte-identical. These are allocation
+counts, not latency speedup measurements. The remaining convolution
+outputs still allocate inside the returning shim.
+
+Evidence is under `artifacts/musa-20261026/batchnorm-out/acceptance-v2/`;
+`summary.json` records the passed native, export, model, trace, deployment
+and runner gates. Earlier build/test-harness failures are retained outside
+that accepted run. The separate legacy-model, dynamic-spatial and balanced
+four-variant latency gates are still in progress/queued at this checkpoint;
+the default environment remains on `build-memory-planning` until that
+acceptance finishes. New out-lowered models need the prototype runner and
+its matching shim library, not the previous runtime without the new ABI.
