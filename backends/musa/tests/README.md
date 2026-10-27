@@ -1749,3 +1749,60 @@ validated pooled path, opt in with `TORCHINDUCTOR_MEMORY_PLANNING=1` and
 `TORCHINDUCTOR_MEMORY_POOL=combined` during export. Fresh convolution-out
 exports require this build or a newer matching runtime; the previous
 BatchNorm-only build lacks the new symbol.
+
+## Compiler-owned hard activation outputs (2026-10-27)
+
+Hardswish and Hardsigmoid now lower through `ExternKernelOut` using the
+existing `aten.hardswish.out` and `aten.hardsigmoid.out` schemas. The native
+`aoti_torch_musa_hardswish_out` and `aoti_torch_musa_hardsigmoid_out` shims
+borrow compiler-owned output storage, including disjoint views in a shared
+memory pool. The original returning symbols remain available. Both paths
+share the same muDNN invocation and Hardsigmoid parameters; this change does
+not replace the previously validated rounding behavior.
+
+The out path validates output shape, dtype, device, contiguous layout,
+storage offset and capacity before launching work. Input storage spans are
+bounded using sizes and strides; overlapping source/destination byte ranges
+are rejected before any input cloning or output writes. Noncontiguous input
+still uses a contiguous clone, so eliminating output allocations does not
+imply allocation-free execution for arbitrary strided inputs.
+
+The isolated candidate runtime is `build-activation-out` under
+`/home/qianfan/文档/ChatGPT/ETSupport/artifacts/musa-20261026`.
+Its evidence is in the sibling `activation-out` directory:
+
+- `compile-tests.log`: six unittest methods passed without skips, including
+  the four fallback/context checks, dynamic Hardswish compilation in three
+  dtypes, and pooled Hardswish/Hardsigmoid compilation in three dtypes.
+  The pooled binaries contain both new out symbols and the pool allocator,
+  and do not reference the old returning activation symbols.
+- `native-*.xml`: 63 native tests passed in each of three rounds. The six
+  activation methods include 60 out-path combinations across two operators,
+  three dtypes, contiguous/strided inputs and five shapes (including scalar
+  and empty inputs). Each destination is overwritten three times on a
+  selected nonblocking stream, compared byte-for-byte with the allocating
+  path, and checked for pointer stability and untouched pool canaries.
+  Invalid/undefined handles, shape/dtype/layout/capacity mismatches and
+  overlapping or out-of-bounds views are rejected without modifying storage.
+- `activation-runner.log`: two new runner test methods passed. Contiguous
+  and transposed activation chains cover FP32/FP16/BF16, planning off/on,
+  and dynamic batches 1/2/3: 12 exports, 36 fresh runner processes, five
+  forwards per process and 72 final outputs exactly matching same-dtype
+  MUSA eager. Dynamic-loader logs confirm no PyTorch/Python runtime libraries
+  are loaded. The tests retain both intermediate and final outputs, checking
+  that pool reuse does not overwrite a still-live activation result.
+- `runner-regression.log`: all 16 existing runner/reference tests passed
+  without skips, including Hardsigmoid rounding, convolution precision,
+  native/legacy device metadata and reference snapshot integrity.
+- `summary.json` reports all native and runner gates passed with unchanged
+  binary hashes. `final-verification.json` ties that evidence to the
+  implementation commit and records source/log/binary hashes. The initial
+  native-test build failed on a two-element `IntArrayRef` initializer; its
+  log is retained. Explicit array references fixed the test construction,
+  and `rebuild.log` contains the successful build used by these gates.
+
+These gates validate activation output reuse, not a measured model speedup.
+The default environment still points to the accepted convolution-out build;
+it has not been promoted to this candidate. Fresh activation-out exports
+require the matching new runtime. Real-model allocation/latency measurements
+and broader model compatibility checks remain separate acceptance work.
