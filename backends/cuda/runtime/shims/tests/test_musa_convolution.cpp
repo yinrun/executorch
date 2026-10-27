@@ -278,6 +278,100 @@ TEST_F(MusaConvolutionTest, QueuedWorkspaceAcrossStreamsAndThreads) {
   }
 }
 
+TEST_F(MusaConvolutionTest, WorkspaceGrowthAndStreamRecreation) {
+  std::thread worker([] {
+    ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    for (auto dtype :
+         {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+      auto weight = std::unique_ptr<SlimTensor>(
+          empty_tensor(dtype, {32, 32, 3, 3}, {288, 9, 3, 1}));
+      auto bias = std::unique_ptr<SlimTensor>(empty_tensor(dtype, {32}, {1}));
+      copy_to_device(
+          weight.get(),
+          encode_values(std::vector<float>(weight->numel(), 0.125f), dtype));
+      copy_to_device(
+          bias.get(), encode_values(std::vector<float>(32, 0.5f), dtype));
+      const int64_t stride[] = {1, 1};
+      const int64_t padding[] = {1, 1};
+      const int64_t dilation[] = {1, 1};
+      const int64_t output_padding[] = {0, 0};
+      const std::array<int64_t, 8> dimensions{17, 33, 25, 49, 17, 41, 25, 17};
+      SlimTensor* bias_handle = bias.get();
+      std::vector<std::unique_ptr<SlimTensor>> inputs;
+      std::vector<std::unique_ptr<SlimTensor>> outputs;
+      for (bool recreate : {false, true}) {
+        cudaStream_t stream = nullptr;
+        for (size_t iteration = 0; iteration < dimensions.size(); ++iteration) {
+          if (stream == nullptr) {
+            ASSERT_EQ(
+                musaStreamCreateWithFlags(&stream, musaStreamNonBlocking),
+                musaSuccess);
+          }
+          ASSERT_EQ(
+              executorch::backends::cuda::setCurrentCUDAStream(stream, 0),
+              Error::Ok);
+          const int64_t dimension = dimensions[iteration];
+          auto input = std::unique_ptr<SlimTensor>(empty_tensor(
+              dtype,
+              {1, 32, dimension, dimension},
+              {32 * dimension * dimension,
+               dimension * dimension,
+               dimension,
+               1}));
+          copy_to_device(
+              input.get(),
+              encode_values(std::vector<float>(input->numel(), 0.25f), dtype));
+          SlimTensor* output = nullptr;
+          ASSERT_EQ(
+              aoti_torch_musa_convolution(
+                  input.get(),
+                  weight.get(),
+                  &bias_handle,
+                  stride,
+                  2,
+                  padding,
+                  2,
+                  dilation,
+                  2,
+                  false,
+                  output_padding,
+                  2,
+                  1,
+                  &output),
+              Error::Ok);
+          ASSERT_NE(output, nullptr);
+          inputs.push_back(std::move(input));
+          outputs.emplace_back(output);
+          if (recreate && iteration % 2 == 1) {
+            executorch::backends::cuda::clearCurrentCUDAStream(0);
+            ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+            stream = nullptr;
+          }
+        }
+        if (stream != nullptr) {
+          executorch::backends::cuda::clearCurrentCUDAStream(0);
+          ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+        }
+      }
+      ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+      for (const auto& output : outputs) {
+        const int64_t dimension = output->size(2);
+        const auto actual = copy_from_device(output.get(), dtype);
+        for (size_t index = 0; index < actual.size(); ++index) {
+          const int64_t row = (index / dimension) % dimension;
+          const int64_t column = index % dimension;
+          const int64_t rows = row == 0 || row == dimension - 1 ? 2 : 3;
+          const int64_t columns =
+              column == 0 || column == dimension - 1 ? 2 : 3;
+          ASSERT_NEAR(actual[index], rows * columns + 0.5f, 0.05f)
+              << "index " << index;
+        }
+      }
+    }
+  });
+  worker.join();
+}
+
 void run_convolution(ScalarType dtype) {
   SlimTensor* input = empty_tensor(dtype, {1, 1, 3, 3}, {9, 9, 3, 1});
   SlimTensor* weight = empty_tensor(dtype, {1, 1, 2, 2}, {4, 4, 2, 1});

@@ -10,6 +10,7 @@
 #include <executorch/backends/aoti/slim/c10/core/Device.h>
 #include <executorch/backends/aoti/slim/c10/core/ScalarType.h>
 #include <executorch/backends/aoti/slim/core/slim_tensor.h>
+#include <executorch/backends/aoti/slim/cuda/guard.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/platform/log.h>
@@ -174,16 +175,148 @@ struct MudnnContext {
   }
 };
 
+Error check_workspace_runtime(cudaError_t status, const char* operation) {
+  ET_CHECK_OR_RETURN_ERROR(
+      status == cudaSuccess,
+      Internal,
+      "MUSA convolution workspace: %s failed: %s",
+      operation,
+      cudaGetErrorString(status));
+  return Error::Ok;
+}
+
+class MusaConvolutionWorkspaceCache {
+ public:
+  MusaConvolutionWorkspaceCache() = default;
+  MusaConvolutionWorkspaceCache(const MusaConvolutionWorkspaceCache&) = delete;
+  MusaConvolutionWorkspaceCache& operator=(
+      const MusaConvolutionWorkspaceCache&) = delete;
+
+  ~MusaConvolutionWorkspaceCache() {
+    reset();
+  }
+
+  Result<void*> get(size_t size, int device, cudaStream_t stream) {
+    if ((data_ != nullptr || completion_ != nullptr) &&
+        (!reusable_ || data_ == nullptr || device_ != device ||
+         stream_ != stream || size > capacity_)) {
+      ET_CHECK_OK_OR_RETURN_ERROR(reset());
+    }
+    if (data_ == nullptr) {
+      device_ = device;
+      stream_ = stream;
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          check_workspace_runtime(cudaMalloc(&data_, size), "cudaMalloc"));
+      capacity_ = size;
+      ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
+          cudaEventCreateWithFlags(&completion_, cudaEventDisableTiming),
+          "cudaEventCreateWithFlags"));
+    }
+    reusable_ = false;
+    if (recorded_) {
+      ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
+          cudaStreamWaitEvent(stream_, completion_, 0), "cudaStreamWaitEvent"));
+    }
+    recorded_ = false;
+    return data_;
+  }
+
+  Error finish() {
+    ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
+        cudaEventRecord(completion_, stream_), "cudaEventRecord"));
+    recorded_ = true;
+    reusable_ = true;
+    return Error::Ok;
+  }
+
+  Error reset() {
+    reusable_ = false;
+    if (data_ == nullptr && completion_ == nullptr) {
+      return Error::Ok;
+    }
+    auto guard = CUDAGuard::create(device_);
+    ET_CHECK_OK_OR_RETURN_ERROR(guard.error());
+    if (data_ != nullptr) {
+      ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
+          recorded_ ? cudaEventSynchronize(completion_)
+                    : cudaDeviceSynchronize(),
+          recorded_ ? "cudaEventSynchronize" : "cudaDeviceSynchronize"));
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          check_workspace_runtime(cudaFree(data_), "cudaFree"));
+      data_ = nullptr;
+      capacity_ = 0;
+    }
+    if (completion_ != nullptr) {
+      ET_CHECK_OK_OR_RETURN_ERROR(check_workspace_runtime(
+          cudaEventDestroy(completion_), "cudaEventDestroy"));
+      completion_ = nullptr;
+    }
+    recorded_ = false;
+    device_ = -1;
+    stream_ = nullptr;
+    return Error::Ok;
+  }
+
+ private:
+  void* data_ = nullptr;
+  size_t capacity_ = 0;
+  int device_ = -1;
+  cudaStream_t stream_ = nullptr;
+  cudaEvent_t completion_ = nullptr;
+  bool recorded_ = false;
+  bool reusable_ = false;
+};
+
 struct DeviceWorkspace {
+  DeviceWorkspace() = default;
+  DeviceWorkspace(const DeviceWorkspace&) = delete;
+  DeviceWorkspace& operator=(const DeviceWorkspace&) = delete;
+
   void* data = nullptr;
 
   ~DeviceWorkspace() {
-    if (data != nullptr) {
+    if (cache_ != nullptr) {
+      if (!finished_) {
+        cache_->reset();
+      }
+    } else if (data != nullptr) {
       cudaFree(data);
     }
   }
-};
 
+  Error allocate(size_t size, int device, cudaStream_t stream) {
+    if (size == 0) {
+      return Error::Ok;
+    }
+    constexpr size_t max_cached_bytes = 64 * 1024 * 1024;
+    if (size > max_cached_bytes) {
+      return check_workspace_runtime(cudaMalloc(&data, size), "cudaMalloc");
+    }
+    thread_local MusaConvolutionWorkspaceCache cache;
+    cache_ = &cache;
+    auto allocation = cache_->get(size, device, stream);
+    ET_CHECK_OK_OR_RETURN_ERROR(allocation.error());
+    data = allocation.get();
+    return Error::Ok;
+  }
+
+  Error finish() {
+    if (cache_ != nullptr) {
+      ET_CHECK_OK_OR_RETURN_ERROR(cache_->finish());
+      finished_ = true;
+    } else if (data != nullptr) {
+      void* allocation = data;
+      data = nullptr;
+      ET_CHECK_OK_OR_RETURN_ERROR(
+          check_workspace_runtime(cudaFree(allocation), "cudaFree"));
+    }
+    return Error::Ok;
+  }
+
+ private:
+  MusaConvolutionWorkspaceCache* cache_ = nullptr;
+  bool finished_ = false;
+};
 }
 
 extern "C" {
@@ -262,6 +395,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       InvalidArgument,
       "MUSA convolution tensor dimensions are incompatible");
 
+  auto device_guard = CUDAGuard::create(input->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
   std::unique_ptr<SlimTensor> contiguous_input;
   std::unique_ptr<SlimTensor> contiguous_weight;
   std::unique_ptr<SlimTensor> contiguous_bias;
@@ -502,35 +637,30 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
       ? MUDNN_CONVOLUTION_BWD_DATA_ALGO_GEMM
       : MUDNN_CONVOLUTION_BWD_DATA_ALGO_IMPLICIT_GEMM;
   size_t workspace_size = 0;
-  error = transposed
-      ? check_mudnn(
-            mudnnGetConvolutionBackwardDataWorkspaceSize(
-                context.handle,
-                context.weight,
-                context.input,
-                context.convolution,
-                context.output,
-                backward_data_algorithm,
-                &workspace_size),
-            "mudnnGetConvolutionBackwardDataWorkspaceSize")
-      : check_mudnn(
-            mudnnGetConvolutionForwardWorkspaceSize(
-                context.handle,
-                context.input,
-                context.weight,
-                context.convolution,
-                context.output,
-                forward_algorithm,
-                &workspace_size),
-            "mudnnGetConvolutionForwardWorkspaceSize");
+  error = transposed ? check_mudnn(
+                           mudnnGetConvolutionBackwardDataWorkspaceSize(
+                               context.handle,
+                               context.weight,
+                               context.input,
+                               context.convolution,
+                               context.output,
+                               backward_data_algorithm,
+                               &workspace_size),
+                           "mudnnGetConvolutionBackwardDataWorkspaceSize")
+                     : check_mudnn(
+                           mudnnGetConvolutionForwardWorkspaceSize(
+                               context.handle,
+                               context.input,
+                               context.weight,
+                               context.convolution,
+                               context.output,
+                               forward_algorithm,
+                               &workspace_size),
+                           "mudnnGetConvolutionForwardWorkspaceSize");
   ET_CHECK_OK_OR_RETURN_ERROR(error);
   DeviceWorkspace workspace;
-  if (workspace_size != 0) {
-    if (cudaMalloc(&workspace.data, workspace_size) != cudaSuccess) {
-      ET_LOG(Error, "MUSA convolution: cudaMalloc workspace failed");
-      return Error::Internal;
-    }
-  }
+  ET_CHECK_OK_OR_RETURN_ERROR(workspace.allocate(
+      workspace_size, input->device_index(), stream_result.get()));
   if (bias != nullptr) {
     std::vector<int> bias_dims(descriptor_dims, 1);
     bias_dims[1] = static_cast<int>(output_channels);
@@ -641,6 +771,7 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_convolution(
     ET_CHECK_OK_OR_RETURN_ERROR(error);
   }
 
+  ET_CHECK_OK_OR_RETURN_ERROR(workspace.finish());
   *ret_output = output.release();
   return Error::Ok;
 }
