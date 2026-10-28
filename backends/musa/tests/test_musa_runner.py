@@ -603,6 +603,88 @@ class TestMusaRunner(unittest.TestCase):
                             )
                             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
+    def test_explicit_low_precision_cast_rounding(self) -> None:
+        runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype), torch.no_grad():
+
+                class Roundtrip(nn.Module):
+                    def forward(self, value):
+                        return value.to(dtype).view(2, -1).float() * 2
+
+                model = Roundtrip().eval()
+                example = torch.linspace(-1, 1, 1024, device="musa")
+                expected = _snapshot_tensor(model(example)).flatten()
+                self.assertFalse(torch.equal(expected, _snapshot_tensor(example * 2)))
+                exported = export(model, (example,))
+                specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    with _serialization_schema():
+                        manager = to_edge_transform_and_lower(
+                            exported, partitioner=[MusaPartitioner(specs)]
+                        ).to_executorch()
+                        pte = Path(
+                            save_pte_program(manager, "cast_roundtrip", directory)
+                        )
+                    _write_input(example, root / "input.bin", None)
+                    _run_runner(
+                        runner,
+                        pte,
+                        root / "aoti_musa_blob.ptd",
+                        root / "input.bin",
+                        root / "output",
+                    )
+                    actual = torch.frombuffer(
+                        bytearray((root / "output-0.bin").read_bytes()),
+                        dtype=torch.float32,
+                    )
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    def test_silu_rounding(self) -> None:
+        runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype), torch.no_grad():
+                example = torch.linspace(-20, 20, 8193, device="musa").to(dtype)
+                model = nn.SiLU().eval()
+                expected = _snapshot_tensor(model(example)).flatten()
+                if dtype != torch.float32:
+                    promoted = _snapshot_tensor(model(example.float()).to(dtype))
+                    self.assertFalse(torch.equal(expected, promoted))
+                exported = export(model, (example,))
+                decomposed = exported.run_decompositions(
+                    MusaBackend.get_decomposition_table()
+                )
+                sigmoid = next(
+                    node
+                    for node in decomposed.graph.nodes
+                    if node.target == torch.ops.aten.sigmoid.default
+                )
+                self.assertEqual(sigmoid.meta["val"].dtype, dtype)
+                specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    with _serialization_schema():
+                        manager = to_edge_transform_and_lower(
+                            exported, partitioner=[MusaPartitioner(specs)]
+                        ).to_executorch()
+                        pte = Path(save_pte_program(manager, "silu", directory))
+                    _write_input(example, root / "input.bin", None)
+                    _run_runner(
+                        runner,
+                        pte,
+                        root / "aoti_musa_blob.ptd",
+                        root / "input.bin",
+                        root / "output",
+                    )
+                    actual = torch.frombuffer(
+                        bytearray((root / "output-0.bin").read_bytes()), dtype=dtype
+                    )
+                    tolerance = 1e-6 if dtype == torch.float32 else 0
+                    torch.testing.assert_close(
+                        actual, expected, atol=tolerance, rtol=tolerance
+                    )
+
     def test_hardsigmoid_rounding(self) -> None:
         runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
         for dtype in (torch.float32, torch.float16, torch.bfloat16):

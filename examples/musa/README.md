@@ -47,6 +47,21 @@ fail `atol=0.04, rtol=0.04`. Do not use argmax alone to accept this path.
 The exporter always records `status=exported`, `runtime_validated=false`;
 only a separate successful validator report establishes runtime acceptance.
 
+Two independent rounding differences have been isolated on the local MUSA
+stack. Eager low-precision SiLU rounds the sigmoid before multiplication,
+whereas the default decomposition performs both in FP32. The MUSA
+decomposition now preserves the intermediate rounding. Separately, Edge
+dim-order copies can lose an explicit FP32-to-BF16-to-FP32 rounding boundary
+inside AOTInductor, even with `emulate_precision_casts=True`. The MUSA cast
+decomposition uses a compiler-only precision operator with an explicit Triton
+storage-dtype conversion; it does not add a Torch runtime dependency.
+
+Native runner regressions cover SiLU in FP32/FP16/BF16 and explicit cast
+roundtrips in FP16/BF16. The latter failed on 1022/1024 values before the fix
+and now requires exact equality. Layout preservation is tested separately.
+These local fixes are not sufficient evidence for whole-model acceptance;
+keep the unchanged full-vocabulary and reset checks as the deployment gate.
+
 The validator uses Python's standard library for control and readback only;
 all model tensor computation runs in the native MUSA delegate. It checks
 every logit, exact argmax IDs, two sequences in the same process, reset

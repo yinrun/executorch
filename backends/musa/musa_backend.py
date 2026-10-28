@@ -233,6 +233,78 @@ def _decompose_musa_hardsigmoid(input: torch.Tensor) -> torch.Tensor:
     return _MUSA_HARDSIGMOID(input)
 
 
+def _decompose_musa_silu(input: torch.Tensor) -> torch.Tensor:
+    return input * torch.sigmoid(input)
+
+
+_musa_precision_library = torch.library.Library("executorch_musa", "FRAGMENT")
+
+
+def _musa_precision_cast(input: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    return input.to(dtype=dtype, copy=True)
+
+
+try:
+    _MUSA_PRECISION_CAST = torch.ops.executorch_musa.precision_cast.default
+except AttributeError:
+    _musa_precision_library.define(
+        "precision_cast(Tensor input, ScalarType dtype) -> Tensor"
+    )
+    _musa_precision_library.impl("precision_cast", _musa_precision_cast, "PrivateUse1")
+    _musa_precision_library.impl("precision_cast", _musa_precision_cast, "Meta")
+    _MUSA_PRECISION_CAST = torch.ops.executorch_musa.precision_cast.default
+
+
+def _decompose_musa_to_copy(input: torch.Tensor, **kwargs) -> torch.Tensor:
+    from torch._decomp.decompositions import _to_copy
+
+    dtype = kwargs.get("dtype")
+    device = kwargs.get("device")
+    if (
+        input.device.type == "musa"
+        and dtype in (torch.float16, torch.bfloat16)
+        and input.dtype != dtype
+        and input.dtype.is_floating_point
+        and (device is None or torch.device(device) == input.device)
+        and kwargs.get("layout") in (None, torch.strided)
+        and not kwargs.get("pin_memory", False)
+    ):
+        input = _MUSA_PRECISION_CAST(input, dtype)
+    return _to_copy(input, **kwargs)
+
+
+def _decompose_musa_dim_order_copy(input: torch.Tensor, **kwargs) -> torch.Tensor:
+    from executorch.exir.dim_order_utils import get_memory_format
+
+    kwargs["memory_format"] = get_memory_format(kwargs.pop("dim_order", None))
+    return _decompose_musa_to_copy(input, **kwargs)
+
+
+def _decompose_musa_to_dtype(
+    input: torch.Tensor,
+    dtype: torch.dtype,
+    non_blocking: bool = False,
+    copy: bool = False,
+    memory_format: torch.memory_format | None = None,
+) -> torch.Tensor:
+    if input.dtype == dtype and not copy and memory_format is None:
+        return input
+    return _decompose_musa_to_copy(
+        input, dtype=dtype, non_blocking=non_blocking, memory_format=memory_format
+    )
+
+
+@lowering.register_lowering(_MUSA_PRECISION_CAST, type_promotion_kind=None)
+def _lower_musa_precision_cast(input: Any, dtype: torch.dtype) -> Any:
+    from torch._inductor.virtualized import ops
+
+    def rounded(value):
+        narrowed = ops.to_dtype(value, dtype, use_compute_types=False)
+        return ops.to_dtype(narrowed, dtype)
+
+    return lowering.make_pointwise(rounded, override_return_dtype=dtype)(input)
+
+
 def _lower_musa_activation(input: Any, op: Any, name: str) -> Any:
     input.realize()
     layout = ir.FixedLayout(
@@ -693,6 +765,12 @@ class MusaBackend(AotiBackend, BackendDetails):
             torch.ops.aten.linear.default: _decompose_linear,
             torch.ops.aten.hardswish.default: _decompose_musa_hardswish,
             torch.ops.aten.hardsigmoid.default: _decompose_musa_hardsigmoid,
+            torch.ops.aten.silu.default: _decompose_musa_silu,
+            torch.ops.aten._to_copy.default: _decompose_musa_to_copy,
+            torch.ops.aten.to.dtype: _decompose_musa_to_dtype,
+            torch.ops.dim_order_ops._to_dim_order_copy.default: (
+                _decompose_musa_dim_order_copy
+            ),
             torch.ops.aten.batch_norm.default: _decompose_aten_batch_norm,
             torch.ops.aten._native_batch_norm_legit_no_training.default: (
                 _decompose_musa_batch_norm

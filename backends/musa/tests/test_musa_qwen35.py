@@ -13,6 +13,7 @@ except ImportError:
 else:
     MUSA_AVAILABLE = torch_musa.is_available()
 
+from executorch.backends.musa.musa_backend import _decompose_musa_to_copy
 from executorch.examples.models.llama import attention
 from executorch.examples.models.llama.model_args import ModelArgs
 from executorch.examples.models.llama.norm import RMSNorm
@@ -73,6 +74,27 @@ class TestQwen35LogitValidation(unittest.TestCase):
 
 @unittest.skipUnless(MUSA_AVAILABLE, "MUSA is not available")
 class TestMusaQwen35(unittest.TestCase):
+    @torch.no_grad()
+    def test_low_precision_cast_preserves_memory_format(self):
+        value = torch.linspace(-2, 2, 120, device="musa").reshape(2, 3, 4, 5)
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            for memory_format in (
+                torch.preserve_format,
+                torch.contiguous_format,
+                torch.channels_last,
+            ):
+                with self.subTest(dtype=dtype, memory_format=memory_format):
+                    source = value.transpose(2, 3)
+                    expected = torch.ops.aten._to_copy.default(
+                        source, dtype=dtype, memory_format=memory_format
+                    )
+                    actual = _decompose_musa_to_copy(
+                        source, dtype=dtype, memory_format=memory_format
+                    )
+                    self.assertEqual(actual.stride(), expected.stride())
+                    self.assertNotEqual(actual.data_ptr(), source.data_ptr())
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     @torch.no_grad()
     def test_unit_offset_norm_scales_before_low_precision_cast(self):
         torch.manual_seed(19)
