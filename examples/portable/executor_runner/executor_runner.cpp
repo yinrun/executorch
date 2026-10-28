@@ -832,7 +832,8 @@ int main(int argc, char** argv) {
         }
       }
 
-      ET_LOG(Info, "SERVER MODE DONE");
+      fprintf(stderr, "SERVER MODE DONE\n");
+      fflush(stderr);
     }
 
     return 0;

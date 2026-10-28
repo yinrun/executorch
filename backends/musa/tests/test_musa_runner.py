@@ -374,6 +374,58 @@ class TestTensorSnapshots(unittest.TestCase):
 )
 class TestMusaRunner(unittest.TestCase):
 
+    def test_server_completion_and_persistent_state(self) -> None:
+        class Accumulator(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("state", torch.zeros(4))
+
+            def forward(self, value):
+                self.state.add_(value)
+                return self.state.clone()
+
+        model = Accumulator().eval().to("musa")
+        example = torch.ones(4, device="musa")
+        exported = export(model, (example,)).run_decompositions({})
+        self.assertEqual(
+            set(exported.graph_signature.buffers_to_mutate.values()), {"state"}
+        )
+        specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with _serialization_schema():
+                manager = to_edge_transform_and_lower(
+                    exported, partitioner=[MusaPartitioner(specs)]
+                ).to_executorch()
+                pte = Path(save_pte_program(manager, "server", directory))
+            input_path = root / "input.bin"
+            _write_tensor(example, input_path)
+            environment = os.environ.copy()
+            for name in ("LD_PRELOAD", "PYTHONPATH", "PYTHONHOME"):
+                environment.pop(name, None)
+            result = subprocess.run(
+                [
+                    os.environ["EXECUTORCH_MUSA_RUNNER"],
+                    f"--model_path={pte}",
+                    f"--data_path={root / 'aoti_musa_blob.ptd'}",
+                    f"--inputs={input_path}",
+                    f"--output_file={root / 'output'}",
+                    "--print_output=none",
+                    "--server_mode",
+                ],
+                input="\n\n\n",
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr.count("SERVER MODE DONE"), 3)
+            actual = torch.frombuffer(
+                bytearray((root / "output-0.bin").read_bytes()), dtype=torch.float32
+            )
+            torch.testing.assert_close(actual, torch.full((4,), 3.0), atol=0, rtol=0)
+
     def test_native_musa_device_metadata(self) -> None:
         from executorch.exir.schema import DeviceType, Tensor
 

@@ -799,12 +799,14 @@ class MusaBackend(AotiBackend, BackendDetails):
             edge_program.graph_module,
             {torch.ops.aten.matmul.default, torch.ops.aten.bmm.default},
         )
-        sdpa_context = (
-            torch._inductor.config.patch({"pattern_matcher": False})
-            if has_sdpa or has_attention_math
-            else contextlib.nullcontext()
-        )
-        with collector.capture(_aoti_device_type_for_weight) as capture, sdpa_context:
+        compiler_options = {}
+        if has_sdpa or has_attention_math:
+            compiler_options["pattern_matcher"] = False
+        if edge_program.graph_signature.buffers_to_mutate:
+            compiler_options["always_keep_tensor_constants"] = True
+        with collector.capture(
+            _aoti_device_type_for_weight
+        ) as capture, torch._inductor.config.patch(compiler_options):
             result = AotiBackend.preprocess.__func__(cls, edge_program, compile_specs)
         if capture.artifact is None:
             raise RuntimeError("MUSA AOTI did not return a structured Weights output")

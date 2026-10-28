@@ -895,7 +895,7 @@ class AttentionGatedDeltaNet(Attention):
         decay = g.exp()
         initial_state = self.recurrent_state[:batch_size].to(torch.float32)
 
-        op = _get_gated_delta_rule_op()
+        op = None if query.device.type == "musa" else _get_gated_delta_rule_op()
         # The fused op is an ExecuTorch portable kernel; it cannot run in eager
         # mode on CUDA (there is no kernel runtime context, so it aborts with
         # "No temp allocator provided"). Restrict it to export/compile tracing

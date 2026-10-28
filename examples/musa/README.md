@@ -1,5 +1,40 @@
 # MUSA AOTI model acceptance
 
+## Qwen3.5-0.8B text bring-up
+
+Export a local Hugging Face checkpoint with the existing ExecuTorch Qwen3.5
+weight converter and a single MUSA delegate:
+
+```bash
+python -m examples.musa.aoti_qwen35_export \
+  --checkpoint-dir /path/to/Qwen3.5-0.8B \
+  --output-dir /tmp/qwen35-musa-bf16 \
+  --dtype bf16 --context-length 64 --token-ids 9707 11 2082
+```
+
+The output directory must not exist. The script writes `qwen35.pte`,
+`aoti_musa_blob.ptd`, three MUSA eager reference logits, the exported graph,
+and a hash-bearing `result.json`. It checks all 48 mutable buffers (18 GDN
+convolution/recurrent pairs and six attention K/V pairs) and rejects host
+tensor operators outside the delegate. GDN uses an ATen recurrence on MUSA,
+not the portable fused CPU operator. Recurrent state remains FP32 with BF16
+weights. Only text, batch one, static single-token decoding is covered;
+vision, MTP, quantization, and a production generation API are not included.
+
+This is an **export bring-up, not a deployment acceptance result**. On the
+local M1000, full-model BF16 export succeeds and the corrected unit-offset
+RMSNorm gives byte-identical eager logits to Transformers 5.3.0 for the
+three reference tokens. The standalone runner's first-token argmax matches,
+but its logits fail the `atol=0.04, rtol=0.04` comparison. Multi-step native
+generation and full-model cache reset remain unvalidated. The exporter
+therefore records `status=exported` and `runtime_validated=false`.
+
+Mutable MUSA delegates retain tensor constants rather than inlining small
+buffers, which would discard cross-call updates. The server runner emits
+`SERVER MODE DONE` on stderr even when logging is disabled. A regression
+checks three consecutive accumulator calls in the same process; rebuilding
+the runner is required for the protocol fix.
+
 ## Native device metadata and compatibility
 
 New `MusaPartitioner` exports default to `target_device=musa:0`. PTE tensor

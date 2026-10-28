@@ -35,10 +35,10 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt((x * x).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
+        output = self._norm(x.float())
         if self.add_unit_offset:
-            return output * (1.0 + self.weight.float()).type_as(x)
-        return output * self.weight.type_as(x)
+            return (output * (1.0 + self.weight.float())).type_as(x)
+        return output.type_as(x) * self.weight.type_as(x)
 
 
 class ScalelessRMSNorm(torch.nn.Module):
