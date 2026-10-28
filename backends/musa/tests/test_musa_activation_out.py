@@ -34,6 +34,17 @@ class ActivationChain(nn.Module):
         return intermediate, torch.nn.functional.hardsigmoid(intermediate)
 
 
+class MathPair(nn.Module):
+    def __init__(self, strided: bool) -> None:
+        super().__init__()
+        self.strided = strided
+
+    def forward(self, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.strided:
+            value = value.transpose(1, 2)
+        return torch.exp(value), torch.nn.functional.softplus(value)
+
+
 @unittest.skipUnless(
     hasattr(torch, "musa")
     and torch.musa.is_available()
@@ -41,7 +52,7 @@ class ActivationChain(nn.Module):
     "requires MUSA and EXECUTORCH_MUSA_RUNNER",
 )
 class TestMusaActivationOutRunner(unittest.TestCase):
-    def _check_chain(self, strided: bool) -> None:
+    def _check_chain(self, strided: bool, native_math: bool = False) -> None:
         runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"]).resolve()
         environment = {
             "PATH": "/usr/bin:/bin",
@@ -57,11 +68,19 @@ class TestMusaActivationOutRunner(unittest.TestCase):
                 )
             ),
         }
-        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+        dtypes = (torch.float32,) if native_math else (
+            torch.float32, torch.float16, torch.bfloat16
+        )
+        for dtype in dtypes:
             for planned in (False, True):
                 with self.subTest(dtype=dtype, memory_planning=planned):
-                    row = torch.tensor(
+                    values = (
                         [
+                            -104, -90, -20, -1, -0.0, 0, 1,
+                            19.999998, 20, 20.000002, 80, 88,
+                        ]
+                        if native_math
+                        else [
                             -4,
                             -3,
                             -2,
@@ -74,11 +93,16 @@ class TestMusaActivationOutRunner(unittest.TestCase):
                             2,
                             3,
                             4,
-                        ],
+                        ]
+                    )
+                    row = torch.tensor(
+                        values,
                         device="musa",
                         dtype=dtype,
                     ).reshape(1, 3, 4)
-                    model = ActivationChain(strided).eval()
+                    model = (
+                        MathPair(strided) if native_math else ActivationChain(strided)
+                    ).eval()
                     exported = export(
                         model,
                         (row.repeat(2, 1, 1),),
@@ -97,7 +121,10 @@ class TestMusaActivationOutRunner(unittest.TestCase):
                                 save_pte_program(manager, "activations", directory)
                             )
                         payload = pte.read_bytes()
-                        for name in ("hardswish", "hardsigmoid"):
+                        names = ("exp", "softplus") if native_math else (
+                            "hardswish", "hardsigmoid"
+                        )
+                        for name in names:
                             self.assertIn(
                                 f"aoti_torch_musa_{name}_out\0".encode(), payload
                             )
@@ -174,6 +201,13 @@ class TestMusaActivationOutRunner(unittest.TestCase):
 
     def test_strided_chain(self) -> None:
         self._check_chain(True)
+
+
+    def test_contiguous_fp32_math(self) -> None:
+        self._check_chain(False, native_math=True)
+
+    def test_strided_fp32_math(self) -> None:
+        self._check_chain(True, native_math=True)
 
 
 if __name__ == "__main__":

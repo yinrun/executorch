@@ -4,8 +4,10 @@
 #include <memory>
 #include <vector>
 
+#include <executorch/backends/aoti/slim/cuda/guard.h>
 #include <executorch/backends/cuda/runtime/shims/memory.h>
 #include <executorch/backends/cuda/runtime/shims/musa_activation.h>
+#include <executorch/backends/cuda/runtime/shims/musa_tensor_utils.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/platform/log.h>
 
@@ -74,36 +76,14 @@ Error run_activation(
       NotSupported,
       "MUSA activation exceeds the muDNN descriptor size limit");
 
-  const size_t storage_elements =
-      input->storage()->nbytes() / input->itemsize();
+  const bool fp32_math =
+      mode == MUDNN_UNARY_EXP || mode == MUDNN_UNARY_SOFTPLUS;
   ET_CHECK_OR_RETURN_ERROR(
-      input->storage_offset() >= 0 &&
-          static_cast<uint64_t>(input->storage_offset()) <= storage_elements,
-      InvalidArgument,
-      "MUSA activation input exceeds its storage");
-  size_t source_bytes = 0;
-  if (input->numel() != 0) {
-    const size_t available_elements =
-        storage_elements - input->storage_offset();
-    ET_CHECK_OR_RETURN_ERROR(
-        available_elements > 0,
-        InvalidArgument,
-        "MUSA activation input exceeds its storage");
-    size_t last_element = 0;
-    for (int64_t dimension = 0; dimension < input->dim(); ++dimension) {
-      const auto size = input->size(dimension);
-      const auto stride = input->stride(dimension);
-      ET_CHECK_OR_RETURN_ERROR(
-          size > 0 && stride >= 0 &&
-              (stride == 0 ||
-               static_cast<uint64_t>(size - 1) <=
-                   (available_elements - 1 - last_element) / stride),
-          InvalidArgument,
-          "MUSA activation input strides exceed storage");
-      last_element += (size - 1) * stride;
-    }
-    source_bytes = (last_element + 1) * input->itemsize();
-  }
+      !fp32_math || dtype == ScalarType::Float,
+      NotSupported,
+      "MUSA native exp and softplus require float32 input");
+  const auto input_span = checked_musa_tensor_span(*input);
+  ET_CHECK_OK_OR_RETURN_ERROR(input_span.error());
   if (output != nullptr) {
     ET_CHECK_OR_RETURN_ERROR(
         output->storage() != nullptr && output->is_gpu() &&
@@ -111,27 +91,18 @@ Error run_activation(
             output->dtype() == dtype && output->sizes() == input->sizes() &&
             output->is_contiguous(),
         InvalidArgument,
-        "MUSA activation output must be contiguous with matching shape, dtype and device");
+        "MUSA activation output must be contiguous with matching shape, dtype "
+        "and device");
+    const auto output_span = checked_musa_tensor_span(*output);
+    ET_CHECK_OK_OR_RETURN_ERROR(output_span.error());
     ET_CHECK_OR_RETURN_ERROR(
-        output->storage_offset() >= 0 &&
-            static_cast<uint64_t>(output->storage_offset()) <=
-                output->storage()->nbytes() / output->itemsize() &&
-            output->nbytes() <= output->storage()->nbytes() -
-                    output->storage_offset() * output->itemsize(),
+        !musa_tensor_spans_overlap(input_span.get(), output_span.get()),
         InvalidArgument,
-        "MUSA activation output exceeds its storage");
-    if (source_bytes != 0) {
-      const auto source_start = reinterpret_cast<uintptr_t>(input->data_ptr());
-      const auto output_start = reinterpret_cast<uintptr_t>(output->data_ptr());
-      ET_CHECK_OR_RETURN_ERROR(
-          output_start <= source_start
-              ? source_start - output_start >= output->nbytes()
-              : output_start - source_start >= source_bytes,
-          InvalidArgument,
-          "MUSA activation output must not overlap input storage");
-    }
+        "MUSA activation output must not overlap input storage");
   }
 
+  auto device_guard = CUDAGuard::create(input->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
   std::unique_ptr<SlimTensor> owned_output;
   if (output == nullptr) {
     std::vector<int64_t> sizes(input->sizes().begin(), input->sizes().end());
@@ -139,6 +110,12 @@ Error run_activation(
     for (int64_t dimension = static_cast<int64_t>(sizes.size()) - 2;
          dimension >= 0;
          --dimension) {
+      ET_CHECK_OR_RETURN_ERROR(
+          sizes[dimension + 1] == 0 ||
+              strides[dimension + 1] <=
+                  std::numeric_limits<int64_t>::max() / sizes[dimension + 1],
+          NotSupported,
+          "MUSA activation contiguous strides exceed int64 limits");
       strides[dimension] = strides[dimension + 1] * sizes[dimension + 1];
     }
     SlimTensor* raw_output = nullptr;
@@ -184,16 +161,19 @@ Error run_activation(
   }
   ET_CHECK_OK_OR_RETURN_ERROR(
       check_mudnn(mudnnCreateUnaryDescriptor(&context.unary)));
-  double alpha = 0.166667;
-  double beta = 0.5;
+  const bool softplus = mode == MUDNN_UNARY_SOFTPLUS;
+  double alpha = softplus ? 1.0 : 0.166667;
+  double beta = softplus ? 20.0 : 0.5;
   const bool hard_sigmoid = mode == MUDNN_UNARY_HARDSIGMOID;
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(mudnnSetUnaryDescriptor(
       context.unary,
       mode,
-      hard_sigmoid ? MUDNN_PARAM_DATA_DOUBLE : MUDNN_PARAM_DATA_NONE,
-      hard_sigmoid ? &alpha : nullptr,
-      hard_sigmoid ? MUDNN_PARAM_DATA_DOUBLE : MUDNN_PARAM_DATA_NONE,
-      hard_sigmoid ? &beta : nullptr)));
+      hard_sigmoid || softplus ? MUDNN_PARAM_DATA_DOUBLE
+                               : MUDNN_PARAM_DATA_NONE,
+      hard_sigmoid || softplus ? &alpha : nullptr,
+      hard_sigmoid || softplus ? MUDNN_PARAM_DATA_DOUBLE
+                               : MUDNN_PARAM_DATA_NONE,
+      hard_sigmoid || softplus ? &beta : nullptr)));
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(mudnnUnary(
       context.handle,
       context.unary,
@@ -227,6 +207,23 @@ aoti_torch_musa_hardswish_out(SlimTensor* output, SlimTensor* input) {
 extern "C" AOTI_SHIM_EXPORT Error
 aoti_torch_musa_hardsigmoid_out(SlimTensor* output, SlimTensor* input) {
   return run_activation(input, output, nullptr, MUDNN_UNARY_HARDSIGMOID);
+}
+
+extern "C" AOTI_SHIM_EXPORT Error
+aoti_torch_musa_exp_out(SlimTensor* output, SlimTensor* input) {
+  return run_activation(input, output, nullptr, MUDNN_UNARY_EXP);
+}
+
+extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_softplus_out(
+    SlimTensor* output,
+    SlimTensor* input,
+    double beta,
+    double threshold) {
+  ET_CHECK_OR_RETURN_ERROR(
+      beta == 1.0 && threshold == 20.0,
+      NotSupported,
+      "MUSA native softplus requires beta=1 and threshold=20");
+  return run_activation(input, output, nullptr, MUDNN_UNARY_SOFTPLUS);
 }
 
 }

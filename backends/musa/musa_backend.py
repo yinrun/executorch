@@ -220,6 +220,36 @@ except AttributeError:
 _MUSA_ACTIVATION_HEADER = os.path.join(
     os.path.dirname(_MUSA_BATCH_NORM_HEADER), "musa_activation.h"
 )
+
+try:
+    _MUSA_EXP = torch.ops.executorch_musa.exp.default
+except AttributeError:
+    _musa_activation_library.define("exp(Tensor input) -> Tensor")
+    _musa_activation_library.impl(
+        "exp", lambda input: torch.exp(input).contiguous(), "PrivateUse1"
+    )
+    _musa_activation_library.impl(
+        "exp",
+        lambda input: torch.empty_like(input, memory_format=torch.contiguous_format),
+        "Meta",
+    )
+    _MUSA_EXP = torch.ops.executorch_musa.exp.default
+
+try:
+    _MUSA_SOFTPLUS = torch.ops.executorch_musa.softplus.default
+except AttributeError:
+    _musa_activation_library.define("softplus(Tensor input) -> Tensor")
+    _musa_activation_library.impl(
+        "softplus",
+        lambda input: torch.nn.functional.softplus(input).contiguous(),
+        "PrivateUse1",
+    )
+    _musa_activation_library.impl(
+        "softplus",
+        lambda input: torch.empty_like(input, memory_format=torch.contiguous_format),
+        "Meta",
+    )
+    _MUSA_SOFTPLUS = torch.ops.executorch_musa.softplus.default
 _MUSA_CONVOLUTION_HEADER = os.path.join(
     os.path.dirname(_MUSA_BATCH_NORM_HEADER), "musa_convolution.h"
 )
@@ -235,6 +265,25 @@ def _decompose_musa_hardsigmoid(input: torch.Tensor) -> torch.Tensor:
 
 def _decompose_musa_silu(input: torch.Tensor) -> torch.Tensor:
     return input * torch.sigmoid(input)
+
+
+def _decompose_musa_exp(input: torch.Tensor) -> torch.Tensor:
+    if input.device.type == "musa" and input.dtype == torch.float32:
+        return _MUSA_EXP(input)
+    return torch._refs.exp(input)
+
+
+def _decompose_musa_softplus(
+    input: torch.Tensor, beta: float = 1, threshold: float = 20
+) -> torch.Tensor:
+    if (
+        input.device.type == "musa"
+        and input.dtype == torch.float32
+        and beta == 1
+        and threshold == 20
+    ):
+        return _MUSA_SOFTPLUS(input)
+    return torch._refs.nn.functional.softplus(input, beta, threshold)
 
 
 _musa_precision_library = torch.library.Library("executorch_musa", "FRAGMENT")
@@ -333,6 +382,16 @@ def _lower_musa_hardswish(input: Any) -> Any:
 @lowering.register_lowering(_MUSA_HARDSIGMOID, type_promotion_kind=None)
 def _lower_musa_hardsigmoid(input: Any) -> Any:
     return _lower_musa_activation(input, torch.ops.aten.hardsigmoid.out, "hardsigmoid")
+
+
+@lowering.register_lowering(_MUSA_EXP, type_promotion_kind=None)
+def _lower_musa_exp(input: Any) -> Any:
+    return _lower_musa_activation(input, torch.ops.aten.exp.out, "exp")
+
+
+@lowering.register_lowering(_MUSA_SOFTPLUS, type_promotion_kind=None)
+def _lower_musa_softplus(input: Any) -> Any:
+    return _lower_musa_activation(input, torch.ops.aten.softplus.out, "softplus")
 
 
 def _materialize_musa_batch_norm_parameters(
@@ -754,6 +813,8 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_hardsigmoid": None,
             "aoti_torch_musa_hardswish_out": None,
             "aoti_torch_musa_hardsigmoid_out": None,
+            "aoti_torch_musa_exp_out": None,
+            "aoti_torch_musa_softplus_out": None,
         }
 
     @classmethod
@@ -766,6 +827,8 @@ class MusaBackend(AotiBackend, BackendDetails):
             torch.ops.aten.hardswish.default: _decompose_musa_hardswish,
             torch.ops.aten.hardsigmoid.default: _decompose_musa_hardsigmoid,
             torch.ops.aten.silu.default: _decompose_musa_silu,
+            torch.ops.aten.exp.default: _decompose_musa_exp,
+            torch.ops.aten.softplus.default: _decompose_musa_softplus,
             torch.ops.aten._to_copy.default: _decompose_musa_to_copy,
             torch.ops.aten.to.dtype: _decompose_musa_to_dtype,
             torch.ops.dim_order_ops._to_dim_order_copy.default: (

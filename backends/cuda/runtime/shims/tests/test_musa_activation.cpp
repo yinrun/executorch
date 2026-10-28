@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -25,10 +27,16 @@ using executorch::backends::cuda::aoti_torch_musa_hardsigmoid;
 using executorch::backends::cuda::aoti_torch_musa_hardsigmoid_out;
 using executorch::backends::cuda::aoti_torch_musa_hardswish;
 using executorch::backends::cuda::aoti_torch_musa_hardswish_out;
+using executorch::backends::cuda::aoti_torch_musa_exp_out;
+using executorch::backends::cuda::aoti_torch_musa_softplus_out;
 using executorch::backends::cuda::CUDAStreamGuard;
 using executorch::runtime::Error;
 using executorch::runtime::etensor::BFloat16;
 using executorch::runtime::etensor::Half;
+
+Error default_softplus_out(SlimTensor* output, SlimTensor* input) {
+  return aoti_torch_musa_softplus_out(output, input, 1.0, 20.0);
+}
 
 template <typename Element>
 void check_values(
@@ -276,7 +284,8 @@ TEST_F(MusaActivationTest, OutRejectsInvalidViewsWithoutWriting) {
           cudaMemcpyHostToDevice),
       cudaSuccess);
   for (const auto activation :
-       {aoti_torch_musa_hardswish_out, aoti_torch_musa_hardsigmoid_out}) {
+       {aoti_torch_musa_hardswish_out, aoti_torch_musa_hardsigmoid_out,
+        aoti_torch_musa_exp_out, default_softplus_out}) {
     for (auto* destination :
          {static_cast<SlimTensor*>(nullptr),
           &undefined,
@@ -379,6 +388,245 @@ TEST_F(MusaActivationTest, RejectsNullInput) {
       aoti_torch_musa_hardswish(nullptr, &output), Error::InvalidArgument);
   EXPECT_EQ(
       aoti_torch_musa_hardsigmoid(nullptr, &output), Error::InvalidArgument);
+}
+
+TEST_F(MusaActivationTest, Fp32MathReusesStridedAndBroadcastPoolViews) {
+  ASSERT_EQ(
+      musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  auto guard = CUDAStreamGuard::create(stream, 0);
+  ASSERT_TRUE(guard.ok());
+  for (auto operation : {aoti_torch_musa_exp_out, default_softplus_out}) {
+    for (int64_t stride : {0, 1, 2}) {
+      auto pool = slim::empty(
+          {128}, ScalarType::Float, slim::c10::Device(slim::c10::kMUSA, 0));
+      SlimTensor input(pool.storage(), {9}, {stride}, ScalarType::Float, 3);
+      SlimTensor output(pool.storage(), {9}, {1}, ScalarType::Float, 64);
+      for (int iteration = 0; iteration < 3; ++iteration) {
+        std::vector<float> initial(128, 17.0f);
+        for (int64_t index = 0; index < 9; ++index) {
+          initial[3 + index * stride] =
+              static_cast<float>(index - 4 + iteration);
+        }
+        ASSERT_EQ(
+            cudaMemcpyAsync(
+                pool.data_ptr(),
+                initial.data(),
+                pool.nbytes(),
+                cudaMemcpyHostToDevice,
+                stream),
+            cudaSuccess);
+        ASSERT_EQ(operation(&output, &input), Error::Ok);
+        std::vector<float> actual(128);
+        ASSERT_EQ(
+            cudaMemcpyAsync(
+                actual.data(),
+                pool.data_ptr(),
+                pool.nbytes(),
+                cudaMemcpyDeviceToHost,
+                stream),
+            cudaSuccess);
+        ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+        for (size_t index = 0; index < actual.size(); ++index) {
+          if (index >= 64 && index < 73) {
+            const float value = initial[3 + (index - 64) * stride];
+            const float expected = operation == aoti_torch_musa_exp_out
+                ? std::exp(value)
+                : std::log1p(std::exp(value));
+            EXPECT_NEAR(
+                actual[index], expected, 1e-6f * std::max(1.0f, expected));
+          } else {
+            EXPECT_EQ(actual[index], initial[index]);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(MusaActivationTest, Fp32MathEmptyAndScalar) {
+  for (auto operation : {aoti_torch_musa_exp_out, default_softplus_out}) {
+    for (const std::vector<int64_t>& sizes :
+         {std::vector<int64_t>{}, {0}, {2, 0, 3}}) {
+      auto input = slim::empty(
+          slim::makeArrayRef(sizes),
+          ScalarType::Float,
+          slim::c10::Device(slim::c10::kMUSA, 0));
+      auto output = slim::empty(
+          slim::makeArrayRef(sizes), ScalarType::Float, input.device());
+      if (input.numel()) {
+        const float value = 0.0f;
+        ASSERT_EQ(
+            cudaMemcpy(
+                input.data_ptr(),
+                &value,
+                sizeof(value),
+                cudaMemcpyHostToDevice),
+            cudaSuccess);
+      }
+      ASSERT_EQ(operation(&output, &input), Error::Ok);
+      if (input.numel()) {
+        float actual;
+        ASSERT_EQ(
+            cudaMemcpy(
+                &actual,
+                output.data_ptr(),
+                sizeof(actual),
+                cudaMemcpyDeviceToHost),
+            cudaSuccess);
+        EXPECT_NEAR(
+            actual,
+            operation == aoti_torch_musa_exp_out ? 1.0f : std::log(2.0f),
+            1e-7f);
+      }
+    }
+  }
+}
+
+TEST_F(MusaActivationTest, Fp32MathSpecialValues) {
+  const std::vector<float> values{
+      -std::numeric_limits<float>::infinity(),
+      0,
+      std::numeric_limits<float>::infinity(),
+      std::numeric_limits<float>::quiet_NaN()};
+  auto input = slim::empty(
+      {4}, ScalarType::Float, slim::c10::Device(slim::c10::kMUSA, 0));
+  auto output = slim::empty({4}, ScalarType::Float, input.device());
+  ASSERT_EQ(
+      cudaMemcpy(
+          input.data_ptr(),
+          values.data(),
+          input.nbytes(),
+          cudaMemcpyHostToDevice),
+      cudaSuccess);
+  for (auto operation : {aoti_torch_musa_exp_out, default_softplus_out}) {
+    ASSERT_EQ(operation(&output, &input), Error::Ok);
+    std::vector<float> actual(4);
+    ASSERT_EQ(
+        cudaMemcpy(
+            actual.data(),
+            output.data_ptr(),
+            output.nbytes(),
+            cudaMemcpyDeviceToHost),
+        cudaSuccess);
+    EXPECT_EQ(actual[0], 0.0f);
+    EXPECT_TRUE(std::isinf(actual[2]) && actual[2] > 0);
+    EXPECT_TRUE(std::isnan(actual[3]));
+  }
+}
+
+TEST_F(MusaActivationTest, Fp32MathRejectsOtherDtypesAndSoftplusParameters) {
+  for (auto dtype : {ScalarType::Half, ScalarType::BFloat16, ScalarType::Int}) {
+    auto input =
+        slim::empty({4}, dtype, slim::c10::Device(slim::c10::kMUSA, 0));
+    auto output = slim::empty({4}, dtype, input.device());
+    ASSERT_EQ(
+        musaMemset(output.data_ptr(), 0xA5, output.nbytes()), musaSuccess);
+    for (auto operation : {aoti_torch_musa_exp_out, default_softplus_out}) {
+      EXPECT_EQ(operation(&output, &input), Error::NotSupported);
+    }
+    std::vector<uint8_t> actual(output.nbytes());
+    ASSERT_EQ(
+        cudaMemcpy(
+            actual.data(),
+            output.data_ptr(),
+            output.nbytes(),
+            cudaMemcpyDeviceToHost),
+        cudaSuccess);
+    EXPECT_EQ(actual, std::vector<uint8_t>(output.nbytes(), 0xA5));
+  }
+  auto input = slim::empty(
+      {4}, ScalarType::Float, slim::c10::Device(slim::c10::kMUSA, 0));
+  auto output = slim::empty({4}, ScalarType::Float, input.device());
+  ASSERT_EQ(musaMemset(output.data_ptr(), 0xA5, output.nbytes()), musaSuccess);
+  for (double beta :
+       {0.0, -1.0, 2.0, std::numeric_limits<double>::quiet_NaN()}) {
+    EXPECT_EQ(
+        aoti_torch_musa_softplus_out(&output, &input, beta, 20.0),
+        Error::NotSupported);
+  }
+  EXPECT_EQ(
+      aoti_torch_musa_softplus_out(&output, &input, 1.0, 10.0),
+      Error::NotSupported);
+  std::vector<uint8_t> actual(output.nbytes());
+  ASSERT_EQ(
+      cudaMemcpy(
+          actual.data(),
+          output.data_ptr(),
+          output.nbytes(),
+          cudaMemcpyDeviceToHost),
+      cudaSuccess);
+  EXPECT_EQ(actual, std::vector<uint8_t>(output.nbytes(), 0xA5));
+}
+
+TEST_F(MusaActivationTest, RejectsUnbackedAndIndependentlyWrappedOverlaps) {
+  auto input = slim::empty(
+      {8}, ScalarType::Float, slim::c10::Device(slim::c10::kMUSA, 0));
+  auto output = slim::empty({8}, ScalarType::Float, input.device());
+  ASSERT_EQ(musaMemset(output.data_ptr(), 0xA5, output.nbytes()), musaSuccess);
+  for (void* address :
+       {static_cast<void*>(nullptr),
+        static_cast<void*>(static_cast<char*>(input.data_ptr()) + 1)}) {
+    SlimTensor invalid(
+        slim::Storage(
+            new slim::MaybeOwningStorage(input.device(), address, 32)),
+        {8},
+        {1},
+        ScalarType::Float);
+    for (auto operation :
+         {aoti_torch_musa_exp_out,
+          default_softplus_out,
+          aoti_torch_musa_hardswish_out,
+          aoti_torch_musa_hardsigmoid_out}) {
+      EXPECT_EQ(operation(&output, &invalid), Error::InvalidArgument);
+      EXPECT_EQ(operation(&invalid, &input), Error::InvalidArgument);
+    }
+  }
+  for (auto operation :
+       {aoti_torch_musa_exp_out,
+        default_softplus_out,
+        aoti_torch_musa_hardswish_out,
+        aoti_torch_musa_hardsigmoid_out}) {
+    SlimTensor alias(
+        slim::Storage(new slim::MaybeOwningStorage(
+            output.device(), output.data_ptr(), output.nbytes())),
+        {8},
+        {1},
+        ScalarType::Float);
+    EXPECT_EQ(operation(&output, &alias), Error::InvalidArgument);
+  }
+  std::vector<uint8_t> actual(output.nbytes());
+  ASSERT_EQ(
+      cudaMemcpy(
+          actual.data(),
+          output.data_ptr(),
+          output.nbytes(),
+          cudaMemcpyDeviceToHost),
+      cudaSuccess);
+  EXPECT_EQ(actual, std::vector<uint8_t>(output.nbytes(), 0xA5));
+}
+
+TEST_F(MusaActivationTest, Fp32MathRestoresCallingDevice) {
+  int count = 0;
+  ASSERT_EQ(cudaGetDeviceCount(&count), cudaSuccess);
+  if (count < 2) {
+    GTEST_SKIP() << "requires two MUSA devices";
+  }
+  auto input = slim::empty(
+      {4}, ScalarType::Float, slim::c10::Device(slim::c10::kMUSA, 1));
+  auto output = slim::empty({4}, ScalarType::Float, input.device());
+  {
+    auto guard = executorch::backends::cuda::CUDAGuard::create(1);
+    ASSERT_TRUE(guard.ok());
+    ASSERT_EQ(musaMemset(input.data_ptr(), 0, input.nbytes()), musaSuccess);
+  }
+  auto caller = executorch::backends::cuda::CUDAGuard::create(0);
+  ASSERT_TRUE(caller.ok());
+  for (auto operation : {aoti_torch_musa_exp_out, default_softplus_out}) {
+    ASSERT_EQ(operation(&output, &input), Error::Ok);
+    int current = -1;
+    ASSERT_EQ(cudaGetDevice(&current), cudaSuccess);
+    EXPECT_EQ(current, 0);
+  }
 }
 
 }
