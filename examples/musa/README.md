@@ -11,11 +11,26 @@ layers before replacement. Training, unsupported input shapes/layouts, biased
 or non-BF16 projections, and unsupported context capacities are rejected.
 Fusion is applied after checkpoint loading, not to the on-disk checkpoint.
 
+Fresh packages from source commit `87348ccb8e` pass all 4200 strict native/HF
+full-vocabulary comparisons across contexts 64/128/256; separately executed
+source-fused eager matches all 2100 positions, with 2100 reset checks and 18 EOS
+stops. The independent `precision-formal-fusion-audit-v1.json` rechecks saved
+tensors against HF and the prototype. A new six-process nonblocking paired A/B
+retains all 1512 full-logit checks: decode median is 17.620 versus 18.140 tok/s
+(+2.95%), with all three pairs positive. This is a shared-GPU, context-64,
+file-protocol workload with serial prompt input, not batched prefill or a
+universal performance guarantee. Details are in `QWEN35_FORMAL_FUSION.md`.
+
+All 32 MUSA Qwen tests and five existing attention regressions pass. A broader
+38-test run cannot execute one portable fused-op test because this environment
+lacks `executorch.extension.pybindings._C`; its import failure is retained,
+not reported as a passing or intentionally skipped numerical test.
+
 This source integration does not yet make the experimental native math/layout
-paths a default backend feature. Fresh packages must be exported and validated
-with this option; the prototype measurements below are not automatically proof
-for a newly compiled package. The seven new fusion tests cover state/reset and
-parameter identity, exported buffer mutation, nonzero offsets, input/layout and
+paths a default backend feature. Other newly compiled packages still require
+their own validation; the prototype measurements below are historical evidence,
+not a substitute for source-package acceptance. The seven new fusion tests cover
+state/reset and parameter identity, exported buffer mutation, nonzero offsets, input/layout and
 weight rejection, preflight non-mutation, and the default-off CLI.
 
 **Projection-fusion candidate validation (2026-10-29):** an isolated prototype
