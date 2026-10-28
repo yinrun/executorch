@@ -218,6 +218,33 @@ an asynchronous backend may also finish after that host interval. No extra
 device synchronization is inserted. Timings are opt-in and do not alter the
 default completion protocol. GPU timelines must be measured separately.
 
+### Opt-in native MUSA allocation cache
+
+`executor_runner --musa_cache_bytes=536870912` enables a shared, bounded
+event-based cache in `extension_cuda`; the default is zero (disabled).
+It retains synchronous allocation rather than switching back to the unstable
+MUSA async-allocation path. A freed block can be reused only on the same device,
+at exactly the same size, after its release-stream event completes. Individual
+blocks above 16 MiB and over-aligned allocations bypass retention. The byte
+limit bounds retained blocks, not live model weights or total GPU memory.
+
+Embedding applications configure it through
+`CudaAllocator::configure_musa_allocation_cache` before allocation begins;
+configuration changes require no tracked live or cached blocks and externally
+quiescent callers. Release on the stream that owns the final use, or establish
+the appropriate cross-stream dependencies first. After device work completes,
+`release_cached_memory` frees ready retained blocks without freeing live ones.
+OOM retries reclaim ready cached blocks once; unfinished blocks are not reused
+or forcibly synchronized. The runner trims at teardown and prints a cache
+summary. No GPU cleanup is performed from a static destructor.
+
+The BF16 comparator accepts `--musa-cache-bytes 536870912`, passes it explicitly
+to the runner, audits the loaded extension hash, and requires zero cached blocks
+at normal teardown. `--server_timing` additionally emits per-step
+`MUSA ALLOCATION CACHE SAMPLE` counters when caching is enabled. No LD_PRELOAD
+interposer is needed. Graph capture, dynamic library unloading, and untested
+multi-device hardware are outside this opt-in validation scope.
+
 The reference manifest must have `status="complete"`, `dtype="bf16"`, and a
 nonempty `fixtures` list. Each fixture contains `name`, `token_ids`,
 `prompt_token_count`, and `hashes` mapping tensor filenames to SHA256 values.

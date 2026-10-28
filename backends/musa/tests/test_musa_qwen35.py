@@ -23,6 +23,7 @@ from executorch.examples.models.llama.norm import RMSNorm
 from executorch.examples.models.llama.rope import Rope
 from examples.musa.aoti_qwen35_compare import (
     compare_distributions,
+    musa_cache_arguments,
     select_fixtures,
     select_input_token,
     summarize_comparison,
@@ -36,6 +37,17 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_native_cache_arguments_are_explicit_and_bounded(self):
+        self.assertEqual(musa_cache_arguments(0), [])
+        self.assertEqual(musa_cache_arguments(4096), ["--musa_cache_bytes=4096"])
+        self.assertEqual(
+            musa_cache_arguments(2**64 - 1),
+            ["--musa_cache_bytes=18446744073709551615"],
+        )
+        for value in (-1, 2**64, True, 4096.0, "4096", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                musa_cache_arguments(value)
+
     def test_fixture_selection_preserves_references_and_manifest_order(self):
         fixtures = [{"name": name} for name in ("trust", "fairness", "context_limit")]
         self.assertIs(select_fixtures(fixtures, None), fixtures)

@@ -185,6 +185,12 @@ def select_fixtures(fixtures, requested):
     return [fixture for fixture in fixtures if fixture["name"] in requested]
 
 
+def musa_cache_arguments(cache_bytes):
+    if type(cache_bytes) is not int or not 0 <= cache_bytes < 2**64:
+        raise ValueError("MUSA cache bytes must be an unsigned 64-bit integer")
+    return [f"--musa_cache_bytes={cache_bytes}"] if cache_bytes else []
+
+
 def compare(args, report):
     manifest = json.loads(args.references.read_text())
     if manifest["status"] != "complete" or manifest["dtype"] != "bf16":
@@ -221,6 +227,7 @@ def compare(args, report):
         f"--output_file={args.output_dir / 'output'}",
         "--print_output=none",
         "--server_mode",
+        *musa_cache_arguments(args.musa_cache_bytes),
     ]
     environment = {
         "PATH": "/usr/bin:/bin",
@@ -326,6 +333,17 @@ def compare(args, report):
                 process.kill()
                 process.wait()
     report["loaded_libraries"] = runtime_libraries(log_path.read_text())
+    if args.musa_cache_bytes:
+        cache_reports = [
+            json.loads(line.removeprefix("MUSA ALLOCATION CACHE "))
+            for line in log_path.read_text().splitlines()
+            if line.startswith("MUSA ALLOCATION CACHE ")
+        ]
+        if len(cache_reports) != 1:
+            raise AssertionError("Expected one native allocation-cache teardown report")
+        report["allocation_cache"] = cache_reports[0]
+        if cache_reports[0]["cached_bytes"] or cache_reports[0]["cached_blocks"]:
+            raise AssertionError("Native allocation cache did not drain at teardown")
     if (
         args.runtime_preload
         and str(args.runtime_preload) not in report["loaded_libraries"]
@@ -358,6 +376,12 @@ def main():
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument(
+        "--musa-cache-bytes",
+        type=int,
+        default=0,
+        help="Opt into a bounded native MUSA allocation cache (requires a supporting runner)",
+    )
     parser.add_argument(
         "--fixture",
         action="append",

@@ -30,6 +30,7 @@
 #include <optional>
 #if defined(EXECUTORCH_USE_MUSA)
 #include <executorch/examples/musa/benchmark.h>
+#include <executorch/extension/cuda/cuda_allocator.h>
 #include <limits>
 #endif
 
@@ -108,6 +109,10 @@ DEFINE_string(
     "Output printing mode: 'none' to suppress, 'summary' for first/last 100 elements, 'all' for everything.");
 DEFINE_uint32(num_executions, 1, "Number of times to run the model.");
 #if defined(EXECUTORCH_USE_MUSA)
+DEFINE_uint64(
+    musa_cache_bytes,
+    0,
+    "Opt-in bounded MUSA event allocation cache; zero preserves the default allocator.");
 DEFINE_string(
     musa_benchmark_output,
     "",
@@ -408,6 +413,32 @@ int main(int argc, char** argv) {
 
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 #if defined(EXECUTORCH_USE_MUSA)
+  ET_CHECK_MSG(
+      FLAGS_musa_cache_bytes <= std::numeric_limits<size_t>::max(),
+      "MUSA cache limit exceeds addressable size");
+  using executorch::extension::cuda::CudaAllocator;
+  ET_CHECK_MSG(
+      CudaAllocator::configure_musa_allocation_cache(FLAGS_musa_cache_bytes) ==
+          Error::Ok,
+      "Cannot configure MUSA cache while allocations remain live");
+  struct CacheCleanup {
+    ~CacheCleanup() {
+      if (FLAGS_musa_cache_bytes == 0) {
+        return;
+      }
+      CudaAllocator::release_cached_memory(-1);
+      const auto stats = CudaAllocator::musa_allocation_cache_stats();
+      fprintf(
+          stderr,
+          "MUSA ALLOCATION CACHE {\"cached_bytes\":%zu,\"cached_blocks\":%zu,"
+          "\"live_blocks\":%zu,\"reuses\":%zu,\"allocations\":%zu}\n",
+          stats.cached_bytes,
+          stats.cached_blocks,
+          stats.live_blocks,
+          stats.reuse_count,
+          stats.allocation_count);
+    }
+  } cache_cleanup;
   ET_CHECK_MSG(
       FLAGS_musa_benchmark_output.empty() || !FLAGS_server_mode,
       "MUSA benchmarking does not support server mode");
@@ -859,6 +890,21 @@ int main(int argc, char** argv) {
             milliseconds(execute_started - request_started),
             milliseconds(execute_finished - execute_started),
             milliseconds(output_finished - execute_finished));
+#if defined(EXECUTORCH_USE_MUSA)
+        if (FLAGS_musa_cache_bytes != 0) {
+          const auto stats = CudaAllocator::musa_allocation_cache_stats();
+          fprintf(
+              stderr,
+              "MUSA ALLOCATION CACHE SAMPLE {\"cached_bytes\":%zu,"
+              "\"cached_blocks\":%zu,\"live_blocks\":%zu,"
+              "\"reuses\":%zu,\"allocations\":%zu}\n",
+              stats.cached_bytes,
+              stats.cached_blocks,
+              stats.live_blocks,
+              stats.reuse_count,
+              stats.allocation_count);
+        }
+#endif
       }
       fprintf(stderr, "SERVER MODE DONE\n");
       fflush(stderr);

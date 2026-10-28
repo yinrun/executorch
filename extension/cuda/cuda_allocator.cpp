@@ -17,6 +17,10 @@
 #include <mutex>
 #include <unordered_map>
 
+#if defined(EXECUTORCH_USE_MUSA)
+#include <executorch/extension/cuda/musa_event_cache.h>
+#endif
+
 #if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
 #include <vector>
 #endif
@@ -27,6 +31,16 @@ using executorch::runtime::Error;
 using executorch::runtime::Result;
 using executorch::runtime::etensor::DeviceIndex;
 using executorch::runtime::etensor::DeviceType;
+
+#if defined(EXECUTORCH_USE_MUSA)
+Error CudaAllocator::configure_musa_allocation_cache(size_t limit) {
+  return musa_event_cache().configure(limit);
+}
+
+MusaAllocationCacheStats CudaAllocator::musa_allocation_cache_stats() {
+  return musa_event_cache().stats();
+}
+#endif
 
 namespace {
 
@@ -438,7 +452,32 @@ CudaAllocator::allocate(size_t nbytes, DeviceIndex index, size_t alignment) {
   }
 
   void* block = nullptr;
-  const cudaError_t err = cudaMalloc(&block, nbytes + padding);
+#if defined(EXECUTORCH_USE_MUSA)
+  int allocation_device = static_cast<int>(index);
+  const bool cache_eligible = padding == 0 && musa_event_cache().enabled();
+  if (cache_eligible) {
+    if (allocation_device < 0 && cudaGetDevice(&allocation_device) != cudaSuccess) {
+      (void)cudaGetLastError();
+      return Error::Internal;
+    }
+    auto cached = musa_event_cache().reuse(nbytes, allocation_device);
+    if (!cached.ok() || cached.get() != nullptr) {
+      if (switch_device) {
+        (void)cudaSetDevice(prev_device);
+      }
+      return cached;
+    }
+  }
+#endif
+  cudaError_t err = cudaMalloc(&block, nbytes + padding);
+#if defined(EXECUTORCH_USE_MUSA)
+  if (err == musaErrorMemoryAllocation && cache_eligible) {
+    (void)cudaGetLastError();
+    if (musa_event_cache().trim(allocation_device) > 0) {
+      err = cudaMalloc(&block, nbytes);
+    }
+  }
+#endif
 
   if (switch_device) {
     (void)cudaSetDevice(prev_device);
@@ -482,6 +521,11 @@ CudaAllocator::allocate(size_t nbytes, DeviceIndex index, size_t alignment) {
     return Error::NotSupported;
   }
 
+#if defined(EXECUTORCH_USE_MUSA)
+  if (cache_eligible) {
+    musa_event_cache().remember(block, nbytes, allocation_device);
+  }
+#endif
   return block;
 }
 
@@ -489,6 +533,9 @@ void CudaAllocator::deallocate(void* ptr, DeviceIndex index) {
   if (ptr == nullptr) {
     return;
   }
+#if defined(EXECUTORCH_USE_MUSA)
+  musa_event_cache().forget(ptr);
+#endif
 
   auto& rounded = rounded_allocations();
   // Skips the lock while no rounded pointer is live. Relaxed is enough: a
@@ -654,6 +701,11 @@ void CudaAllocator::deallocate_async(
   if (ptr == nullptr) {
     return;
   }
+#if defined(EXECUTORCH_USE_MUSA)
+  if (musa_event_cache().retire(ptr, stream)) {
+    return;
+  }
+#endif
 
 #if !defined(EXECUTORCH_USE_HIP) && !defined(EXECUTORCH_USE_MUSA)
   // Decided by the device the memory lives on, the same answer allocate_async
@@ -675,6 +727,11 @@ void CudaAllocator::deallocate_async(
 #endif
 
   cudaError_t err = cudaFreeAsync(ptr, stream);
+#if defined(EXECUTORCH_USE_MUSA)
+  if (err == cudaSuccess) {
+    musa_event_cache().forget(ptr);
+  }
+#endif
   if (err != cudaSuccess) {
     ET_LOG(
         Error,
@@ -761,7 +818,9 @@ cudaMemPool_t CudaAllocator::pool_for_device(DeviceIndex index) {
 #endif // !EXECUTORCH_USE_HIP && !EXECUTORCH_USE_MUSA
 
 void CudaAllocator::release_cached_memory(DeviceIndex index) {
-#if defined(EXECUTORCH_USE_HIP) || defined(EXECUTORCH_USE_MUSA)
+#if defined(EXECUTORCH_USE_MUSA)
+  musa_event_cache().trim(index);
+#elif defined(EXECUTORCH_USE_HIP)
   (void)index;
 #else
   std::vector<std::pair<int, cudaMemPool_t>> targets;

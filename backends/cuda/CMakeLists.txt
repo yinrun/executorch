@@ -513,7 +513,9 @@ if(BUILD_TESTING)
   include(${EXECUTORCH_ROOT}/tools/cmake/Test.cmake)
 
   if(EXECUTORCH_BUILD_MUSA)
-    foreach(_musa_test addmm convolution batch_norm activation device storage)
+    foreach(
+      _musa_test addmm convolution batch_norm activation device storage allocator
+    )
       et_cxx_test(
         test_musa_${_musa_test} SOURCES
         runtime/shims/tests/test_musa_${_musa_test}.cpp EXTRA_LIBS
@@ -526,6 +528,11 @@ if(BUILD_TESTING)
     endforeach()
     target_link_libraries(test_musa_device c10)
     target_link_libraries(test_musa_storage ${CMAKE_DL_LIBS})
+    find_package(Threads REQUIRED)
+    target_link_libraries(
+      test_musa_allocator extension_cuda ${CMAKE_DL_LIBS} Threads::Threads
+    )
+    set_target_properties(test_musa_allocator PROPERTIES ENABLE_EXPORTS ON)
   endif()
 
   et_cxx_test(

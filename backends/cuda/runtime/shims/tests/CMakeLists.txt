@@ -68,6 +68,7 @@ if(EXECUTORCH_BUILD_MUSA)
     test_musa_convolution
     test_musa_batch_norm
     test_musa_activation
+    test_musa_allocator
   )
 endif()
 
@@ -93,6 +94,14 @@ foreach(test_name ${CUDA_SHIM_TESTS})
 
   add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+if(EXECUTORCH_BUILD_MUSA)
+  find_package(Threads REQUIRED)
+  target_link_libraries(
+    test_musa_allocator PRIVATE extension_cuda ${CMAKE_DL_LIBS} Threads::Threads
+  )
+  set_target_properties(test_musa_allocator PROPERTIES ENABLE_EXPORTS ON)
+endif()
 
 foreach(test_name ${CUDA_KERNEL_TESTS})
   add_executable(${test_name} ${test_name}.cpp)

@@ -62,6 +62,7 @@ def define_common_targets():
         srcs = [
             "cuda_allocator.cpp",
         ],
+        headers = ["musa_event_cache.h"],
         exported_headers = [
             "cuda_allocator.h",
         ],

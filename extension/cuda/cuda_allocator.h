@@ -14,6 +14,17 @@
 
 namespace executorch::extension::cuda {
 
+#if defined(EXECUTORCH_USE_MUSA)
+struct MusaAllocationCacheStats {
+  size_t limit_bytes;
+  size_t cached_bytes;
+  size_t cached_blocks;
+  size_t live_blocks;
+  size_t reuse_count;
+  size_t allocation_count;
+};
+#endif
+
 /**
  * CUDA implementation of DeviceAllocator.
  *
@@ -61,6 +72,8 @@ class EXECUTORCH_EXTENSION_CUDA_API CudaAllocator final
   static CudaAllocator& instance();
 #if defined(EXECUTORCH_USE_MUSA)
   static CudaAllocator& legacy_cuda_instance();
+  static executorch::runtime::Error configure_musa_allocation_cache(size_t limit);
+  static MusaAllocationCacheStats musa_allocation_cache_stats();
 #endif
 
   // --- Async (stream-based) operations for SlimTensor/Storage layer ---

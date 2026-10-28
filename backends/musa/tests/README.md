@@ -40,13 +40,22 @@ Qwen3.5-0.8B checkpoint export and native multi-step validation are separate
 commands documented in `examples/musa/README.md`; passing the small fixtures
 does not imply that a complete model or BF16 native decoding passes.
 
-The six native CTest executables contain 63 GoogleTest cases. Each executable
+The seven native CTest executables contain 74 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing
 fix and repeated successful validation. Native tests run serially to avoid
 GPU contention. Model export and execution are also serial; do not launch
 concurrent regression invocations against the same checkout because the
 existing export schema helper temporarily updates source schema files.
+
+The opt-in MUSA allocator suite covers disabled behavior, completed-event
+reuse, cross-stream pending blocks, retention limits, explicit trim and
+reconfiguration, synchronous frees, large alignment, injected OOM retry,
+invalid devices, and four-thread stream stress. Its two-device isolation case
+is explicitly skipped on a single-device host. Concurrent D2H validation uses
+pinned host buffers and synchronizes the explicit stream; the local SDK showed
+intermittent pageable-readback failures even with the allocation cache disabled.
+Passing this suite does not claim graph capture or dynamic-library-unload support.
 
 The default model matrix is MLP, SimpleCNN, ResNet18, and MobileNetV2 in FP32,
 FP16, and BF16. All use bounded dynamic batches 1/2/3, with two fresh runner

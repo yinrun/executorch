@@ -21,6 +21,7 @@ NATIVE_TARGETS = tuple(
         "activation",
         "device",
         "storage",
+        "allocator",
     )
 )
 MODELS = (
