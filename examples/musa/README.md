@@ -5,7 +5,7 @@
 **Valid-length attention implementation (2026-10-29, experimental):**
 `--valid-length-attention` opts into an exportable opaque MUSA operator for
 BF16, batch-one, single-token Qwen attention with context 64/128/256. Runtime
-position and the causal mask select a packed valid KV prefix before QK/PV;
+position and the causal mask select the valid KV prefix before QK/PV;
 the BF16 QK, separate scaling, FP32 accurate softmax and BF16 PV boundaries
 remain explicit. Native execution validates storage bounds, output aliasing,
 device, geometry and causal-prefix controls. It reads only position/mask on
@@ -37,6 +37,29 @@ Control synchronization, KV packing and staged execution still need profiling;
 the method-host timing increase alone cannot identify their individual costs.
 The padded baseline is correct only for that benchmark fixture, not the Chinese
 counterexample. See `valid-attention-performance-v1.json` for both paths.
+
+**Attention overhead optimization (`c776a6b068`, `de304968fa`):** native KV
+descriptors now retain cache strides rather than explicitly packing the prefix.
+One pinned control buffer lets position/mask copies share a single stream wait.
+Profiling showed the previous pageable-copy wrapper added two hidden waits per
+layer: total method stream-sync calls fall from 20 to 8, including two output
+readbacks; explicit KV `Memcpy2DAsync` calls fall from 12 to zero. Kernel launch
+counts do not fall, and overlapping job labels cannot establish kernel-time
+percentages. This is a correctness-preserving control/layout change, not a
+return to padded attention or a relaxation of the comparison gate.
+
+The rebuilt v5 runtime reuses the same PTE/PTD and again passes all 5872 complete
+BF16 logit comparisons, 2936 reset checks, 20 EOS stops, 50 Python regressions,
+62 direct operator comparisons and the exact-gate negative control. The expanded
+native attention suite passes nine tests with one explicit dual-device skip in
+each of three rounds, including 36 offset-KV configurations per round. Frozen
+HF/eager files are rechecked, not regenerated. A same-graph/runner paired A/B
+against the correct packed-valid v4 runtime improves decode median from 16.005
+to 16.670 tok/s (+4.16%); all three pairs improve, with all 1512 inline logit/token
+checks preserved. Shared desktop GPU conditions, single fixture and serial
+prompt inputs still limit this result. Remaining reductions/default deployment
+are not promoted. See workspace `QWEN35_ATTENTION_OPTIMIZATION.md` and
+`attention-optimization-validation-manifest-v1.json` for final evidence.
 
 **Original padded-attention counterexample (2026-10-29, before this fix):**
 Four new qualitative prompts produce 836 independent HF BF16 reference steps;
