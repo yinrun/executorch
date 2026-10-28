@@ -18,6 +18,7 @@
  * all fp32 tensors.
  */
 
+#include <chrono>
 #include <cstdint>
 #ifdef ET_BUNDLE_IO_ENABLED
 #include <filesystem>
@@ -95,6 +96,11 @@ DEFINE_bool(
     "Run continuously, executing one inference per line read from stdin. "
     "In server mode, input files specified by --inputs are re-read before each "
     "execution and outputs are overwritten under --output_file.");
+DEFINE_bool(
+    server_timing,
+    false,
+    "Emit per-request host wall times in server mode; method time includes "
+    "backend transfers and synchronization, not just GPU kernels.");
 
 DEFINE_string(
     print_output,
@@ -748,6 +754,9 @@ int main(int argc, char** argv) {
 
     std::string line;
     while (std::getline(std::cin, line)) {
+      const auto request_started = FLAGS_server_timing
+          ? std::chrono::steady_clock::now()
+          : std::chrono::steady_clock::time_point{};
       constexpr std::string_view request_prefix = "input_shapes=";
       const bool has_request_shapes = line.rfind(request_prefix, 0) == 0;
       ET_CHECK_MSG(
@@ -794,7 +803,13 @@ int main(int argc, char** argv) {
         }
       }
 
+      const auto execute_started = FLAGS_server_timing
+          ? std::chrono::steady_clock::now()
+          : std::chrono::steady_clock::time_point{};
       Error status = method->execute();
+      const auto execute_finished = FLAGS_server_timing
+          ? std::chrono::steady_clock::now()
+          : std::chrono::steady_clock::time_point{};
 
       if (is_expected_vgf_dump_stop(status)) {
         ET_LOG(
@@ -832,6 +847,19 @@ int main(int argc, char** argv) {
         }
       }
 
+      if (FLAGS_server_timing) {
+        const auto output_finished = std::chrono::steady_clock::now();
+        const auto milliseconds = [](auto duration) {
+          return std::chrono::duration<double, std::milli>(duration).count();
+        };
+        fprintf(
+            stderr,
+            "SERVER TIMING {\"prepare_ms\":%.9f,\"method_host_ms\":%.9f,"
+            "\"output_ms\":%.9f}\n",
+            milliseconds(execute_started - request_started),
+            milliseconds(execute_finished - execute_started),
+            milliseconds(output_finished - execute_finished));
+      }
       fprintf(stderr, "SERVER MODE DONE\n");
       fflush(stderr);
     }

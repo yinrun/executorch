@@ -157,6 +157,20 @@ def summarize_comparison(steps):
     }
 
 
+def select_input_token(fixture, position, predicted, free_running):
+    expected = fixture["token_ids"][position]
+    if not free_running or position < fixture["prompt_token_count"]:
+        return expected
+    if type(predicted) is not int or not 0 <= predicted < 248320:
+        raise ValueError("Free generation requires a valid native prediction")
+    if predicted != expected:
+        raise ValueError(
+            f"Native trajectory diverged at {fixture['name']} position {position}: "
+            f"{predicted} != {expected}; reference logits no longer share inputs"
+        )
+    return predicted
+
+
 def compare(args, report):
     manifest = json.loads(args.references.read_text())
     if manifest["status"] != "complete" or manifest["dtype"] != "bf16":
@@ -174,6 +188,8 @@ def compare(args, report):
         ):
             raise ValueError("Invalid token ID")
     tracked = [args.references, args.pte, args.ptd, args.runner]
+    if args.runtime_preload:
+        tracked.append(args.runtime_preload)
     before = {str(path): file_hash(path) for path in tracked}
     report.update(input_hashes=before, reference_metadata=manifest)
     token_path = args.output_dir / "token.bin"
@@ -197,6 +213,8 @@ def compare(args, report):
         "LD_BIND_NOW": "1",
         "LD_DEBUG": "libs",
     }
+    if args.runtime_preload:
+        environment["LD_PRELOAD"] = str(args.runtime_preload)
     report.update(command=command, environment=environment)
     executions = 0
     with log_path.open("w") as log, subprocess.Popen(
@@ -210,7 +228,11 @@ def compare(args, report):
         try:
             for session in range(args.repeats):
                 for fixture_index, fixture in enumerate(manifest["fixtures"]):
-                    for position, token in enumerate(fixture["token_ids"]):
+                    predicted = None
+                    for position in range(len(fixture["token_ids"])):
+                        token = select_input_token(
+                            fixture, position, predicted, args.free_running
+                        )
                         token_path.write_bytes(struct.pack("<q", token))
                         position_path.write_bytes(struct.pack("<q", position))
                         process.stdin.write("\n")
@@ -278,6 +300,7 @@ def compare(args, report):
                                     "Reset sequence is not byte-identical"
                                 )
                         report["steps"].append(row)
+                        predicted = row["native_vs_hf"]["predicted_token"]
                         print(json.dumps(row), flush=True)
             process.stdin.close()
             if process.wait(timeout=30) != 0:
@@ -287,6 +310,11 @@ def compare(args, report):
                 process.kill()
                 process.wait()
     report["loaded_libraries"] = runtime_libraries(log_path.read_text())
+    if (
+        args.runtime_preload
+        and str(args.runtime_preload) not in report["loaded_libraries"]
+    ):
+        raise AssertionError("Requested runtime preload was not observed in the audit")
     report["runtime_hashes"] = {
         path: file_hash(Path(path))
         for path in report["loaded_libraries"]
@@ -295,6 +323,16 @@ def compare(args, report):
     if before != {str(path): file_hash(path) for path in tracked}:
         raise AssertionError("Input artifacts changed during comparison")
     report["summary"] = summarize_comparison(report["steps"])
+    if args.free_running:
+        report["summary"]["scope"] = "native_greedy_feedback_against_hf_generation"
+    report["numerical_tolerance_passed"] = all(
+        row["native_vs_hf"]["outside_legacy_tolerance"] == 0 for row in report["steps"]
+    )
+    report["generated_token_ids_match"] = all(
+        row["native_vs_hf"]["predicted_token"] == row["native_vs_hf"]["reference_token"]
+        for row in report["steps"]
+        if row["phase"] == "generation"
+    )
     report["status"] = "comparison_complete"
 
 
@@ -304,18 +342,30 @@ def main():
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument(
+        "--runtime-preload",
+        type=Path,
+        help="Explicit, hash-tracked isolated runtime experiment",
+    )
+    parser.add_argument(
+        "--free-running",
+        action="store_true",
+        help="Feed back native argmax after the prompt; stop on trajectory divergence",
+    )
     args = parser.parse_args()
     args.references = args.references.resolve()
     args.pte = args.pte.resolve()
     args.ptd = args.ptd.resolve()
     args.runner = args.runner.resolve()
     args.output_dir = args.output_dir.resolve()
+    if args.runtime_preload:
+        args.runtime_preload = args.runtime_preload.resolve()
     if args.repeats < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("Repeats and timeout must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     report = {
         "status": "running",
-        "teacher_forced": True,
+        "teacher_forced": not args.free_running,
         "runtime_validated": False,
         "steps": [],
     }

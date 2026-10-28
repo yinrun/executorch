@@ -23,10 +23,10 @@ def tensor_values(payload, dtype):
     if len(payload) != VOCAB_SIZE * width:
         raise ValueError("Expected one full-vocabulary Qwen3.5 logit vector")
     if dtype == "bf16":
-        words = array.array("H", payload)
-        if sys.byteorder != "little":
-            words.byteswap()
-        payload = b"".join(struct.pack("<I", value << 16) for value in words)
+        expanded = bytearray(len(payload) * 2)
+        expanded[2::4] = payload[0::2]
+        expanded[3::4] = payload[1::2]
+        payload = expanded
     values = array.array("f", payload)
     if sys.byteorder != "little":
         values.byteswap()

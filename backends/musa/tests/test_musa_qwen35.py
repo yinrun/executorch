@@ -23,6 +23,7 @@ from executorch.examples.models.llama.norm import RMSNorm
 from executorch.examples.models.llama.rope import Rope
 from examples.musa.aoti_qwen35_compare import (
     compare_distributions,
+    select_input_token,
     summarize_comparison,
 )
 from examples.musa.aoti_qwen35_validate import (
@@ -34,6 +35,31 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_bf16_decode_preserves_all_finite_bit_patterns(self):
+        words = [value for value in range(65536) if value & 0x7F80 != 0x7F80]
+        words = (words * (VOCAB_SIZE // len(words) + 1))[:VOCAB_SIZE]
+        payload = struct.pack(f"<{len(words)}H", *words)
+        values = tensor_values(payload, "bf16")
+        self.assertEqual(
+            struct.pack(f"<{len(values)}f", *values),
+            b"".join(struct.pack("<I", value << 16) for value in words),
+        )
+        for word in (0x7F80, 0xFF80, 0x7F81, 0xFFC0):
+            with self.assertRaisesRegex(ValueError, "Non-finite"):
+                tensor_values(struct.pack("<H", word) + payload[2:], "bf16")
+
+    def test_free_generation_uses_native_feedback_and_rejects_divergence(self):
+        fixture = {"name": "test", "token_ids": [1, 2, 3], "prompt_token_count": 2}
+        self.assertEqual(select_input_token(fixture, 0, None, True), 1)
+        self.assertEqual(select_input_token(fixture, 1, 99, True), 2)
+        self.assertEqual(select_input_token(fixture, 2, 3, True), 3)
+        self.assertEqual(select_input_token(fixture, 2, 99, False), 3)
+        with self.assertRaisesRegex(ValueError, "trajectory diverged"):
+            select_input_token(fixture, 2, 99, True)
+        for prediction in (None, -1, 248320, True):
+            with self.assertRaisesRegex(ValueError, "valid native prediction"):
+                select_input_token(fixture, 2, prediction, True)
+
     def test_comparison_summary_separates_numeric_and_ranking_failures(self):
         steps = []
         for position, phase in enumerate(("prompt", "generation")):

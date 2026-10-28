@@ -161,6 +161,22 @@ python -m examples.musa.aoti_qwen35_compare \
   --runner /path/to/executor_runner --output-dir /tmp/qwen35-comparison
 ```
 
+Add `--free-running` when the references contain an independently generated HF
+greedy trajectory. After the prompt, the comparator feeds back native argmax,
+not the next reference token. If trajectories diverge, it stops before comparing
+logits for different inputs and records a failed report. Numerical tolerance
+and generated-token agreement are separate report fields; neither is inferred
+from the other. `--runtime-preload` explicitly opts into a hash-tracked isolated
+runtime library experiment; it is not inherited from the controller environment.
+
+For file-server timing, `executor_runner --server_mode --server_timing` emits
+`SERVER TIMING` JSON before each completion marker. It separates input loading
+and preparation, host `method.execute`, and output retrieval/writing. Method
+time includes backend transfers and synchronization and is not pure GPU time;
+an asynchronous backend may also finish after that host interval. No extra
+device synchronization is inserted. Timings are opt-in and do not alter the
+default completion protocol. GPU timelines must be measured separately.
+
 The reference manifest must have `status="complete"`, `dtype="bf16"`, and a
 nonempty `fixtures` list. Each fixture contains `name`, `token_ids`,
 `prompt_token_count`, and `hashes` mapping tensor filenames to SHA256 values.
