@@ -29,6 +29,15 @@ These are finite-workload results, not arbitrary-input bitwise guarantees;
 no default deployment is promoted. See workspace `QWEN35_VALID_ATTENTION.md`
 and `precision-valid-attention-audit-v1.json` for the frozen evidence.
 
+The subsequent same-runtime context-64 paired benchmark preserves all 1512
+full logits/token checks, but decode median falls from 17.976 to 16.236 tok/s
+(-9.68%); all three pairs regress. This is a shared-GPU, nonblocking file-server
+measurement, not batched prefill, exclusive GPU time or a speedup acceptance.
+Control synchronization, KV packing and staged execution still need profiling;
+the method-host timing increase alone cannot identify their individual costs.
+The padded baseline is correct only for that benchmark fixture, not the Chinese
+counterexample. See `valid-attention-performance-v1.json` for both paths.
+
 **Original padded-attention counterexample (2026-10-29, before this fix):**
 Four new qualitative prompts produce 836 independent HF BF16 reference steps;
 fused ET eager matches only 669 byte-for-byte. The Chinese causal-evidence prompt
