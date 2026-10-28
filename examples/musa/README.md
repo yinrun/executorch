@@ -2,7 +2,22 @@
 
 ## Qwen3.5-0.8B text bring-up
 
-**Latest expanded isolated BF16 accuracy result (2026-10-28):** eight additional
+**Latest context validation (2026-10-29):** independently exported context-128
+and context-256 candidates retain one MUSA delegate, all 48 mutable states, full
+BF16 logits, and GPU greedy output. HF/converted eager match 468/468 and 742/742
+positions. Two native rounds match 936/936 and 1484/1484 full-vocabulary outputs
+byte-for-byte, with 1210 reset checks and six explicit EOS stops in total. The
+256 package includes 548 calls at positions >=128. Two long prompts contain
+112 and 68 tokens; some answers still end at the configured context limit.
+`precision-context128-256-audit-v1.json` independently rechecks saved tensors and
+hashes. The metadata guard has 24 passing Qwen Python tests; its CLI rejects a
+missing or mismatched context declaration before launching the runner. Three
+native softmax tests pass in three fresh processes, including offsets, streams,
+aliases, strides, capacity bounds, and rejected unsupported geometry.
+These remain isolated, single-token-input candidates, not batched-prefill,
+arbitrary-context, or default-backend acceptance; no default package is promoted.
+
+**Previous expanded isolated BF16 accuracy result (2026-10-28):** eight additional
 Chinese/English prompts cover evidence, conflicts, honesty, causality, negation,
 conditional reasoning, ambiguity, and mixed-language instructions. Independently
 generated HF trajectories contain 477 input steps; converted eager matches all
