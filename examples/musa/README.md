@@ -11,6 +11,15 @@ math, reduction, and layout paths described below. It is not a default-backend
 promotion, free-running generation, long-context, or performance acceptance.
 The earlier results below document intermediate candidates, not this result.
 
+**Expanded validation remains failing:** three new prompts run HF greedy
+generation to the 64-position context limit. Converted eager/HF logits match
+152/192 steps; two fixtures develop tolerance failures after positions 43/45.
+Native greedy feedback also diverges on the English fixture: prediction at
+position 50 is 1785 rather than 1852, so comparison stops before position 51
+would use different inputs. The earlier 91-step result is not broad acceptance.
+Opt-in host timing and faster BF16 logit decoding are available independently
+of this unresolved numerical issue; no default model package is promoted.
+
 Export a local Hugging Face checkpoint with the existing ExecuTorch Qwen3.5
 weight converter and a single MUSA delegate:
 
