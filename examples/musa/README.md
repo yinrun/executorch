@@ -2,23 +2,27 @@
 
 ## Qwen3.5-0.8B text bring-up
 
-**Latest isolated BF16 accuracy result (2026-10-28):** all 91 fixed-trajectory
-steps, repeated twice, have byte-identical full-vocabulary logits against
-correctly loaded Transformers 5.3.0 on MUSA. All 182 native comparisons have
-zero maximum error; all 91 reset checks are byte-identical, and the native
-library audit passes. This uses the combined experimental matrix, attention,
-math, reduction, and layout paths described below. It is not a default-backend
-promotion, free-running generation, long-context, or performance acceptance.
-The earlier results below document intermediate candidates, not this result.
+**Latest isolated BF16 accuracy result (2026-10-28):** all 91 legacy
+teacher-forced steps and 192 new native-greedy-feedback steps, each repeated
+twice, have byte-identical full-vocabulary logits against correctly loaded
+Transformers 5.3.0 on MUSA. All 566 comparisons have zero maximum/mean error,
+all generated token IDs match, and all 283 reset checks are byte-identical.
+The native library audit passes without Torch/Python runtime dependencies.
+The three new generation fixtures stop at the 64-position context limit,
+not EOS. This uses combined experimental matrix, attention, math, reduction,
+and layout paths; it is not default-backend, arbitrary-prompt, long-context,
+or performance acceptance. The default model package is unchanged. Reports:
+`compare-bf16-sum-{generation,legacy}-v1/result.json` and the hash-tracked
+`precision-bf16-sum-v1.json` under the local Qwen artifact directory.
 
-**Expanded validation remains failing:** three new prompts run HF greedy
+**Earlier expanded validation failure:** three new prompts run HF greedy
 generation to the 64-position context limit. Converted eager/HF logits match
 152/192 steps; two fixtures develop tolerance failures after positions 43/45.
 Native greedy feedback also diverges on the English fixture: prediction at
 position 50 is 1785 rather than 1852, so comparison stops before position 51
 would use different inputs. The earlier 91-step result is not broad acceptance.
 Opt-in host timing and faster BF16 logit decoding are available independently
-of this unresolved numerical issue; no default model package is promoted.
+of this numerical investigation; no default model package is promoted.
 
 The converted eager discrepancy is now fixed for this suite. At trust position
 43, layer 7, identical Q/K/V produce eight different BF16 context elements with
@@ -27,8 +31,21 @@ Qwen BF16 loading now installs a model-local `Qwen35MusaSDPA` that preserves
 BF16 QK/scale/mask and probability rounding with FP32 softmax. It does not
 monkey-patch global SDPA or change FP32 loading. All 283 old and new reference
 steps then match unchanged official HF logits byte-for-byte; 20 Python tests
-pass. The existing native package still diverges earlier, at trust position
-39 in layer 11, so this eager fix does not establish native acceptance.
+pass. The earlier native package diverges at trust position 39 in layer 11,
+so the eager fix alone does not establish native acceptance.
+
+The native discrepancy was isolated to FP32 softmax: identical QK/scale/mask
+scores produced a difference of at most 5.96e-8 that crossed a BF16 probability
+rounding boundary. An isolated muDNN accurate-softmax replacement makes all
+64 trust steps exact. Fairness independently diverged at position 42, layer 2:
+one of 16 BF16 Query L2 sums was 2.703125 instead of 2.71875. An identical-input
+five-stage probe reproduces the whole-layer discrepancy. Matching the muDNN
+BF16 sum path makes all 1032 layer checkpoints exact, then the full-model
+566-comparison suite above passes. This aligns the specified BF16 reference;
+it is not evidence that every reference reduction is closer to an exact sum.
+The new sum replacement is restricted to BF16 [1,1,16,128] last-axis sums
+(36 nodes), combined with six softmax, six QK-view, and 115 FP32 Reduce nodes.
+These remain isolated candidates pending shape/stride/alias safety coverage.
 
 Export a local Hugging Face checkpoint with the existing ExecuTorch Qwen3.5
 weight converter and a single MUSA delegate:
