@@ -19,6 +19,7 @@
 #include <executorch/backends/aoti/slim/c10/cuda/Exception.h>
 #include <executorch/backends/aoti/slim/cuda/guard.h>
 #include <executorch/backends/aoti/slim/factory/empty.h>
+#include <executorch/backends/cuda/runtime/shims/musa_tensor_utils.h>
 #include <executorch/extension/cuda/runtime_api.h>
 #include <executorch/runtime/core/portable_type/half.h>
 #include <executorch/runtime/platform/assert.h>
@@ -185,7 +186,51 @@ bool fits_mublas_dimension(int64_t value) {
       value <= static_cast<int64_t>(std::numeric_limits<int>::max());
 }
 
-} // namespace
+Error fill_empty_product(SlimTensor* out, SlimTensor* self, double beta) {
+  auto guard = CUDAGuard::create(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(guard.error());
+  auto stream_result = getCurrentCUDAStream(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
+  const auto stream = stream_result.get();
+  if (beta == 0.0) {
+    ET_CUDA_CHECK_OR_RETURN_ERROR(
+        cudaMemsetAsync(out->data_ptr(), 0, out->nbytes(), stream));
+    return Error::Ok;
+  }
+  if (self->dim() == 1) {
+    for (int64_t row = 0; row < out->size(0); ++row) {
+      ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
+          static_cast<char*>(out->data_ptr()) + row * self->nbytes(),
+          self->data_ptr(),
+          self->nbytes(),
+          cudaMemcpyDeviceToDevice,
+          stream));
+    }
+  } else if (out->data_ptr() != self->data_ptr()) {
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
+        out->data_ptr(),
+        self->data_ptr(),
+        out->nbytes(),
+        cudaMemcpyDeviceToDevice,
+        stream));
+  }
+  if (beta == 1.0) {
+    return Error::Ok;
+  }
+  ::musa::dnn::Handle handle(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(
+      check_mudnn(handle.SetStream(stream), "Handle.SetStream"));
+  ::musa::dnn::Tensor output;
+  ET_CHECK_OK_OR_RETURN_ERROR(set_mudnn_tensor(output, out));
+  ::musa::dnn::Unary operation;
+  ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(
+      operation.SetMode(::musa::dnn::Unary::Mode::MUL), "Unary.SetMode"));
+  ET_CHECK_OK_OR_RETURN_ERROR(
+      check_mudnn(operation.SetAlpha(beta), "Unary.SetAlpha"));
+  return check_mudnn(operation.Run(handle, output, output), "Unary.Run");
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -197,7 +242,9 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
     double beta,
     double alpha) {
   ET_CHECK_OR_RETURN_ERROR(
-      out != nullptr && self != nullptr && mat1 != nullptr && mat2 != nullptr,
+      out != nullptr && self != nullptr && mat1 != nullptr && mat2 != nullptr &&
+          out->storage() != nullptr && self->storage() != nullptr &&
+          mat1->storage() != nullptr && mat2->storage() != nullptr,
       InvalidArgument,
       "MUSA addmm received a null tensor handle");
 
@@ -237,6 +284,44 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       NotSupported,
       "MUSA addmm currently supports contiguous output and bias");
 
+  ET_CHECK_OR_RETURN_ERROR(
+      out->device_index() == self->device_index() &&
+          out->device_index() == mat1->device_index() &&
+          out->device_index() == mat2->device_index(),
+      InvalidArgument,
+      "MUSA addmm tensors must use the same device");
+  ET_CHECK_OR_RETURN_ERROR(
+      fits_mublas_dimension(m) && fits_mublas_dimension(k) &&
+          fits_mublas_dimension(n),
+      NotSupported,
+      "MUSA addmm dimensions exceed mublas limits");
+  auto output_span = checked_musa_tensor_span(*out);
+  auto bias_span = checked_musa_tensor_span(*self);
+  auto left_span = checked_musa_tensor_span(*mat1);
+  auto right_span = checked_musa_tensor_span(*mat2);
+  ET_CHECK_OK_OR_RETURN_ERROR(output_span.error());
+  ET_CHECK_OK_OR_RETURN_ERROR(bias_span.error());
+  ET_CHECK_OK_OR_RETURN_ERROR(left_span.error());
+  ET_CHECK_OK_OR_RETURN_ERROR(right_span.error());
+  ET_CHECK_OR_RETURN_ERROR(
+      !musa_tensor_spans_overlap(output_span.get(), left_span.get()) &&
+          !musa_tensor_spans_overlap(output_span.get(), right_span.get()),
+      InvalidArgument,
+      "MUSA matrix output must not overlap its multiplicands");
+  ET_CHECK_OR_RETURN_ERROR(
+      beta == 0.0 ||
+          !musa_tensor_spans_overlap(output_span.get(), bias_span.get()) ||
+          (self->dim() == 2 && output_span->begin == bias_span->begin &&
+           output_span->bytes == bias_span->bytes),
+      InvalidArgument,
+      "MUSA addmm only permits exact matrix bias aliasing");
+  if (output_span->bytes == 0) {
+    return Error::Ok;
+  }
+  if (k == 0) {
+    return fill_empty_product(out, self, beta);
+  }
+
   const auto mat1_strides = mat1->strides();
   const bool mat1_broadcast_row =
       m == 1 && mat1_strides[0] == 0 && mat1_strides[1] == 1;
@@ -260,19 +345,6 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
       mat2_row_major || mat2_column_major,
       NotSupported,
       "MUSA addmm supports contiguous or transposed mat2 only");
-
-  ET_CHECK_OR_RETURN_ERROR(
-      out->device_index() == self->device_index() &&
-          out->device_index() == mat1->device_index() &&
-          out->device_index() == mat2->device_index(),
-      InvalidArgument,
-      "MUSA addmm tensors must use the same device");
-
-  ET_CHECK_OR_RETURN_ERROR(
-      fits_mublas_dimension(m) && fits_mublas_dimension(k) &&
-          fits_mublas_dimension(n),
-      NotSupported,
-      "MUSA addmm dimensions exceed mublas limits");
 
   auto device_guard = CUDAGuard::create(out->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
@@ -299,8 +371,10 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_addmm_out(
         stream));
   }
 
-  const bool use_mublas = ((dtype == ScalarType::BFloat16 && m <= 8) ||
-                           mat1_padded_rows || mat1_broadcast_row) &&
+  const bool use_mublas =
+      !(dtype == ScalarType::BFloat16 && m == 1 && mat1->is_contiguous()) &&
+      ((dtype == ScalarType::BFloat16 && m <= 8) || mat1_padded_rows ||
+       mat1_broadcast_row) &&
       (beta == 0.0 || beta == 1.0);
   if (use_mublas) {
     auto& cache = mublas_handle_cache();
@@ -473,7 +547,9 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
     SlimTensor* mat1,
     SlimTensor* mat2) {
   ET_CHECK_OR_RETURN_ERROR(
-      out != nullptr && mat1 != nullptr && mat2 != nullptr,
+      out != nullptr && mat1 != nullptr && mat2 != nullptr &&
+          out->storage() != nullptr && mat1->storage() != nullptr &&
+          mat2->storage() != nullptr,
       InvalidArgument,
       "MUSA bmm received a null tensor handle");
 
@@ -508,6 +584,33 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       NotSupported,
       "MUSA bmm dimensions exceed mublas limits");
 
+  ET_CHECK_OR_RETURN_ERROR(
+      out->device_index() == mat1->device_index() &&
+          out->device_index() == mat2->device_index(),
+      InvalidArgument,
+      "MUSA bmm tensors must use the same device");
+  auto output_span = checked_musa_tensor_span(*out);
+  auto left_span = checked_musa_tensor_span(*mat1);
+  auto right_span = checked_musa_tensor_span(*mat2);
+  ET_CHECK_OK_OR_RETURN_ERROR(output_span.error());
+  ET_CHECK_OK_OR_RETURN_ERROR(left_span.error());
+  ET_CHECK_OK_OR_RETURN_ERROR(right_span.error());
+  ET_CHECK_OR_RETURN_ERROR(
+      !musa_tensor_spans_overlap(output_span.get(), left_span.get()) &&
+          !musa_tensor_spans_overlap(output_span.get(), right_span.get()),
+      InvalidArgument,
+      "MUSA bmm output must not overlap its multiplicands");
+  ET_CHECK_OR_RETURN_ERROR(
+      out->is_contiguous(),
+      NotSupported,
+      "MUSA bmm requires contiguous output");
+  if (output_span->bytes == 0) {
+    return Error::Ok;
+  }
+  if (k == 0) {
+    return fill_empty_product(out, out, 0.0);
+  }
+
   const auto mat1_strides = mat1->strides();
   const bool mat1_row_major =
       (m == 1 || mat1_strides[1] == k) && mat1_strides[2] == 1 &&
@@ -531,11 +634,6 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       mat2_row_major || mat2_column_major,
       NotSupported,
       "MUSA bmm supports contiguous or transposed mat2 only");
-  ET_CHECK_OR_RETURN_ERROR(
-      out->device_index() == mat1->device_index() &&
-          out->device_index() == mat2->device_index(),
-      InvalidArgument,
-      "MUSA bmm tensors must use the same device");
   auto device_guard = CUDAGuard::create(out->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
   auto stream_result = getCurrentCUDAStream(out->device_index());

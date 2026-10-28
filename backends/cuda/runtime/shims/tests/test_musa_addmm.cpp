@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -202,6 +203,290 @@ class MusaAddmmTest : public ::testing::Test {
     }
   }
 };
+
+TEST_F(MusaAddmmTest, RejectsMissingStorage) {
+  SlimTensor undefined;
+  EXPECT_EQ(
+      aoti_torch_musa_mm_out(nullptr, &undefined, &undefined),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_musa_mm_out(&undefined, &undefined, &undefined),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_musa_bmm_out(&undefined, &undefined, &undefined),
+      Error::InvalidArgument);
+}
+
+TEST_F(MusaAddmmTest, RejectsInvalidStorageSpansBeforeWriting) {
+  const auto dtype = ScalarType::Float;
+  std::unique_ptr<SlimTensor> output(empty_tensor(dtype, {2, 2}, {2, 1}));
+  std::unique_ptr<SlimTensor> left(empty_tensor(dtype, {2, 2}, {2, 1}));
+  std::unique_ptr<SlimTensor> right(empty_tensor(dtype, {2, 2}, {2, 1}));
+  std::unique_ptr<SlimTensor> bias(empty_tensor(dtype, {2, 2}, {2, 1}));
+  const std::vector<float> sentinel{17, 19, 23, 29};
+  copy_to_device(output.get(), encode_values(sentinel, dtype));
+  for (auto* operand : {output.get(), left.get(), right.get(), bias.get()}) {
+    for (int64_t offset : {-1, 1, 4}) {
+      operand->set_sizes_and_strides(
+          std::array<int64_t, 2>{2, 2}, std::array<int64_t, 2>{2, 1}, offset);
+      EXPECT_EQ(
+          aoti_torch_musa_addmm_out(
+              output.get(), bias.get(), left.get(), right.get(), 1, 1),
+          Error::InvalidArgument);
+      operand->set_sizes_and_strides(
+          std::array<int64_t, 2>{2, 2}, std::array<int64_t, 2>{2, 1}, 0);
+      EXPECT_EQ(copy_from_device(output.get(), dtype), sentinel);
+    }
+  }
+  left->set_sizes_and_strides(
+      std::array<int64_t, 2>{2, 2},
+      std::array<int64_t, 2>{std::numeric_limits<int64_t>::max(), 1});
+  EXPECT_EQ(
+      aoti_torch_musa_mm_out(output.get(), left.get(), right.get()),
+      Error::InvalidArgument);
+  EXPECT_EQ(copy_from_device(output.get(), dtype), sentinel);
+}
+
+TEST_F(MusaAddmmTest, RejectsNullOrMisalignedData) {
+  using executorch::backends::aoti::slim::MaybeOwningStorage;
+  using executorch::backends::aoti::slim::Storage;
+  const auto dtype = ScalarType::Float;
+  std::unique_ptr<SlimTensor> output(empty_tensor(dtype, {2, 2}, {2, 1}));
+  std::unique_ptr<SlimTensor> right(empty_tensor(dtype, {2, 2}, {2, 1}));
+  for (void* address :
+       {static_cast<void*>(nullptr),
+        static_cast<void*>(static_cast<char*>(right->data_ptr()) + 1)}) {
+    SlimTensor invalid(
+        Storage(new MaybeOwningStorage(right->device(), address, 16)),
+        std::array<int64_t, 2>{2, 2},
+        std::array<int64_t, 2>{2, 1},
+        dtype);
+    EXPECT_EQ(
+        aoti_torch_musa_mm_out(output.get(), &invalid, right.get()),
+        Error::InvalidArgument);
+  }
+}
+
+TEST_F(MusaAddmmTest, RejectsOutputOperandAliasesAcrossStorageWrappers) {
+  using executorch::backends::aoti::slim::MaybeOwningStorage;
+  using executorch::backends::aoti::slim::Storage;
+  const auto dtype = ScalarType::Float;
+  std::unique_ptr<SlimTensor> left(empty_tensor(dtype, {2, 2}, {2, 1}));
+  std::unique_ptr<SlimTensor> right(empty_tensor(dtype, {2, 2}, {2, 1}));
+  const std::vector<float> values{1, 2, 3, 4};
+  copy_to_device(left.get(), encode_values(values, dtype));
+  copy_to_device(right.get(), encode_values(values, dtype));
+  for (auto* operand : {left.get(), right.get()}) {
+    EXPECT_EQ(
+        aoti_torch_musa_mm_out(operand, left.get(), right.get()),
+        Error::InvalidArgument);
+    SlimTensor alias(
+        Storage(new MaybeOwningStorage(
+            operand->device(), operand->data_ptr(), operand->nbytes())),
+        std::array<int64_t, 2>{2, 2},
+        std::array<int64_t, 2>{2, 1},
+        dtype);
+    EXPECT_EQ(
+        aoti_torch_musa_mm_out(&alias, left.get(), right.get()),
+        Error::InvalidArgument);
+    EXPECT_EQ(copy_from_device(operand, dtype), values);
+  }
+}
+
+TEST_F(MusaAddmmTest, DisjointOffsetViewsPreserveInputsAndSentinels) {
+  for (auto dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    std::unique_ptr<SlimTensor> backing(empty_tensor(dtype, {16}, {1}));
+    const std::vector<float> initial{
+        17, 17, 1, 2, 3, 4, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17};
+    copy_to_device(backing.get(), encode_values(initial, dtype));
+    SlimTensor left(
+        backing->storage(),
+        std::array<int64_t, 2>{2, 2},
+        std::array<int64_t, 2>{2, 1},
+        dtype,
+        2);
+    SlimTensor output(
+        backing->storage(),
+        std::array<int64_t, 2>{2, 2},
+        std::array<int64_t, 2>{2, 1},
+        dtype,
+        9);
+    ASSERT_EQ(aoti_torch_musa_mm_out(&output, &left, &left), Error::Ok);
+    auto expected = initial;
+    const std::vector<float> product{7, 10, 15, 22};
+    std::copy(product.begin(), product.end(), expected.begin() + 9);
+    EXPECT_EQ(copy_from_device(backing.get(), dtype), expected);
+  }
+}
+
+TEST_F(MusaAddmmTest, BiasAliasingRequiresExactMatrixView) {
+  const auto dtype = ScalarType::Float;
+  std::unique_ptr<SlimTensor> backing(empty_tensor(dtype, {8}, {1}));
+  std::unique_ptr<SlimTensor> left(empty_tensor(dtype, {2, 2}, {2, 1}));
+  std::unique_ptr<SlimTensor> right(empty_tensor(dtype, {2, 2}, {2, 1}));
+  copy_to_device(left.get(), encode_values({1, 0, 0, 1}, dtype));
+  copy_to_device(right.get(), encode_values({2, 4, 6, 8}, dtype));
+  SlimTensor output(
+      backing->storage(),
+      std::array<int64_t, 2>{2, 2},
+      std::array<int64_t, 2>{2, 1},
+      dtype);
+  SlimTensor partial(
+      backing->storage(),
+      std::array<int64_t, 2>{2, 2},
+      std::array<int64_t, 2>{2, 1},
+      dtype,
+      1);
+  SlimTensor vector(
+      backing->storage(),
+      std::array<int64_t, 1>{2},
+      std::array<int64_t, 1>{1},
+      dtype);
+  copy_to_device(
+      backing.get(), encode_values(std::vector<float>(8, 10), dtype));
+  for (auto* bias : {&partial, &vector}) {
+    EXPECT_EQ(
+        aoti_torch_musa_addmm_out(&output, bias, left.get(), right.get(), 1, 1),
+        Error::InvalidArgument);
+    EXPECT_EQ(
+        copy_from_device(backing.get(), dtype), std::vector<float>(8, 10));
+  }
+  for (double beta : {0.0, 0.5, 1.0}) {
+    copy_to_device(
+        backing.get(), encode_values(std::vector<float>(8, 10), dtype));
+    SlimTensor exact(
+        backing->storage(),
+        std::array<int64_t, 2>{2, 2},
+        std::array<int64_t, 2>{2, 1},
+        dtype);
+    ASSERT_EQ(
+        aoti_torch_musa_addmm_out(
+            &output, &exact, left.get(), right.get(), beta, 1),
+        Error::Ok);
+    EXPECT_EQ(
+        copy_from_device(&output, dtype),
+        (std::vector<float>{
+            float(2 + 10 * beta),
+            float(4 + 10 * beta),
+            float(6 + 10 * beta),
+            float(8 + 10 * beta)}));
+  }
+}
+
+TEST_F(MusaAddmmTest, EmptyInnerDimensionScalesBiasAndIgnoresAlpha) {
+  for (auto dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    std::unique_ptr<SlimTensor> output(empty_tensor(dtype, {2, 3}, {3, 1}));
+    std::unique_ptr<SlimTensor> left(empty_tensor(dtype, {2, 0}, {1, 1}));
+    std::unique_ptr<SlimTensor> right(empty_tensor(dtype, {0, 3}, {3, 1}));
+    std::unique_ptr<SlimTensor> bias(empty_tensor(dtype, {3}, {1}));
+    copy_to_device(bias.get(), encode_values({2, 4, 6}, dtype));
+    for (double beta : {0.0, 0.5, 1.0, 2.0}) {
+      ASSERT_EQ(
+          aoti_torch_musa_addmm_out(
+              output.get(),
+              bias.get(),
+              left.get(),
+              right.get(),
+              beta,
+              std::numeric_limits<double>::quiet_NaN()),
+          Error::Ok);
+      EXPECT_EQ(
+          copy_from_device(output.get(), dtype),
+          (std::vector<float>{
+              float(2 * beta),
+              float(4 * beta),
+              float(6 * beta),
+              float(2 * beta),
+              float(4 * beta),
+              float(6 * beta)}));
+    }
+    copy_to_device(
+        output.get(), encode_values(std::vector<float>(6, 4), dtype));
+    ASSERT_EQ(
+        aoti_torch_musa_addmm_out(
+            output.get(), output.get(), left.get(), right.get(), 0.5, 1),
+        Error::Ok);
+    EXPECT_EQ(copy_from_device(output.get(), dtype), std::vector<float>(6, 2));
+    std::vector<uint8_t> nan_values(6 * itemsize(dtype), 255);
+    copy_to_device(output.get(), nan_values);
+    ASSERT_EQ(
+        aoti_torch_musa_mm_out(output.get(), left.get(), right.get()),
+        Error::Ok);
+    EXPECT_EQ(copy_from_device(output.get(), dtype), std::vector<float>(6, 0));
+  }
+}
+
+TEST_F(MusaAddmmTest, EmptyOutputIsNoOp) {
+  for (const auto& shape :
+       {std::array<int64_t, 2>{0, 3}, std::array<int64_t, 2>{2, 0}}) {
+    const auto rows = shape[0];
+    const auto columns = shape[1];
+    std::unique_ptr<SlimTensor> output(empty_tensor(
+        ScalarType::BFloat16,
+        {rows, columns},
+        {std::max<int64_t>(columns, 1), 1}));
+    std::unique_ptr<SlimTensor> left(
+        empty_tensor(ScalarType::BFloat16, {rows, 4}, {4, 1}));
+    std::unique_ptr<SlimTensor> right(empty_tensor(
+        ScalarType::BFloat16,
+        {4, columns},
+        {std::max<int64_t>(columns, 1), 1}));
+    EXPECT_EQ(
+        aoti_torch_musa_mm_out(output.get(), left.get(), right.get()),
+        Error::Ok);
+  }
+}
+
+TEST_F(MusaAddmmTest, BmmRejectsInvalidSpansAndAliases) {
+  const auto dtype = ScalarType::BFloat16;
+  std::unique_ptr<SlimTensor> output(empty_tensor(dtype, {2, 2, 2}, {4, 2, 1}));
+  std::unique_ptr<SlimTensor> left(empty_tensor(dtype, {2, 2, 2}, {4, 2, 1}));
+  std::unique_ptr<SlimTensor> right(empty_tensor(dtype, {2, 2, 2}, {4, 2, 1}));
+  copy_to_device(output.get(), encode_values(std::vector<float>(8, 17), dtype));
+  for (auto* operand : {output.get(), left.get(), right.get()}) {
+    operand->set_sizes_and_strides(
+        std::array<int64_t, 3>{2, 2, 2}, std::array<int64_t, 3>{4, 2, 1}, 1);
+    EXPECT_EQ(
+        aoti_torch_musa_bmm_out(output.get(), left.get(), right.get()),
+        Error::InvalidArgument);
+    operand->set_sizes_and_strides(
+        std::array<int64_t, 3>{2, 2, 2}, std::array<int64_t, 3>{4, 2, 1}, 0);
+  }
+  EXPECT_EQ(
+      aoti_torch_musa_bmm_out(left.get(), left.get(), right.get()),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_musa_bmm_out(right.get(), left.get(), right.get()),
+      Error::InvalidArgument);
+  EXPECT_EQ(copy_from_device(output.get(), dtype), std::vector<float>(8, 17));
+}
+
+TEST_F(MusaAddmmTest, BmmEmptyProducts) {
+  for (auto dtype :
+       {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    for (int64_t batch : {0, 2}) {
+      std::unique_ptr<SlimTensor> output(
+          empty_tensor(dtype, {batch, 2, 3}, {6, 3, 1}));
+      std::unique_ptr<SlimTensor> left(
+          empty_tensor(dtype, {batch, 2, 0}, {2, 1, 1}));
+      std::unique_ptr<SlimTensor> right(
+          empty_tensor(dtype, {batch, 0, 3}, {3, 3, 1}));
+      if (batch) {
+        copy_to_device(
+            output.get(), encode_values(std::vector<float>(12, 17), dtype));
+      }
+      ASSERT_EQ(
+          aoti_torch_musa_bmm_out(output.get(), left.get(), right.get()),
+          Error::Ok);
+      if (batch) {
+        EXPECT_EQ(
+            copy_from_device(output.get(), dtype), std::vector<float>(12, 0));
+      }
+    }
+  }
+}
 
 void run_addmm(
     ScalarType dtype,
