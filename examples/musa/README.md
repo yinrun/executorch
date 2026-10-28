@@ -87,6 +87,14 @@ Use `from_pretrained(dtype=torch.bfloat16).to(device="musa")`, preserving FP32
 RoPE buffers, rather than casting the entire constructed model to BF16. This
 is not a successful long-context or free-running generation acceptance.
 
+A further isolated muDNN FP32 exp/default-softplus experiment makes all three
+original-token logits byte-identical to the corrected HF reference. It does
+not resolve the Chinese fixtures: maximum errors become `0.8125` and
+`0.609375`, and prompt-position argmax mismatches increase from one to two.
+Although mean errors decrease slightly, this is not whole-model acceptance.
+The experimental C++ changes are not backend defaults; remaining recurrent
+state/reduction differences need independent isolation and validation.
+
 For longer BF16 diagnostics against official Transformers and converted
 ExecuTorch eager references, use the separate teacher-forced comparator:
 
