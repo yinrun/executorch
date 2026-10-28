@@ -57,6 +57,15 @@ def file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def read_greedy_token(payload):
+    if len(payload) != 8:
+        raise ValueError("Expected one int64 greedy token")
+    token = struct.unpack("<q", payload)[0]
+    if not 0 <= token < VOCAB_SIZE:
+        raise ValueError("Greedy token is outside the Qwen vocabulary")
+    return token
+
+
 def runtime_libraries(log):
     loaded = [
         value.strip() for value in re.findall(r"calling init:[ \t]*([^\r\n]+)", log)

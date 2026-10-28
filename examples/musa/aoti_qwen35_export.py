@@ -34,6 +34,22 @@ from examples.musa.aoti_model_acceptance import _serialization_schema, _write_te
 STATE_SUFFIXES = ("conv_state", "recurrent_state", "k_cache", "v_cache")
 
 
+class Qwen35GreedyOutput(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, token_ids, attention_options):
+        logits = self.model(token_ids, attention_options)
+        if (
+            logits.ndim == 0
+            or logits.numel() == 0
+            or logits.numel() != logits.shape[-1]
+        ):
+            raise ValueError("Greedy output requires one nonempty logit row")
+        return logits, logits.reshape(-1).argmax().reshape(1)
+
+
 class Qwen35MusaSDPA(SDPA):
     def forward(self, input_pos, query, key, value, batch_size, sequence_length, mask):
         key = key.repeat_interleave(self.n_rep, dim=1)
@@ -206,6 +222,12 @@ def export_model(args, report):
             buffer.zero_()
     token_ids = torch.tensor([[args.token_ids[0]]], dtype=torch.int64, device="musa")
     input_pos = torch.zeros(1, dtype=torch.int64, device="musa")
+    if args.emit_greedy_token:
+        model = Qwen35GreedyOutput(model).eval()
+    report["output_indices"] = {
+        "logits": 0,
+        "greedy_token": 1 if args.emit_greedy_token else None,
+    }
     exported = export_with_musa_sdpa_decomposition(
         model, (token_ids, {"input_pos": input_pos})
     ).run_decompositions({})
@@ -267,6 +289,11 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--context-length", type=int, default=64)
+    parser.add_argument(
+        "--emit-greedy-token",
+        action="store_true",
+        help="Return GPU-computed greedy token as output 1 while retaining full logits",
+    )
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument("--token-ids", type=int, nargs="+", default=[9707, 11, 2082])
     inputs.add_argument("--prompt")

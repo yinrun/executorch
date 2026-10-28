@@ -374,6 +374,71 @@ class TestTensorSnapshots(unittest.TestCase):
 )
 class TestMusaRunner(unittest.TestCase):
 
+    @torch.no_grad()
+    def test_full_vocabulary_gpu_greedy_keeps_logits_and_first_tie(self) -> None:
+        from examples.musa.aoti_qwen35_export import Qwen35GreedyOutput
+        from examples.musa.aoti_qwen35_validate import (
+            read_greedy_token,
+            runtime_libraries,
+            VOCAB_SIZE,
+        )
+
+        class IdentityLogits(nn.Module):
+            def forward(self, token_ids, attention_options):
+                return token_ids
+
+        runner = Path(os.environ["EXECUTORCH_MUSA_RUNNER"])
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                model = Qwen35GreedyOutput(IdentityLogits()).eval()
+                example = torch.zeros(1, 1, VOCAB_SIZE, dtype=dtype, device="musa")
+                exported = export(model, (example, {})).run_decompositions({})
+                specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+                with _serialization_schema():
+                    manager = to_edge_transform_and_lower(
+                        exported, partitioner=[MusaPartitioner(specs)]
+                    ).to_executorch()
+                    pte = Path(save_pte_program(manager, "greedy", directory))
+                for positions, expected in (
+                    ((), 0),
+                    ((VOCAB_SIZE - 1,), VOCAB_SIZE - 1),
+                    ((31, 32, 1024, VOCAB_SIZE - 1), 31),
+                    ((1023, 1024, 2048), 1023),
+                ):
+                    example.zero_()
+                    for position in positions:
+                        example[0, 0, position] = 1
+                    _write_tensor(example, root / "input.bin")
+                    result = subprocess.run(
+                        [
+                            str(runner),
+                            f"--model_path={pte}",
+                            f"--data_path={root / 'aoti_musa_blob.ptd'}",
+                            f"--inputs={root / 'input.bin'}",
+                            f"--output_file={root / 'output'}",
+                            "--print_output=none",
+                        ],
+                        env={
+                            "PATH": "/usr/bin:/bin",
+                            "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+                            "LD_DEBUG": "libs",
+                        },
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(runtime_libraries(result.stderr))
+                    self.assertEqual(
+                        (root / "output-0.bin").read_bytes(),
+                        (root / "input.bin").read_bytes(),
+                    )
+                    self.assertEqual(
+                        read_greedy_token((root / "output-1.bin").read_bytes()),
+                        expected,
+                    )
+
     def test_server_completion_and_persistent_state(self) -> None:
         class Accumulator(nn.Module):
             def __init__(self):

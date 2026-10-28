@@ -210,6 +210,22 @@ preserves manifest order and reference hashes, rejects unknown or duplicate
 names, and records `selected_fixtures` in the report. An isolated result does
 not establish that the complete reference suite passes.
 
+For single-row Qwen greedy output, export with `--emit-greedy-token`. Output 0
+remains the full logits tensor; output 1 is a one-element int64 tensor computed
+by GPU argmax inside the same MUSA delegate. It selects the first maximum on
+ties and does not use MTP, quantization, or CPU tensor operators in the graph.
+The exporter records both output indices and still requires all 48 mutable
+states and exactly one delegate. Omitting the option preserves the logits-only
+interface.
+
+Use the matching comparator option `--gpu-greedy` to read output 1, require an
+exactly eight-byte in-vocabulary token, check it against the full-logit argmax,
+and feed it back in `--free-running` mode. Full-vocabulary numerical comparison,
+reference hashes, finite-value checks, and reset checks remain enabled; matching
+only the token does not pass precision validation. The optimized benchmark can
+read the GPU token without Python float expansion while still checking every
+logit byte against the preverified HF reference outside the timed sampling path.
+
 For file-server timing, `executor_runner --server_mode --server_timing` emits
 `SERVER TIMING` JSON before each completion marker. It separates input loading
 and preparation, host `method.execute`, and output retrieval/writing. Method

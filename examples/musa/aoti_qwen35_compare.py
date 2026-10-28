@@ -12,6 +12,7 @@ import time
 
 from examples.musa.aoti_qwen35_validate import (
     file_hash,
+    read_greedy_token,
     runtime_libraries,
     tensor_values,
     TOLERANCES,
@@ -347,6 +348,17 @@ def compare(args, report):
                                 )
                         report["steps"].append(row)
                         predicted = row["native_vs_hf"]["predicted_token"]
+                        if args.gpu_greedy:
+                            greedy_payload = (
+                                args.output_dir / "output-1.bin"
+                            ).read_bytes()
+                            gpu_token = read_greedy_token(greedy_payload)
+                            row["gpu_greedy_token"] = gpu_token
+                            if gpu_token != predicted:
+                                raise AssertionError(
+                                    "GPU greedy token differs from the full-logit argmax"
+                                )
+                            predicted = gpu_token
                         print(json.dumps(row), flush=True)
             process.stdin.close()
             if process.wait(timeout=30) != 0:
@@ -391,6 +403,11 @@ def main():
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument(
+        "--gpu-greedy",
+        action="store_true",
+        help="Validate and feed back the GPU int64 token in output 1",
+    )
+    parser.add_argument(
         "--musa-cache-bytes",
         type=int,
         default=0,
@@ -425,6 +442,7 @@ def main():
     report = {
         "status": "running",
         "teacher_forced": not args.free_running,
+        "sampling": "native_gpu_argmax" if args.gpu_greedy else "controller_argmax",
         "runtime_validated": False,
         "steps": [],
     }

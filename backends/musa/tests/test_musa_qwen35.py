@@ -31,6 +31,7 @@ from examples.musa.aoti_qwen35_compare import (
 )
 from examples.musa.aoti_qwen35_validate import (
     compare_logits,
+    read_greedy_token,
     runtime_libraries,
     tensor_values,
     VOCAB_SIZE,
@@ -38,6 +39,16 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_greedy_token_requires_exact_int64_and_vocabulary_range(self):
+        for token in (0, 31, VOCAB_SIZE - 1):
+            self.assertEqual(read_greedy_token(struct.pack("<q", token)), token)
+        for payload in (b"", b"\x00" * 4, b"\x00" * 16):
+            with self.assertRaises(ValueError):
+                read_greedy_token(payload)
+        for token in (-1, VOCAB_SIZE, 2**63 - 1):
+            with self.assertRaises(ValueError):
+                read_greedy_token(struct.pack("<q", token))
+
     def test_cache_teardown_report_ignores_samples_and_rejects_leaks(self):
         counts = dict(
             cached_bytes=0, cached_blocks=0, live_blocks=0, reuses=9, allocations=2
@@ -278,6 +289,31 @@ class TestQwen35LogitValidation(unittest.TestCase):
 
 @unittest.skipUnless(MUSA_AVAILABLE, "MUSA is not available")
 class TestMusaQwen35(unittest.TestCase):
+    def test_gpu_greedy_wrapper_retains_logits_and_first_tie(self):
+        from examples.musa.aoti_qwen35_export import Qwen35GreedyOutput
+
+        class IdentityLogits(torch.nn.Module):
+            def forward(self, token_ids, attention_options):
+                return token_ids
+
+        wrapper = Qwen35GreedyOutput(IdentityLogits()).eval()
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            for values, expected in (([-2, -1, -1, -3], 1), ([-0.0, 0.0, -1], 0)):
+                logits = torch.tensor(values, dtype=dtype, device="musa").reshape(
+                    1, 1, -1
+                )
+                output, token = wrapper(logits, {})
+                self.assertIs(output, logits)
+                self.assertEqual(token.device.type, "musa")
+                self.assertEqual(token.dtype, torch.int64)
+                self.assertEqual(tuple(token.shape), (1,))
+                self.assertEqual(token.item(), expected)
+        for shape in ((), (0,), (2, 3)):
+            with self.subTest(shape=shape), self.assertRaisesRegex(
+                ValueError, "one nonempty logit row"
+            ):
+                wrapper(torch.zeros(shape, device="musa"), {})
+
     def test_qwen_sdpa_preserves_hf_bf16_rounding(self):
         from examples.musa.aoti_qwen35_export import Qwen35MusaSDPA
 
