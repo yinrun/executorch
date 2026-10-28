@@ -30,12 +30,35 @@ def compare_distributions(actual, reference, top_k=10):
             "Expected equally sized nonempty logit vectors and positive top_k"
         )
     if not all(
-        math.isfinite(value) for values in (actual, reference) for value in values
+        math.isfinite(value)
+        for values in ((actual,) if actual is reference else (actual, reference))
+        for value in values
     ):
         raise ValueError("Logits must be finite")
     count = len(actual)
     top_k = min(top_k, count)
     actual_top = heapq.nlargest(top_k, range(count), key=actual.__getitem__)
+    if actual is reference:
+        peak = actual[actual_top[0]]
+        top_probability = 1.0 / math.fsum(math.exp(value - peak) for value in actual)
+        return {
+            "elements": count,
+            "different": 0,
+            "max_error": 0.0,
+            "mean_error": 0.0,
+            "rms_error": 0.0,
+            "p99_error": 0.0,
+            "predicted_token": actual_top[0],
+            "reference_token": actual_top[0],
+            "top_k": top_k,
+            "top_k_overlap": top_k,
+            "actual_top_ids": actual_top,
+            "reference_top_ids": list(actual_top),
+            "reference_top_probability": top_probability,
+            "actual_probability_of_reference_top": top_probability,
+            "total_variation": 0.0,
+            "kl_reference_actual": 0.0,
+        }
     reference_top = heapq.nlargest(top_k, range(count), key=reference.__getitem__)
     actual_peak = actual[actual_top[0]]
     reference_peak = reference[reference_top[0]]
@@ -86,15 +109,16 @@ def compare_distributions(actual, reference, top_k=10):
 
 
 def compare_payloads(actual, reference, dtype):
+    byte_equal = actual == reference
     actual_values = tensor_values(actual, dtype)
-    reference_values = tensor_values(reference, dtype)
+    reference_values = actual_values if byte_equal else tensor_values(reference, dtype)
     row = compare_distributions(actual_values, reference_values)
     atol, rtol = TOLERANCES[dtype]
-    row["outside_legacy_tolerance"] = sum(
+    row["outside_legacy_tolerance"] = 0 if byte_equal else sum(
         abs(value - expected) > atol + rtol * abs(expected)
         for value, expected in zip(actual_values, reference_values)
     )
-    row["byte_equal"] = actual == reference
+    row["byte_equal"] = byte_equal
     return row
 
 

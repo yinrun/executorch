@@ -43,6 +43,42 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_identical_distribution_fast_path_matches_full_metrics(self):
+        for values in (
+            [0.0],
+            [0.0, -0.0, 1.0, 1.0, -1.0],
+            [-1000.0, 1000.0, 0.0, 999.0],
+            [index / 32 for index in range(-200, 200)],
+        ):
+            for top_k in (1, 10, 1000):
+                with self.subTest(values=values, top_k=top_k):
+                    self.assertEqual(
+                        compare_distributions(values, values, top_k),
+                        compare_distributions(values, list(values), top_k),
+                    )
+
+    def test_identical_payloads_still_validate_size_and_finiteness(self):
+        for payload in (
+            b"",
+            b"\0" * 2,
+            struct.pack("<H", 0x7FC0) * VOCAB_SIZE,
+            struct.pack("<H", 0x7F80) * VOCAB_SIZE,
+        ):
+            with self.assertRaises(ValueError):
+                qwen35_compare.compare_payloads(payload, payload, "bf16")
+
+    def test_payload_identity_does_not_hide_sign_bits_or_one_logit_changes(self):
+        original = struct.pack("<H", 0) * VOCAB_SIZE
+        for first, different in ((0x8000, 0), (0x3F80, 1)):
+            changed = struct.pack("<H", first) + original[2:]
+            result = qwen35_compare.compare_payloads(changed, original, "bf16")
+            self.assertFalse(result["byte_equal"])
+            self.assertEqual(result["different"], different)
+        with mock.patch.object(qwen35_compare, "tensor_values", wraps=tensor_values) as decode:
+            result = qwen35_compare.compare_payloads(original, original, "bf16")
+            self.assertTrue(result["byte_equal"])
+            self.assertEqual(decode.call_count, 1)
+
     def test_exact_comparison_cli_preserves_diagnostics_and_checks_every_session(self):
         exact = {
             "session": 0,
