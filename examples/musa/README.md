@@ -62,6 +62,17 @@ and now requires exact equality. Layout preservation is tested separately.
 These local fixes are not sufficient evidence for whole-model acceptance;
 keep the unchanged full-vocabulary and reset checks as the deployment gate.
 
+An isolated follow-up combines these fixes with muDNN for contiguous
+single-row BF16 matrix inputs and BF16 score/probability rounding for the
+256-dimensional attention heads. It passes the original three-token fixture
+twice: positions zero and one are byte-exact against eager; position two has
+maximum error `0.0625`, with no values outside the unchanged combined
+absolute/relative tolerance. Argmax IDs, byte-identical reset, and the native
+library audit pass. The matrix and attention experiments are not backend
+defaults: broader shape/stride/bias coverage and longer prompt/decode
+validation are still required. The original BF16 package remains a negative
+fixture, not a newly accepted package.
+
 The validator uses Python's standard library for control and readback only;
 all model tensor computation runs in the native MUSA delegate. It checks
 every logit, exact argmax IDs, two sequences in the same process, reset
