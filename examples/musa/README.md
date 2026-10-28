@@ -2,7 +2,24 @@
 
 ## Qwen3.5-0.8B text bring-up
 
-**Latest isolated BF16 accuracy result (2026-10-28):** all 91 legacy
+**Latest expanded isolated BF16 accuracy result (2026-10-28):** eight additional
+Chinese/English prompts cover evidence, conflicts, honesty, causality, negation,
+conditional reasoning, ambiguity, and mixed-language instructions. Independently
+generated HF trajectories contain 477 input steps; converted eager matches all
+477 full-vocabulary outputs. Two native GPU-greedy rounds match all 954 outputs
+byte-for-byte, all GPU tokens agree, and all 477 reset checks pass. Three fixtures
+reach EOS (46/62/49 steps); five stop at context=64 and are not complete answers.
+Together with the previous 566 comparisons and 260 EOS comparisons, the same
+dual-output package passes 1780 full-vocabulary comparisons and 890 reset checks,
+with 12 explicit EOS stops. Saved native/reference files and runtime/input hashes
+are independently rechecked in `precision-gpu-greedy-expanded-audit-v1.json`;
+the new run is `compare-gpu-greedy-expanded-v1/result.json`. Maximum/mean logit
+error and distribution differences are zero. All 22 Qwen Python tests pass.
+These are batch-one, single-token-input, context-64 checks of isolated candidate
+math/layout paths, not arbitrary-input, long-context, batched-prefill, or answer
+quality acceptance. The default deployment package remains unchanged.
+
+**Previous isolated BF16 accuracy result:** all 91 legacy
 teacher-forced steps and 192 new native-greedy-feedback steps, each repeated
 twice, have byte-identical full-vocabulary logits against correctly loaded
 Transformers 5.3.0 on MUSA. All 566 comparisons have zero maximum/mean error,
