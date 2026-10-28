@@ -29,9 +29,11 @@ from examples.musa.aoti_qwen35_compare import (
     select_fixtures,
     select_input_token,
     summarize_comparison,
+    validated_context_length,
 )
 from examples.musa.aoti_qwen35_validate import (
     compare_logits,
+    file_hash,
     read_greedy_token,
     runtime_libraries,
     tensor_values,
@@ -40,6 +42,62 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_nonlegacy_context_requires_verified_export_metadata(self):
+        self.assertEqual(
+            validated_context_length({"context_length": 64}, None, None, None), 64
+        )
+        for length in (128, 256):
+            with self.assertRaisesRegex(ValueError, "export-metadata"):
+                validated_context_length({"context_length": length}, None, None, None)
+        for length in (True, 0, 1, 64.0, None):
+            with self.assertRaisesRegex(ValueError, "context length"):
+                validated_context_length({"context_length": length}, None, None, None)
+
+    def test_export_metadata_binds_context_outputs_checkpoint_and_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pte, ptd = root / "qwen35.pte", root / "aoti_musa_blob.ptd"
+            pte.write_bytes(b"test program")
+            ptd.write_bytes(b"test weights")
+            path = root / "result.json"
+            manifest = {
+                "context_length": 128,
+                "checkpoint_hashes": {"/checkpoint/weights": "weights hash"},
+            }
+            metadata = {
+                "status": "exported",
+                "model": "Qwen3.5-0.8B-text",
+                "dtype": "bf16",
+                "context_length": 128,
+                "delegates": 1,
+                "artifacts": {pte.name: file_hash(pte), ptd.name: file_hash(ptd)},
+                "checkpoint_hashes": {"weights": "weights hash"},
+                "output_indices": {"logits": 0, "greedy_token": 1},
+            }
+            path.write_text(json.dumps(metadata))
+            self.assertEqual(
+                validated_context_length(manifest, pte, ptd, path, True), 128
+            )
+            for change in (
+                {"status": "failed"},
+                {"dtype": "fp32"},
+                {"context_length": 64},
+                {"context_length": 128.0},
+                {"delegates": 2},
+                {"artifacts": {}},
+                {"checkpoint_hashes": {"weights": "different"}},
+                {"output_indices": {"logits": 0, "greedy_token": None}},
+                {"output_indices": {"logits": 1, "greedy_token": 0}},
+            ):
+                with self.subTest(change=change):
+                    path.write_text(json.dumps({**metadata, **change}))
+                    with self.assertRaises(ValueError):
+                        validated_context_length(manifest, pte, ptd, path, True)
+            path.write_text(json.dumps(metadata))
+            ptd.write_bytes(b"changed weights")
+            with self.assertRaisesRegex(ValueError, "package hash"):
+                validated_context_length(manifest, pte, ptd, path, True)
+
     def test_native_eos_stops_only_after_prompt_at_matching_reference_end(self):
         fixture = dict(token_ids=[1, 2, 3], prompt_token_count=2, stop_reason="eos")
         self.assertFalse(native_eos_reached(fixture, 0, 9, 9))

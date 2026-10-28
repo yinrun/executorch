@@ -206,6 +206,38 @@ def native_eos_reached(fixture, position, predicted, eos_token_id):
     return False
 
 
+def validated_context_length(manifest, pte, ptd, metadata_path, gpu_greedy=False):
+    context_length = manifest.get("context_length")
+    if type(context_length) is not int or context_length < 2:
+        raise ValueError("Invalid reference context length")
+    if metadata_path is None:
+        if context_length != 64:
+            raise ValueError("Nonlegacy contexts require --export-metadata")
+        return context_length
+    metadata = json.loads(metadata_path.read_text())
+    if (
+        metadata.get("status") != "exported"
+        or metadata.get("model") != "Qwen3.5-0.8B-text"
+        or metadata.get("dtype") != "bf16"
+        or type(metadata.get("context_length")) is not int
+        or metadata["context_length"] != context_length
+        or metadata.get("delegates") != 1
+    ):
+        raise ValueError("Export metadata does not match the BF16 reference context")
+    for path in (pte, ptd):
+        if metadata.get("artifacts", {}).get(path.name) != file_hash(path):
+            raise ValueError("Export metadata package hash mismatch")
+    if metadata.get("checkpoint_hashes") != {
+        Path(path).name: digest
+        for path, digest in manifest["checkpoint_hashes"].items()
+    }:
+        raise ValueError("Export and reference checkpoint hashes differ")
+    outputs = metadata.get("output_indices", {})
+    if outputs.get("logits") != 0 or (gpu_greedy and outputs.get("greedy_token") != 1):
+        raise ValueError("Export metadata does not declare the requested outputs")
+    return context_length
+
+
 def musa_cache_report(log):
     reports = [
         json.loads(line.removeprefix("MUSA ALLOCATION CACHE "))
@@ -235,6 +267,10 @@ def compare(args, report):
         raise ValueError("Expected a complete BF16 reference manifest")
     if not manifest["fixtures"]:
         raise ValueError("Expected at least one reference fixture")
+    context_length = validated_context_length(
+        manifest, args.pte, args.ptd, args.export_metadata, args.gpu_greedy
+    )
+    report["context_length"] = context_length
     fixtures = select_fixtures(manifest["fixtures"], args.fixture)
     report["selected_fixtures"] = [fixture["name"] for fixture in fixtures]
     eos_token_id = manifest.get("eos_token_id")
@@ -247,7 +283,7 @@ def compare(args, report):
     ):
         raise ValueError("EOS references must declare eos_token_id")
     for fixture in manifest["fixtures"]:
-        if not 1 <= len(fixture["token_ids"]) <= 64:
+        if not 1 <= len(fixture["token_ids"]) <= context_length:
             raise ValueError("Fixture must fit the exported context")
         if not 1 <= fixture["prompt_token_count"] <= len(fixture["token_ids"]):
             raise ValueError("Invalid prompt token count")
@@ -257,6 +293,8 @@ def compare(args, report):
         ):
             raise ValueError("Invalid token ID")
     tracked = [args.references, args.pte, args.ptd, args.runner]
+    if args.export_metadata:
+        tracked.append(args.export_metadata)
     if args.runtime_preload:
         tracked.append(args.runtime_preload)
     before = {str(path): file_hash(path) for path in tracked}
@@ -433,6 +471,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("references", "pte", "ptd", "runner", "output-dir"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument(
+        "--export-metadata",
+        type=Path,
+        help="Hash-matched exporter result.json; required for contexts other than 64",
+    )
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument(
@@ -467,6 +510,8 @@ def main():
     args.ptd = args.ptd.resolve()
     args.runner = args.runner.resolve()
     args.output_dir = args.output_dir.resolve()
+    if args.export_metadata:
+        args.export_metadata = args.export_metadata.resolve()
     if args.runtime_preload:
         args.runtime_preload = args.runtime_preload.resolve()
     if args.repeats < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:

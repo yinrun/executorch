@@ -237,6 +237,16 @@ preserves manifest order and reference hashes, rejects unknown or duplicate
 names, and records `selected_fixtures` in the report. An isolated result does
 not establish that the complete reference suite passes.
 
+For a context other than the legacy 64 positions, pass
+`--export-metadata /path/to/export/result.json`. The comparator requires the
+reference context to match the exporter context and verifies the actual PTE/PTD
+hashes, checkpoint hashes, BF16 dtype, single delegate, and output indices before
+starting the runner. It tracks the metadata hash during comparison and bounds
+every fixture by that verified context. Merely increasing a reference manifest's
+context does not make a 64-position package safe for longer input. This option
+also supports the 64-position package and does not by itself qualify new backend
+shapes or claim long-context accuracy.
+
 For single-row Qwen greedy output, export with `--emit-greedy-token`. Output 0
 remains the full logits tensor; output 1 is a one-element int64 tensor computed
 by GPU argmax inside the same MUSA delegate. It selects the first maximum on
