@@ -73,6 +73,48 @@ defaults: broader shape/stride/bias coverage and longer prompt/decode
 validation are still required. The original BF16 package remains a negative
 fixture, not a newly accepted package.
 
+A longer isolated BF16 comparison against Transformers 5.3.0 on MUSA covers
+two Chinese prompts, 27 and 31 prompt tokens, each followed by 16 greedy
+predictions. Including the original fixture, 91 forward calls repeat twice
+with byte-identical reset outputs and a clean native-library audit. Precision
+still fails: native/HF maximum logit errors are `0.65625` and `0.5` for the
+Chinese fixtures. One prompt-position argmax differs; all 32 generated-token
+predictions match under teacher forcing. The converted PyTorch eager model
+also differs from official HF after the first three chat inputs, so frontend
+and compiled-runtime differences must be investigated separately. This is
+not a successful long-context or free-running generation acceptance.
+
+For longer BF16 diagnostics against official Transformers and converted
+ExecuTorch eager references, use the separate teacher-forced comparator:
+
+```bash
+python -m examples.musa.aoti_qwen35_compare \
+  --references /path/to/references/manifest.json \
+  --pte /path/to/qwen35.pte --ptd /path/to/aoti_musa_blob.ptd \
+  --runner /path/to/executor_runner --output-dir /tmp/qwen35-comparison
+```
+
+The reference manifest must have `status="complete"`, `dtype="bf16"`, and a
+nonempty `fixtures` list. Each fixture contains `name`, `token_ids`,
+`prompt_token_count`, and `hashes` mapping tensor filenames to SHA256 values.
+Store full-vocabulary BF16 logits in `NAME/hf-POSITION.bin` and
+`NAME/et-POSITION.bin`, relative to the manifest directory. Both references
+must use the same checkpoint, positions, cache reset, and input token
+trajectory; record their provenance and generation settings in the manifest.
+Use official Transformers BF16 on MUSA for `hf`, and the unpatched converted
+PyTorch model for `et`. This command does not generate references itself.
+
+Unlike acceptance validation, this diagnostic continues past numerical or
+argmax mismatches, always feeding the reference trajectory rather than native
+predictions. It reports every logit's error, top-k overlap, softmax total
+variation, and KL(reference || actual), separating native/HF, eager/HF, and
+native/eager differences. Two repetitions check byte-identical cache reset;
+invalid tensors, changed hashes, loader violations, and process failures
+still fail closed. `status="comparison_complete"` means the measurement
+completed, **not** that precision passed; `runtime_validated` stays false.
+Teacher-forced token agreement does not establish free-running generation
+agreement. The deployment validator and its thresholds remain unchanged.
+
 The validator uses Python's standard library for control and readback only;
 all model tensor computation runs in the native MUSA delegate. It checks
 every logit, exact argmax IDs, two sequences in the same process, reset

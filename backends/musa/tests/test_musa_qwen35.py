@@ -18,6 +18,7 @@ from executorch.examples.models.llama import attention
 from executorch.examples.models.llama.model_args import ModelArgs
 from executorch.examples.models.llama.norm import RMSNorm
 from executorch.examples.models.llama.rope import Rope
+from examples.musa.aoti_qwen35_compare import compare_distributions
 from examples.musa.aoti_qwen35_validate import (
     compare_logits,
     runtime_libraries,
@@ -27,6 +28,50 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_distribution_comparison_exact_and_shifted_logits(self):
+        reference = [-2.0, 0.0, 1.0, 3.0]
+        exact = compare_distributions(reference, reference)
+        self.assertEqual(exact["different"], 0)
+        self.assertEqual(exact["max_error"], 0)
+        self.assertEqual(exact["total_variation"], 0)
+        self.assertEqual(exact["kl_reference_actual"], 0)
+        self.assertEqual(exact["top_k_overlap"], 4)
+        shifted = compare_distributions(
+            [value + 1000 for value in reference], reference
+        )
+        self.assertEqual(shifted["max_error"], 1000)
+        self.assertEqual(shifted["total_variation"], 0)
+        self.assertEqual(shifted["kl_reference_actual"], 0)
+
+    def test_distribution_comparison_rank_changes_and_underflow(self):
+        row = compare_distributions([0.0, 1.0, -10000.0], [1.0, 0.0, -10000.0], top_k=1)
+        self.assertEqual(row["reference_token"], 0)
+        self.assertEqual(row["predicted_token"], 1)
+        self.assertEqual(row["top_k_overlap"], 0)
+        self.assertAlmostEqual(row["total_variation"], 0.4621171572600098)
+        self.assertAlmostEqual(row["kl_reference_actual"], 0.4621171572600098)
+        self.assertAlmostEqual(row["mean_error"], 2 / 3)
+        self.assertAlmostEqual(row["rms_error"], (2 / 3) ** 0.5)
+        self.assertLess(
+            row["actual_probability_of_reference_top"], row["reference_top_probability"]
+        )
+        row = compare_distributions([2.0, 2.0], [2.0, 2.0])
+        self.assertEqual(row["predicted_token"], 0)
+
+    def test_distribution_comparison_invalid_inputs(self):
+        for actual, reference, top_k in (
+            ([], [], 10),
+            ([1.0], [], 10),
+            ([1.0], [1.0], 0),
+            ([1.0], [1.0], 1.5),
+            ([float("nan")], [1.0], 1),
+            ([1.0], [float("inf")], 1),
+        ):
+            with self.subTest(
+                actual=actual, reference=reference, top_k=top_k
+            ), self.assertRaises(ValueError):
+                compare_distributions(actual, reference, top_k)
+
     def test_runtime_library_audit_preserves_spaces(self):
         path = "/tmp/relocated package/lib/libextension_cuda.so"
         self.assertEqual(runtime_libraries(f"123: calling init: {path}\n"), [path])
