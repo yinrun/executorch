@@ -2,6 +2,15 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Latest isolated BF16 accuracy result (2026-10-28):** all 91 fixed-trajectory
+steps, repeated twice, have byte-identical full-vocabulary logits against
+correctly loaded Transformers 5.3.0 on MUSA. All 182 native comparisons have
+zero maximum error; all 91 reset checks are byte-identical, and the native
+library audit passes. This uses the combined experimental matrix, attention,
+math, reduction, and layout paths described below. It is not a default-backend
+promotion, free-running generation, long-context, or performance acceptance.
+The earlier results below document intermediate candidates, not this result.
+
 Export a local Hugging Face checkpoint with the existing ExecuTorch Qwen3.5
 weight converter and a single MUSA delegate:
 
@@ -40,7 +49,7 @@ Transformers MUSA FP32 matches the entire reference token trajectory with
 maximum logit error `2.25e-5`. This single short answer is not a general
 language-quality evaluation.
 
-**BF16 export succeeds but native numerical acceptance fails.** The corrected
+**The original BF16 package exports but fails native numerical acceptance.** The corrected
 unit-offset RMSNorm gives byte-identical eager logits to Transformers for the
 three reference tokens. The native first-token argmax matches, but its logits
 fail `atol=0.04, rtol=0.04`. Do not use argmax alone to accept this path.
@@ -118,9 +127,29 @@ The reduction candidate's first evidence-fixture divergence is at position 7,
 layer 19 (zero-based). An eight-step trace matches uninstrumented logits.
 At that position, Q/K/V, gates, and KV caches agree exactly; SDPA context has
 one differing BF16 element out of 2048, with maximum error `0.0009765625`.
-The earlier seven steps match at every inspected block stage. QK, softmax,
-and PV still require same-input isolation; this does not establish a cache
-bug or a softmax root cause.
+The earlier seven steps match at every inspected block stage. Subsequent
+same-input isolation identifies a PV layout issue, not a cache or softmax bug:
+the `[8, 1, 64]` left operand has an unused zero row stride, which selected
+muBLAS instead of the positive-stride muDNN path. Normalizing the singleton
+descriptor stride and preserving muDNN dispatch fixes the reproduced BF16
+difference. A regression fails on the old library; all 20 matrix tests pass
+with the narrow fix. The same full-model PTE/PTD then gives 90/91 byte-exact
+steps and all 91 steps within the unchanged tolerance, with matching argmax.
+
+The last differing step, evidence position 11, starts at QK in layer 23.
+Edge materializes a transposed key with `transpose_copy`, selecting muDNN NN
+instead of the eager NT view path. Same-input native probes reproduce each
+path's exact scores. An isolated pass preserves six BF16 QK transpose views,
+restricted to `[1, 8, 64, 256]` inputs and matrix-RHS-only consumers through
+view/reshape chains. All 180 inspected layer checkpoints then match eager.
+With this pass and the combined runtime, the original, fridge, and evidence
+fixtures give 3/3, 42/42, and 46/46 byte-exact steps in each of two rounds.
+The original tolerance is unchanged; full-vocabulary maximum/mean errors,
+total variation, and argmax mismatches are all zero. Reports are named
+`compare-bf16-stride-v1/result.json` and `compare-bf16-qk-view-v1/result.json`.
+The comparison remains `runtime_validated=false`: broader shapes, aliasing,
+mutation safety, unseen prompts, and independent free generation are not
+validated. The QK pass and other experimental paths are not backend defaults.
 
 For longer BF16 diagnostics against official Transformers and converted
 ExecuTorch eager references, use the separate teacher-forced comparator:
