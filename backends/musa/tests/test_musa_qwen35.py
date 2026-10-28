@@ -1,6 +1,9 @@
 """MUSA coverage for Qwen3.5 recurrent state and export dispatch."""
 
+import json
+from pathlib import Path
 import struct
+import tempfile
 import unittest
 from unittest import mock
 
@@ -119,6 +122,76 @@ class TestQwen35LogitValidation(unittest.TestCase):
 
 @unittest.skipUnless(MUSA_AVAILABLE, "MUSA is not available")
 class TestMusaQwen35(unittest.TestCase):
+    @torch.no_grad()
+    def test_hf_reference_preserves_fp32_rope(self):
+        try:
+            from safetensors.torch import save_file
+            from transformers.models.qwen3_5.configuration_qwen3_5 import (
+                Qwen3_5TextConfig,
+            )
+            from transformers.models.qwen3_5.modeling_qwen3_5 import (
+                Qwen3_5ForCausalLM,
+                Qwen3_5TextRotaryEmbedding,
+            )
+        except ImportError:
+            self.skipTest("Qwen3.5 Transformers reference dependencies are unavailable")
+        from examples.musa.aoti_qwen35_reference import load_hf_model
+
+        config = Qwen3_5TextConfig(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=32,
+            layer_types=["full_attention"],
+            tie_word_embeddings=True,
+            rope_parameters={
+                "rope_type": "default",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": 1.0,
+                "mrope_section": [6, 5, 5],
+            },
+        )
+        source = Qwen3_5ForCausalLM(config).to(dtype=torch.bfloat16)
+        weights = {
+            name.replace("model.", "model.language_model.", 1): value.contiguous()
+            for name, value in source.state_dict().items()
+            if name.startswith("model.")
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            (checkpoint / "config.json").write_text(
+                json.dumps({"text_config": config.to_dict()})
+            )
+            save_file(
+                weights,
+                str(checkpoint / "model.safetensors-00001-of-00001.safetensors"),
+            )
+            model = load_hf_model(checkpoint)
+        self.assertTrue(
+            all(value.dtype == torch.bfloat16 for value in model.parameters())
+        )
+        self.assertIs(model.lm_head.weight, model.model.embed_tokens.weight)
+        rotary = model.model.rotary_emb
+        self.assertEqual(rotary.inv_freq.dtype, torch.float32)
+        self.assertEqual(rotary.original_inv_freq.dtype, torch.float32)
+        reference = Qwen3_5TextRotaryEmbedding(config, device="musa")
+        inputs = torch.zeros(1, 1, 32, device="musa", dtype=torch.bfloat16)
+        positions = torch.tensor([[63]], device="musa")
+        expected = reference(inputs, positions)
+        actual = rotary(inputs, positions)
+        for value, target in zip(actual, expected):
+            torch.testing.assert_close(value, target, atol=0, rtol=0)
+        rounded = reference.to(dtype=torch.bfloat16)(inputs, positions)
+        self.assertTrue(
+            any(
+                not torch.equal(value, target)
+                for value, target in zip(rounded, expected)
+            )
+        )
+
     @torch.no_grad()
     def test_low_precision_cast_preserves_memory_format(self):
         value = torch.linspace(-2, 2, 120, device="musa").reshape(2, 3, 4, 5)

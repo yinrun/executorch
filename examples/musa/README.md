@@ -77,12 +77,15 @@ A longer isolated BF16 comparison against Transformers 5.3.0 on MUSA covers
 two Chinese prompts, 27 and 31 prompt tokens, each followed by 16 greedy
 predictions. Including the original fixture, 91 forward calls repeat twice
 with byte-identical reset outputs and a clean native-library audit. Precision
-still fails: native/HF maximum logit errors are `0.65625` and `0.5` for the
+still fails: native/HF maximum logit errors are `0.53125` and `0.640625` for the
 Chinese fixtures. One prompt-position argmax differs; all 32 generated-token
 predictions match under teacher forcing. The converted PyTorch eager model
-also differs from official HF after the first three chat inputs, so frontend
-and compiled-runtime differences must be investigated separately. This is
-not a successful long-context or free-running generation acceptance.
+is byte-identical to correctly loaded official HF across all 91 steps. An
+earlier reference script incorrectly cast HF's RoPE inverse-frequency buffers
+to BF16; those comparisons must not be used to diagnose a frontend mismatch.
+Use `from_pretrained(dtype=torch.bfloat16).to(device="musa")`, preserving FP32
+RoPE buffers, rather than casting the entire constructed model to BF16. This
+is not a successful long-context or free-running generation acceptance.
 
 For longer BF16 diagnostics against official Transformers and converted
 ExecuTorch eager references, use the separate teacher-forced comparator:
@@ -103,6 +106,22 @@ must use the same checkpoint, positions, cache reset, and input token
 trajectory; record their provenance and generation settings in the manifest.
 Use official Transformers BF16 on MUSA for `hf`, and the unpatched converted
 PyTorch model for `et`. This command does not generate references itself.
+
+To regenerate both references on an existing fixed trajectory:
+
+```bash
+MUSA_LAUNCH_BLOCKING=1 python -m examples.musa.aoti_qwen35_reference \
+  --checkpoint-dir /path/to/Qwen3.5-0.8B \
+  --trajectories /path/to/previous/manifest.json \
+  --output-dir /tmp/qwen35-bf16-references
+```
+
+The source manifest must additionally contain `checkpoint_hashes`; the
+generator checks these against the local checkpoint and requires a new output
+directory. It uses the official HF loader with strict loading diagnostics,
+checks BF16 weights, tied embeddings, FP32 RoPE buffers, and MUSA placement,
+and records buffer dtypes in the resulting manifest. It keeps the input token
+trajectory unchanged; it does not regenerate or silently replace old evidence.
 
 Unlike acceptance validation, this diagnostic continues past numerical or
 argmax mismatches, always feeding the reference trajectory rather than native
