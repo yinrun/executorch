@@ -219,6 +219,11 @@ TEST_F(MusaCausalAttentionTest, InvalidPositionsAndMasksLeaveOutputUntouched) {
     EXPECT_EQ(inputs.run(), Error::InvalidArgument);
     EXPECT_EQ(bytes(inputs.output), original);
   }
+  for (int64_t length : {32, 1, 64}) {
+    inputs.set_length(length);
+    ASSERT_EQ(inputs.run(), Error::Ok);
+    inputs.expect_result(length);
+  }
 }
 
 TEST_F(

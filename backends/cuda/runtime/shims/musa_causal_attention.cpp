@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <initializer_list>
 
 #include <executorch/backends/aoti/slim/cuda/guard.h>
@@ -132,15 +133,40 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   const auto stream = stream_result.get();
   alignas(16) int64_t index = -1;
   alignas(16) std::array<uint8_t, 256> host_mask{};
-  ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
-      &index, position->data_ptr(), sizeof(index), cudaMemcpyDeviceToHost, stream));
-  ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
-      host_mask.data(),
-      mask->data_ptr(),
-      capacity,
-      cudaMemcpyDeviceToHost,
-      stream));
-  ET_CUDA_CHECK_OR_RETURN_ERROR(cudaStreamSynchronize(stream));
+  {
+    struct ControlScratch {
+      void* data = nullptr;
+      cudaStream_t stream;
+      bool pending = false;
+      ~ControlScratch() {
+        if (pending) {
+          cudaStreamSynchronize(stream);
+        }
+        if (data != nullptr) {
+          cudaFreeHost(data);
+        }
+      }
+    };
+    ControlScratch control{nullptr, stream};
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMallocHost(&control.data, 272));
+    control.pending = true;
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
+        control.data,
+        position->data_ptr(),
+        sizeof(index),
+        cudaMemcpyDeviceToHost,
+        stream));
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
+        static_cast<char*>(control.data) + 16,
+        mask->data_ptr(),
+        capacity,
+        cudaMemcpyDeviceToHost,
+        stream));
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaStreamSynchronize(stream));
+    control.pending = false;
+    std::memcpy(&index, control.data, sizeof(index));
+    std::memcpy(host_mask.data(), static_cast<char*>(control.data) + 16, capacity);
+  }
   ET_CHECK_OR_RETURN_ERROR(
       index >= 0 && index < capacity,
       InvalidArgument,
@@ -153,17 +179,14 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
         "MUSA causal attention mask must describe the valid causal prefix");
   }
 
-  const size_t packed_bytes = 8 * length * 256 * sizeof(uint16_t);
   const size_t score_bytes = 8 * length * sizeof(uint16_t);
-  const std::array<size_t, 7> sizes = {
-      packed_bytes,
-      packed_bytes,
+  const std::array<size_t, 5> sizes = {
       score_bytes,
       score_bytes,
       score_bytes * 2,
       score_bytes * 2,
       score_bytes};
-  std::array<size_t, 7> offsets{};
+  std::array<size_t, 5> offsets{};
   size_t allocation_size = 0;
   for (size_t buffer = 0; buffer < sizes.size(); ++buffer) {
     offsets[buffer] = allocation_size;
@@ -174,20 +197,9 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
       allocation_size, query->device_index(), stream);
   ET_CHECK_OK_OR_RETURN_ERROR(allocation.error());
   scratch.data = allocation.get();
-  std::array<void*, 7> buffers{};
+  std::array<void*, 5> buffers{};
   for (size_t buffer = 0; buffer < buffers.size(); ++buffer) {
     buffers[buffer] = static_cast<char*>(scratch.data) + offsets[buffer];
-  }
-  for (size_t input = 0; input < 2; ++input) {
-    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpy2DAsync(
-        buffers[input],
-        length * 256 * sizeof(uint16_t),
-        input == 0 ? key->data_ptr() : value->data_ptr(),
-        capacity * 256 * sizeof(uint16_t),
-        length * 256 * sizeof(uint16_t),
-        8,
-        cudaMemcpyDeviceToDevice,
-        stream));
   }
 
   dnn::Handle handle(query->device_index());
@@ -201,19 +213,23 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   ET_CHECK_OK_OR_RETURN_ERROR(
       set_tensor(query_tensor, query->data_ptr(), bf16, {8, 1, 256}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(key_tensor, buffers[0], bf16, {8, length, 256}));
+      set_tensor(key_tensor, key->data_ptr(), bf16, {8, length, 256}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(value_tensor, buffers[1], bf16, {8, length, 256}));
+      set_tensor(value_tensor, value->data_ptr(), bf16, {8, length, 256}));
+  ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(key_tensor.SetNdInfo(
+      {8, length, 256}, {capacity * 256, 256, 1})));
+  ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(value_tensor.SetNdInfo(
+      {8, length, 256}, {capacity * 256, 256, 1})));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(score_tensor, buffers[2], bf16, {8, 1, length}));
+      set_tensor(score_tensor, buffers[0], bf16, {8, 1, length}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(scaled_tensor, buffers[3], bf16, {8, 1, length}));
+      set_tensor(scaled_tensor, buffers[1], bf16, {8, 1, length}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_scores, buffers[4], fp32, {8, 1, length}));
+      set_tensor(fp32_scores, buffers[2], fp32, {8, 1, length}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_probabilities, buffers[5], fp32, {8, 1, length}));
+      set_tensor(fp32_probabilities, buffers[3], fp32, {8, 1, length}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(probabilities, buffers[6], bf16, {8, 1, length}));
+      set_tensor(probabilities, buffers[4], bf16, {8, 1, length}));
   ET_CHECK_OK_OR_RETURN_ERROR(
       set_tensor(output_tensor, output->data_ptr(), bf16, {8, 1, 256}));
   dnn::BatchMatMul product;
@@ -229,9 +245,9 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   ET_CHECK_OK_OR_RETURN_ERROR(
       run_unary(handle, fp32_scores, scaled_tensor, dnn::Unary::Mode::CAST));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_scores, buffers[4], fp32, {1, 8, 1, length}));
+      set_tensor(fp32_scores, buffers[2], fp32, {1, 8, 1, length}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_probabilities, buffers[5], fp32, {1, 8, 1, length}));
+      set_tensor(fp32_probabilities, buffers[3], fp32, {1, 8, 1, length}));
   dnn::Softmax softmax;
   ET_CHECK_OK_OR_RETURN_ERROR(
       check_mudnn(softmax.SetMode(dnn::Softmax::Mode::SOFTMAX)));
@@ -256,7 +272,7 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   ET_CHECK_OK_OR_RETURN_ERROR(workspace_error);
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(softmax_status));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_probabilities, buffers[5], fp32, {8, 1, length}));
+      set_tensor(fp32_probabilities, buffers[3], fp32, {8, 1, length}));
   ET_CHECK_OK_OR_RETURN_ERROR(run_unary(
       handle, probabilities, fp32_probabilities, dnn::Unary::Mode::CAST));
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(product.SetTranspose(false, false)));
