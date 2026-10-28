@@ -2068,3 +2068,76 @@ pooled export explicitly with `TORCHINDUCTOR_MEMORY_PLANNING=1` and
 Python toolchain; the deployed runner requires only the compatible host
 architecture, MUSA SDK/driver and GPU ISA. The measured speedups remain
 limited to the shapes/dtypes and shared-host campaign documented above.
+
+## Remaining pool allocation and release attribution (2026-10-28)
+
+The remaining per-forward device allocation is the compiler-generated pool,
+not convolution workspace. A read-only allocator observer records pointer,
+stream, host API intervals and stacks for `musaMalloc`, `musaFree`,
+`musaFreeAsync` and runner synchronization calls. Ten fresh processes cover
+all accepted shapes of the three new models, with three warmups and twenty
+measured forwards each. Every measured forward contains exactly one
+allocation through `aoti_torch_empty_strided` and one matching-pointer async
+free; all final outputs remain byte-identical to their accepted artifacts.
+
+At batch two, the pool sizes are 3,451,904 bytes for MobileNetV3-Small at
+224x224, 10,948,480 bytes for MobileNetV3-Large at 224x224, and 1,105,920 bytes
+for DeepLab at 64x64. Free stacks reach `CudaBackend::execute` through
+`SlimTensor` destruction and the shared-storage deleter. Source inspection
+shows that the backend copies returned SlimTensor outputs into planned
+ETensor buffers before deleting the returned handles. Pool views therefore
+keep the allocation alive beyond the generated pool handle's lifetime;
+return from the compiled model is not by itself a safe reuse boundary.
+
+The initial trace shows much longer host intervals inside `musaFreeAsync`
+than inside `musaMalloc`. To distinguish pending stream work from release
+overhead, a separate diagnostic interposer optionally synchronizes the
+supplied stream immediately before forwarding the unchanged async free.
+Both modes retain the same observation interposer. Twelve fresh processes
+run original/presynchronized then presynchronized/original for each model,
+with three warmups and twenty measured calls per process (forty samples per
+model/mode). All outputs are byte-exact. Aggregated host API medians are:
+
+| Model | Original malloc ms | Original async free ms | Async free after presync ms | Presync plus free ms |
+| --- | ---: | ---: | ---: | ---: |
+| MobileNetV3-Small FP16 | 0.178982 | 8.465107 | 0.169742 | 7.927800 |
+| MobileNetV3-Large BF16 | 0.418765 | 15.9320015 | 0.3347845 | 15.967602 |
+| DeepLab BF16 | 0.005980 | 11.6871675 | 0.011760 | 11.500525 |
+
+Most of the long free interval moves into the preceding synchronization.
+This supports pending stream work/waiting as a major component, not the
+claim that removing one free would save 8-16 ms of inference. These host API
+intervals may include GPU execution and driver/scheduling delays; they are
+not isolated allocator overhead and must not be added to overlapping GPU
+timings. Two instrumented rounds are diagnostic evidence, not a replacement
+for the earlier uninstrumented four-round latency acceptance. Explicit
+presynchronization is not adopted as an optimization.
+
+Evidence is in `pool-lifetime/{observations,presync-v2}/summary.json` and
+`pool-lifetime/analysis.json` under the artifact root. The audit rechecks 22
+successful processes, 440 measured forwards, raw-output equality, model
+payloads, observer hashes and unchanged runtime binaries. The first
+presynchronization harness rejected the intentionally zero wait time in
+disabled mode because the generic timing summarizer requires positive
+samples; that failed diagnostic is preserved in `presync`. Explicit handling
+of the disabled measurement fixed the reporting issue before the full rerun.
+
+Any future pool-retention prototype needs all of the following gates before
+production use:
+
+- Distinguish compiler pools explicitly rather than caching every allocation
+  or inferring pool identity from dtype/size alone. Keep retained capacity
+  bounded and preserve allocation/error behavior outside that path.
+- Never reuse while any output/view still owns the shared storage. The current
+  SlimTensor shared pointer is non-atomic, so a process-global cache cannot
+  silently introduce cross-thread ownership.
+- Order reuse after the last consumer, including backend output copies, not
+  merely the generated model's completion event. Match device and stream
+  lifetime, not just a recyclable raw stream address.
+- Test retained views, dynamic capacity growth, interleaved models/streams,
+  failures and teardown in an isolated candidate, retaining the accepted
+  synchronous-allocation path and the previously rejected async-pool trial.
+
+The accepted runtime and compiler defaults remain unchanged. Kernel-level
+profiling is the next attribution step; pool retention must justify its
+incremental gain rather than treating all observed free time as removable.
