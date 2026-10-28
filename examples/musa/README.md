@@ -2,6 +2,27 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Fresh-input counterexample (2026-10-29): accuracy is not generally accepted.**
+Four new qualitative prompts produce 836 independent HF BF16 reference steps;
+fused ET eager matches only 669 byte-for-byte. The Chinese causal-evidence prompt
+first differs at zero-based position 89, with a worst full-logit error of 0.40625
+over its trajectory. Native execution matches ET eager for all 196 completed
+calls, but its greedy token differs from HF at position 195; the comparator
+correctly stops before consuming a different input at position 196. The remaining
+native fixtures and reset/EOS checks are not completed by that interrupted run.
+Unfused eager reproduces the same discrepancy. At layer 11, identical Q/K/V
+produce one different BF16 QK score (134 versus 133) when the key length changes
+from its valid prefix of 90 to a padded 256. Same-input length probes reproduce
+the difference, while using the valid prefix restores that attention checkpoint.
+An isolated eager-only valid-prefix experiment restores all 256 full-logit rows
+of the Chinese case to byte equality. It reads `input_pos.item()` on the host,
+so this is not an exportable or native deployment fix, nor a rerun of the other
+three prompts under that experimental path.
+The older 4200-call results below remain valid for their frozen inputs, not an
+unrestricted input guarantee. A deployable valid-length attention path still
+requires implementation, export and regression validation; no default package
+promotion or new performance acceptance is claimed.
+
 Generate fresh, independent HF/MUSA BF16 greedy references instead of replaying
 an existing trajectory:
 
