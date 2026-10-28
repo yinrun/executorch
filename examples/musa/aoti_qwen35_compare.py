@@ -171,12 +171,28 @@ def select_input_token(fixture, position, predicted, free_running):
     return predicted
 
 
+def select_fixtures(fixtures, requested):
+    if not requested:
+        return fixtures
+    names = [fixture["name"] for fixture in fixtures]
+    if len(names) != len(set(names)):
+        raise ValueError("Reference fixture names must be unique")
+    if len(requested) != len(set(requested)):
+        raise ValueError("Requested fixture names must be unique")
+    unknown = set(requested) - set(names)
+    if unknown:
+        raise ValueError(f"Unknown reference fixtures: {sorted(unknown)}")
+    return [fixture for fixture in fixtures if fixture["name"] in requested]
+
+
 def compare(args, report):
     manifest = json.loads(args.references.read_text())
     if manifest["status"] != "complete" or manifest["dtype"] != "bf16":
         raise ValueError("Expected a complete BF16 reference manifest")
     if not manifest["fixtures"]:
         raise ValueError("Expected at least one reference fixture")
+    fixtures = select_fixtures(manifest["fixtures"], args.fixture)
+    report["selected_fixtures"] = [fixture["name"] for fixture in fixtures]
     for fixture in manifest["fixtures"]:
         if not 1 <= len(fixture["token_ids"]) <= 64:
             raise ValueError("Fixture must fit the exported context")
@@ -227,7 +243,7 @@ def compare(args, report):
     ) as process:
         try:
             for session in range(args.repeats):
-                for fixture_index, fixture in enumerate(manifest["fixtures"]):
+                for fixture_index, fixture in enumerate(fixtures):
                     predicted = None
                     for position in range(len(fixture["token_ids"])):
                         token = select_input_token(
@@ -342,6 +358,11 @@ def main():
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument(
+        "--fixture",
+        action="append",
+        help="Compare only this named fixture; repeat to select more, in manifest order",
+    )
     parser.add_argument(
         "--runtime-preload",
         type=Path,

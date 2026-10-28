@@ -23,6 +23,7 @@ from executorch.examples.models.llama.norm import RMSNorm
 from executorch.examples.models.llama.rope import Rope
 from examples.musa.aoti_qwen35_compare import (
     compare_distributions,
+    select_fixtures,
     select_input_token,
     summarize_comparison,
 )
@@ -35,6 +36,19 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_fixture_selection_preserves_references_and_manifest_order(self):
+        fixtures = [{"name": name} for name in ("trust", "fairness", "context_limit")]
+        self.assertIs(select_fixtures(fixtures, None), fixtures)
+        selected = select_fixtures(fixtures, ["context_limit", "trust"])
+        self.assertEqual(selected, [fixtures[0], fixtures[2]])
+        self.assertIs(selected[0], fixtures[0])
+        self.assertEqual(len(fixtures), 3)
+        for requested in (["missing"], ["trust", "trust"]):
+            with self.assertRaises(ValueError):
+                select_fixtures(fixtures, requested)
+        with self.assertRaises(ValueError):
+            select_fixtures([fixtures[0], fixtures[0]], ["trust"])
+
     def test_bf16_decode_preserves_all_finite_bit_patterns(self):
         words = [value for value in range(65536) if value & 0x7F80 != 0x7F80]
         words = (words * (VOCAB_SIZE // len(words) + 1))[:VOCAB_SIZE]
