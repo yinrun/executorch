@@ -187,6 +187,42 @@ TEST_F(
   }
 }
 
+TEST_F(MusaCausalAttentionTest, OffsetKVStoragePreservesPrefixAndBackingStorage) {
+  for (int64_t capacity : {64, 128, 256}) {
+    for (int64_t offset : {1, 3, 7}) {
+      SCOPED_TRACE(capacity);
+      SCOPED_TRACE(offset);
+      Inputs inputs(capacity);
+      auto key_storage = tensor({8 * capacity * 256 + 16});
+      auto value_storage = tensor({8 * capacity * 256 + 16});
+      ASSERT_EQ(
+          musaMemset(key_storage.data_ptr(), 0x5A, key_storage.nbytes()),
+          musaSuccess);
+      ASSERT_EQ(
+          musaMemset(value_storage.data_ptr(), 0x5A, value_storage.nbytes()),
+          musaSuccess);
+      inputs.key = key_storage.as_strided(
+          {1, 8, capacity, 256},
+          {8 * capacity * 256, capacity * 256, 256, 1},
+          offset);
+      inputs.value = value_storage.as_strided(
+          {1, 8, capacity, 256},
+          {8 * capacity * 256, capacity * 256, 256, 1},
+          offset + 1);
+      for (int64_t length : {int64_t{1}, int64_t{3}, capacity - 1, capacity}) {
+        SCOPED_TRACE(length);
+        inputs.set_length(length);
+        const auto original_key = bytes(key_storage);
+        const auto original_value = bytes(value_storage);
+        ASSERT_EQ(inputs.run(), Error::Ok);
+        inputs.expect_result(length);
+        EXPECT_EQ(bytes(key_storage), original_key);
+        EXPECT_EQ(bytes(value_storage), original_value);
+      }
+    }
+  }
+}
+
 TEST_F(MusaCausalAttentionTest, InvalidPositionsAndMasksLeaveOutputUntouched) {
   Inputs inputs;
   ASSERT_EQ(
