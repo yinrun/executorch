@@ -114,6 +114,14 @@ outputs are byte-identical and the native-library audit passes. This is an
 isolated accuracy experiment, not a default-backend promotion, free-running
 generation acceptance, or performance result.
 
+The reduction candidate's first evidence-fixture divergence is at position 7,
+layer 19 (zero-based). An eight-step trace matches uninstrumented logits.
+At that position, Q/K/V, gates, and KV caches agree exactly; SDPA context has
+one differing BF16 element out of 2048, with maximum error `0.0009765625`.
+The earlier seven steps match at every inspected block stage. QK, softmax,
+and PV still require same-input isolation; this does not establish a cache
+bug or a softmax root cause.
+
 For longer BF16 diagnostics against official Transformers and converted
 ExecuTorch eager references, use the separate teacher-forced comparator:
 
