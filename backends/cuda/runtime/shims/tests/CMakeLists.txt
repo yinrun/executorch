@@ -69,6 +69,7 @@ if(EXECUTORCH_BUILD_MUSA)
     test_musa_batch_norm
     test_musa_activation
     test_musa_causal_attention
+    test_musa_reduce
     test_musa_allocator
   )
 endif()

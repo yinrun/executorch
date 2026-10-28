@@ -19,6 +19,10 @@ from executorch.backends.aoti.aoti_backend import AotiBackend
 from executorch.backends.musa.causal_attention import (
     HEADER as _MUSA_CAUSAL_ATTENTION_HEADER,
 )
+from executorch.backends.musa.reduction import (
+    HEADER as _MUSA_REDUCTION_HEADER,
+    replace_reductions as _replace_musa_reductions,
+)
 from executorch.backends.cuda.cuda_weight_collector import (
     AOTI_DEVICE_TYPE_CPU,
     SERIALIZED_DEVICE_TYPE_MUSA,
@@ -643,6 +647,7 @@ def _musa_aoti_compile_context():
             self.header.splice(f'#include "{_MUSA_ACTIVATION_HEADER}"')
             self.header.splice(f'#include "{_MUSA_CONVOLUTION_HEADER}"')
             self.header.splice(f'#include "{_MUSA_CAUSAL_ATTENTION_HEADER}"')
+            self.header.splice(f'#include "{_MUSA_REDUCTION_HEADER}"')
 
     def alloc_from_pool_without_expansion(self, name, offset, dtype, shape, stride):
         if "musa" not in self.get_codegened_graph().device_types:
@@ -816,6 +821,8 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_exp_out": None,
             "aoti_torch_musa_softplus_out": None,
             "aoti_torch_musa_causal_attention_out": None,
+            "aoti_torch_musa_reduce_out": None,
+            "aoti_torch_musa_bf16_sum_out": None,
         }
 
     @classmethod
@@ -856,6 +863,7 @@ class MusaBackend(AotiBackend, BackendDetails):
         return [
             _normalize_musa_assert_devices,
             _make_musa_addmm_inputs_contiguous,
+            _replace_musa_reductions,
         ]
 
     @classmethod
