@@ -67,11 +67,32 @@ class Qwen35MusaSDPA(SDPA):
         return output.transpose(1, 2).reshape(batch_size, sequence_length, self.dim)
 
 
-def load_model(checkpoint_dir: Path, context_length: int, dtype: torch.dtype):
+class Qwen35MusaValidLengthSDPA(SDPA):
+    def forward(self, input_pos, query, key, value, batch_size, sequence_length, mask):
+        from executorch.backends.musa.causal_attention import CAUSAL_ATTENTION
+
+        torch._check(batch_size == sequence_length == 1)
+        key = key.repeat_interleave(self.n_rep, dim=1)
+        value = value.repeat_interleave(self.n_rep, dim=1)
+        output = CAUSAL_ATTENTION(query, key, value, input_pos, mask)
+        return output.transpose(1, 2).reshape(batch_size, sequence_length, self.dim)
+
+
+def load_model(
+    checkpoint_dir: Path,
+    context_length: int,
+    dtype: torch.dtype,
+    *,
+    valid_length_attention: bool = False,
+):
     if context_length < 2:
         raise ValueError("Context length must be at least two")
     if dtype not in (torch.float32, torch.bfloat16):
         raise ValueError("Qwen3.5 bring-up supports fp32 or bf16")
+    if valid_length_attention and (
+        dtype != torch.bfloat16 or context_length not in (64, 128, 256)
+    ):
+        raise ValueError("Valid-length attention requires BF16 and context 64/128/256")
     upstream = json.loads((checkpoint_dir / "config.json").read_text())["text_config"]
     params = json.loads(
         (
@@ -138,7 +159,10 @@ def load_model(checkpoint_dir: Path, context_length: int, dtype: torch.dtype):
             layer.attention.recurrent_state = layer.attention.recurrent_state.float()
         elif dtype == torch.bfloat16 and isinstance(layer.attention, AttentionMHA):
             previous = layer.attention.SDPA
-            layer.attention.SDPA = Qwen35MusaSDPA(
+            attention_class = (
+                Qwen35MusaValidLengthSDPA if valid_length_attention else Qwen35MusaSDPA
+            )
+            layer.attention.SDPA = attention_class(
                 previous.dim,
                 previous.head_dim,
                 previous.n_rep,
@@ -156,7 +180,13 @@ def load_model(checkpoint_dir: Path, context_length: int, dtype: torch.dtype):
 @torch.no_grad()
 def export_model(args, report):
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
-    model = load_model(args.checkpoint_dir, args.context_length, dtype)
+    model = load_model(
+        args.checkpoint_dir, args.context_length, dtype,
+        valid_length_attention=args.valid_length_attention,
+    )
+    report["attention_path"] = (
+        "bf16_valid_length_causal" if args.valid_length_attention else "padded"
+    )
     if args.fuse_projections:
         from examples.musa.aoti_qwen35_fusion import (
             FUSION_NAME,
@@ -298,6 +328,11 @@ def main():
     parser.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--context-length", type=int, default=64)
     parser.add_argument(
+        "--valid-length-attention",
+        action="store_true",
+        help="Opt into BF16 causal attention computed on the runtime KV prefix",
+    )
+    parser.add_argument(
         "--fuse-projections",
         action="store_true",
         help="Opt into single-token BF16 FFN and GDN projection fusion (contexts 64/128/256)",
@@ -312,6 +347,10 @@ def main():
     inputs.add_argument("--prompt")
     parser.add_argument("--generate-tokens", type=int, default=16)
     args = parser.parse_args()
+    if args.valid_length_attention and (
+        args.dtype != "bf16" or args.context_length not in (64, 128, 256)
+    ):
+        parser.error("Valid-length attention requires bf16 and context 64/128/256")
     if args.fuse_projections and (
         args.dtype != "bf16" or args.context_length not in (64, 128, 256)
     ):

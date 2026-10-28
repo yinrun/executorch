@@ -2,6 +2,21 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Valid-length attention implementation (2026-10-29, experimental):**
+`--valid-length-attention` opts into an exportable opaque MUSA operator for
+BF16, batch-one, single-token Qwen attention with context 64/128/256. Runtime
+position and the causal mask select a packed valid KV prefix before QK/PV;
+the BF16 QK, separate scaling, FP32 accurate softmax and BF16 PV boundaries
+remain explicit. Native execution validates storage bounds, output aliasing,
+device, geometry and causal-prefix controls. It reads only position/mask on
+the host; model tensor arithmetic stays on MUSA. Each attention call currently
+synchronizes the stream for those controls, so this is not a graph-capture
+or performance acceptance. The option defaults off. Full-model integration
+still needs the isolated BF16-sum and FP32-reduction passes; standalone
+operator support alone does not make the full Qwen export source-only.
+The full-model regression results are recorded separately from the original
+counterexample below; do not infer acceptance from the operator implementation.
+
 **Fresh-input counterexample (2026-10-29): accuracy is not generally accepted.**
 Four new qualitative prompts produce 836 independent HF BF16 reference steps;
 fused ET eager matches only 669 byte-for-byte. The Chinese causal-evidence prompt

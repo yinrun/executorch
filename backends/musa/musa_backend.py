@@ -16,6 +16,9 @@ from typing import Any, Dict, List
 import torch
 from torch._inductor import ir, lowering
 from executorch.backends.aoti.aoti_backend import AotiBackend
+from executorch.backends.musa.causal_attention import (
+    HEADER as _MUSA_CAUSAL_ATTENTION_HEADER,
+)
 from executorch.backends.cuda.cuda_weight_collector import (
     AOTI_DEVICE_TYPE_CPU,
     SERIALIZED_DEVICE_TYPE_MUSA,
@@ -175,12 +178,8 @@ except AttributeError:
 
 _MUSA_BATCH_NORM_HEADER = os.path.abspath(
     os.path.join(
-        os.path.dirname(__file__),
+        os.path.dirname(os.path.realpath(__file__)),
         "..",
-        "..",
-        "..",
-        "..",
-        "backends",
         "cuda",
         "runtime",
         "shims",
@@ -643,6 +642,7 @@ def _musa_aoti_compile_context():
             self.header.splice(f'#include "{_MUSA_BATCH_NORM_HEADER}"')
             self.header.splice(f'#include "{_MUSA_ACTIVATION_HEADER}"')
             self.header.splice(f'#include "{_MUSA_CONVOLUTION_HEADER}"')
+            self.header.splice(f'#include "{_MUSA_CAUSAL_ATTENTION_HEADER}"')
 
     def alloc_from_pool_without_expansion(self, name, offset, dtype, shape, stride):
         if "musa" not in self.get_codegened_graph().device_types:
@@ -815,6 +815,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_hardsigmoid_out": None,
             "aoti_torch_musa_exp_out": None,
             "aoti_torch_musa_softplus_out": None,
+            "aoti_torch_musa_causal_attention_out": None,
         }
 
     @classmethod

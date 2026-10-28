@@ -276,7 +276,7 @@ endif()
 if(EXECUTORCH_BUILD_MUSA)
   list(APPEND _aoti_cuda_shim_sources runtime/shims/musa_addmm.cpp
        runtime/shims/musa_convolution.cpp runtime/shims/musa_batch_norm.cpp
-       runtime/shims/musa_activation.cpp
+       runtime/shims/musa_activation.cpp runtime/shims/musa_causal_attention.cpp
   )
   find_library(MUSA_MUDNN_LIBRARY mudnn HINTS ${MUSAToolkit_LIBRARY_DIR} REQUIRED)
   find_library(MUSA_MUDNN_CXX_LIBRARY mudnncxx
@@ -514,7 +514,8 @@ if(BUILD_TESTING)
 
   if(EXECUTORCH_BUILD_MUSA)
     foreach(
-      _musa_test addmm convolution batch_norm activation device storage allocator
+      _musa_test addmm convolution batch_norm activation causal_attention device
+      storage allocator
     )
       et_cxx_test(
         test_musa_${_musa_test} SOURCES
