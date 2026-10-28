@@ -2,12 +2,35 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Projection-fusion candidate validation (2026-10-29):** an isolated prototype
+combines FFN gate/up and the separate GDN qkv/z and b/a pairs, retaining the
+original full-attention projections. Three separately exported BF16 packages
+pass 1780/1780 (context 64), 936/936 (128), and 1484/1484 (256) full-vocabulary
+native/HF byte comparisons. All 2100 reset checks and 18 explicit EOS stops pass;
+separately executed fused eager matches all 2100 reference positions. These are
+repeated calls over frozen reference trajectories, not 4200 independent prompts.
+The native comparisons retain all 248320 logits, GPU greedy feedback except for
+the legacy fixed trajectory, and native-only library/cache teardown checks.
+
+The projection probe rejects GDN-all and full-attention QKV/KV fusion: they
+introduce BF16 differences up to 0.001953125 and 0.0078125 respectively. Matching
+selected projection outputs alone is not a whole-model acceptance. The accepted
+grouping is still an artifact prototype, not a default backend feature or a
+batched-prefill/arbitrary-context guarantee. No deployment package is promoted.
+The local `precision-fused-projections-audit-v1.json` rechecks saved native,
+fused-eager, HF, and prior unfused-native tensors; details and reproduction are
+in the workspace report `QWEN35_PROJECTION_FUSION.md`.
+
 Use `aoti_qwen35_compare.py --require-byte-equal` for strict native/HF
 full-vocabulary acceptance. It checks every session, including prompt and reset
 calls, and exits unsuccessfully on any differing byte while preserving the
 per-step diagnostics in `result.json`. Without this flag, comparison completion
 is diagnostic only: matching tokens or passing the legacy tolerance is not
 byte-identical acceptance. Neither mode marks the entire runtime validated.
+All 25 Qwen Python tests pass. A real-runner negative control changes one BF16
+reference logit bit in a separate synthetic fixture: token IDs and the old
+tolerance still pass, but strict byte acceptance correctly fails and saves the
+first differing session/fixture/position. Official references are not modified.
 
 **Latest context validation (2026-10-29):** independently exported context-128
 and context-256 candidates retain one MUSA delegate, all 48 mutable states, full
