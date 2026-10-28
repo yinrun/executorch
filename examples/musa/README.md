@@ -245,6 +245,22 @@ at normal teardown. `--server_timing` additionally emits per-step
 interposer is needed. Graph capture, dynamic library unloading, and untested
 multi-device hardware are outside this opt-in validation scope.
 
+On the local shared M1000, the byte-exact BF16 sum candidate was measured in
+six fresh processes ordered off/on/on/off/off/on. Each process used one warmup
+and five measured fridge sequences (27 serial prompt calls, 15 decode calls).
+All 1512 full-vocabulary outputs match HF. Across 15 measured sequences per
+mode, decode median increases from 5.848 to 8.456 tokens/s (1.446x); mean host
+method time falls from 125.565 to 74.871 ms. Python readback/argmax still costs
+42.273 ms, approximately 35.4% of cache-on decode wall time. These are file-server
+measurements, not batched prefill or pure GPU throughput, and do not replace
+the independent numerical acceptance gate.
+
+A separate 21-sequence fairness process checks 1344 outputs exactly, resetting
+at position zero every 64 steps. Tracked allocations plateau at 206 after five
+sequences, RSS stays constant, cached memory peaks at 6060632 bytes, and all
+cache/live counters are zero at exit. This is finite-duration fixed-shape
+evidence, not a claim of arbitrary long-context or leak-free service operation.
+
 The reference manifest must have `status="complete"`, `dtype="bf16"`, and a
 nonempty `fixtures` list. Each fixture contains `name`, `token_ids`,
 `prompt_token_count`, and `hashes` mapping tensor filenames to SHA256 values.
