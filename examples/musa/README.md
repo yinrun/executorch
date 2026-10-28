@@ -14,10 +14,22 @@ synchronizes the stream for those controls, so this is not a graph-capture
 or performance acceptance. The option defaults off. Full-model integration
 still needs the isolated BF16-sum and FP32-reduction passes; standalone
 operator support alone does not make the full Qwen export source-only.
-The full-model regression results are recorded separately from the original
-counterexample below; do not infer acceptance from the operator implementation.
+Fresh source-path eager replay now matches all 836 frozen HF rows. Three newly
+exported context-64/128/256 packages pass 5872/5872 full-vocabulary BF16 native/HF
+byte comparisons, 2936 reset checks and 20 EOS stops across seven suites. Except
+for the legacy fixed trajectory, these use native greedy feedback. The fresh
+four prompts alone contribute 1672 native calls, including the former Chinese
+counterexample. The 2100 older fused-eager files are rehashed, not rerun.
+Fifty Python regressions, three native attention rounds (8 pass and one explicit
+dual-device skip each), and 62 same-input operator comparisons pass. A real
+runner negative control with one perturbed BF16 reference value is rejected
+despite satisfying the older tolerance. Independent auditing checks 12795
+files, full logits, tokens, runtime isolation and zero exit cache/live counters.
+These are finite-workload results, not arbitrary-input bitwise guarantees;
+no default deployment is promoted. See workspace `QWEN35_VALID_ATTENTION.md`
+and `precision-valid-attention-audit-v1.json` for the frozen evidence.
 
-**Fresh-input counterexample (2026-10-29): accuracy is not generally accepted.**
+**Original padded-attention counterexample (2026-10-29, before this fix):**
 Four new qualitative prompts produce 836 independent HF BF16 reference steps;
 fused ET eager matches only 669 byte-for-byte. The Chinese causal-evidence prompt
 first differs at zero-based position 89, with a worst full-logit error of 0.40625
@@ -34,9 +46,9 @@ of the Chinese case to byte equality. It reads `input_pos.item()` on the host,
 so this is not an exportable or native deployment fix, nor a rerun of the other
 three prompts under that experimental path.
 The older 4200-call results below remain valid for their frozen inputs, not an
-unrestricted input guarantee. A deployable valid-length attention path still
-requires implementation, export and regression validation; no default package
-promotion or new performance acceptance is claimed.
+unrestricted input guarantee. The opt-in valid-length path above now provides
+an exported/native fix for these fixtures; the default padded path has not
+been promoted as accurate for them.
 
 Generate fresh, independent HF/MUSA BF16 greedy references instead of replaying
 an existing trajectory:
