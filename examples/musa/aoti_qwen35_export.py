@@ -15,7 +15,11 @@ from executorch.backends.musa import (
     MusaPartitioner,
     export_with_musa_sdpa_decomposition,
 )
-from executorch.examples.models.llama.attention import AttentionGatedDeltaNet
+from executorch.examples.models.llama.attention import (
+    AttentionGatedDeltaNet,
+    AttentionMHA,
+    SDPA,
+)
 from executorch.examples.models.llama.llama_transformer import construct_transformer
 from executorch.examples.models.llama.model_args import ModelArgs
 from executorch.examples.models.qwen3_5.convert_weights import (
@@ -28,6 +32,23 @@ from examples.musa.aoti_model_acceptance import _serialization_schema, _write_te
 
 
 STATE_SUFFIXES = ("conv_state", "recurrent_state", "k_cache", "v_cache")
+
+
+class Qwen35MusaSDPA(SDPA):
+    def forward(self, input_pos, query, key, value, batch_size, sequence_length, mask):
+        key = key.repeat_interleave(self.n_rep, dim=1)
+        value = value.repeat_interleave(self.n_rep, dim=1)
+        scores = torch.matmul(query, key.transpose(-2, -1))
+        scores = scores * (self.head_dim**-0.5)
+        if mask is not None:
+            scores = (
+                scores.masked_fill(~mask, float("-inf"))
+                if mask.dtype == torch.bool
+                else scores + mask
+            )
+        probabilities = torch.softmax(scores.float(), dim=-1).to(query.dtype)
+        output = torch.matmul(probabilities, value)
+        return output.transpose(1, 2).reshape(batch_size, sequence_length, self.dim)
 
 
 def load_model(checkpoint_dir: Path, context_length: int, dtype: torch.dtype):
@@ -99,6 +120,14 @@ def load_model(checkpoint_dir: Path, context_length: int, dtype: torch.dtype):
     for layer in model.layers:
         if isinstance(layer.attention, AttentionGatedDeltaNet):
             layer.attention.recurrent_state = layer.attention.recurrent_state.float()
+        elif dtype == torch.bfloat16 and isinstance(layer.attention, AttentionMHA):
+            previous = layer.attention.SDPA
+            layer.attention.SDPA = Qwen35MusaSDPA(
+                previous.dim,
+                previous.head_dim,
+                previous.n_rep,
+                previous.max_context_len,
+            ).eval()
     del weights
     gc.collect()
     if any(value.device.type != "musa" for value in model.parameters()):

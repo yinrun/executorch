@@ -20,6 +20,16 @@ would use different inputs. The earlier 91-step result is not broad acceptance.
 Opt-in host timing and faster BF16 logit decoding are available independently
 of this unresolved numerical issue; no default model package is promoted.
 
+The converted eager discrepancy is now fixed for this suite. At trust position
+43, layer 7, identical Q/K/V produce eight different BF16 context elements with
+MUSA SDPA versus HF's explicit attention; cropping the cache does not fix it.
+Qwen BF16 loading now installs a model-local `Qwen35MusaSDPA` that preserves
+BF16 QK/scale/mask and probability rounding with FP32 softmax. It does not
+monkey-patch global SDPA or change FP32 loading. All 283 old and new reference
+steps then match unchanged official HF logits byte-for-byte; 20 Python tests
+pass. The existing native package still diverges earlier, at trust position
+39 in layer 11, so this eager fix does not establish native acceptance.
+
 Export a local Hugging Face checkpoint with the existing ExecuTorch Qwen3.5
 weight converter and a single MUSA delegate:
 

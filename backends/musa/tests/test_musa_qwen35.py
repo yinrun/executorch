@@ -228,6 +228,37 @@ class TestQwen35LogitValidation(unittest.TestCase):
 
 @unittest.skipUnless(MUSA_AVAILABLE, "MUSA is not available")
 class TestMusaQwen35(unittest.TestCase):
+    def test_qwen_sdpa_preserves_hf_bf16_rounding(self):
+        from examples.musa.aoti_qwen35_export import Qwen35MusaSDPA
+
+        generator = torch.Generator().manual_seed(42)
+        query = torch.randn(1, 8, 1, 256, generator=generator).to(
+            device="musa", dtype=torch.bfloat16
+        )
+        key = torch.randn(1, 2, 64, 256, generator=generator).to(
+            device="musa", dtype=torch.bfloat16
+        )
+        value = torch.randn(1, 2, 64, 256, generator=generator).to(
+            device="musa", dtype=torch.bfloat16
+        )
+        attention = Qwen35MusaSDPA(2048, 256, 4, 64)
+        position = torch.tensor([43], device="musa")
+        boolean_mask = torch.arange(64, device="musa").unsqueeze(0) <= 43
+        additive_mask = torch.zeros(1, 64, device="musa", dtype=torch.bfloat16)
+        additive_mask.masked_fill_(~boolean_mask, float("-inf"))
+        for mask in (boolean_mask, additive_mask):
+            scores = query @ key.repeat_interleave(4, dim=1).transpose(-2, -1)
+            scores = scores * (256**-0.5)
+            scores = scores + additive_mask
+            probabilities = torch.softmax(scores.float(), dim=-1).to(torch.bfloat16)
+            expected = (
+                (probabilities @ value.repeat_interleave(4, dim=1))
+                .transpose(1, 2)
+                .reshape(1, 1, 2048)
+            )
+            actual = attention(position, query, key, value, 1, 1, mask)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     @torch.no_grad()
     def test_hf_reference_preserves_fp32_rope(self):
         try:
