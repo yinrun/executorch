@@ -1,0 +1,18 @@
+[
+  {
+    "name": "zh_evidence_revision",
+    "prompt": "某团队发现修改流程后投诉减少，于是认定新流程改善了服务。但负责接收投诉的入口也同时变得不容易找到，而且沉默的用户可能已经离开。请区分观察事实与因果推断，提出能够反驳原结论的证据，并说明怎样在不预设结论的情况下重新调查。不要做数值计算。"
+  },
+  {
+    "name": "en_confidentiality_long",
+    "prompt": "A volunteer mediation group promises confidentiality so that residents can speak honestly. A resident then describes a possible safety concern but asks the group not to share any identifying details. Another resident says that keeping any information private is unfair to the community. The evidence is incomplete, and an accusation could damage an innocent person's reputation. The group must decide how to investigate while respecting both safety and trust. Explain how it should separate facts from assumptions, decide what information is necessary to disclose, protect people from retaliation, and revise its decision when new evidence appears. Consider why treating confidentiality as absolute and treating disclosure as automatically fair can both be mistaken. Give a careful qualitative analysis rather than a numerical risk estimate."
+  },
+  {
+    "name": "en_counterfactual_cause",
+    "prompt": "A plant recovered after its owner moved it away from a window and changed how it was watered. The owner concludes that sunlight was the problem. Is that conclusion justified? Explain the competing causal explanations and describe an observation that could help distinguish them, without using numerical examples."
+  },
+  {
+    "name": "en_pronoun_uncertainty",
+    "prompt": "Morgan told Riley that their explanation was misleading. Does the sentence establish whose explanation was misleading? Answer briefly without inventing context."
+  }
+]

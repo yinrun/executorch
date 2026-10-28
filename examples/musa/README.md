@@ -2,6 +2,27 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+Generate fresh, independent HF/MUSA BF16 greedy references instead of replaying
+an existing trajectory:
+
+```bash
+MUSA_LAUNCH_BLOCKING=1 "$PYTHON" -m examples.musa.aoti_qwen35_generate_reference \
+  --checkpoint-dir /path/to/Qwen3.5-0.8B \
+  --prompts examples/musa/qwen35_precision_prompts.json \
+  --context-length 256 --fuse-projections --output-dir /tmp/qwen35-fresh-reference
+```
+
+The JSON input is a nonempty list of unique `name` and nonempty `prompt` pairs.
+HF generates until EOS or the context limit; ET eager replays those exact inputs
+and checks every BF16 vocabulary value, optionally with source projection fusion.
+The manifest records checkpoint/prompt hashes, FP32 RoPE buffer dtypes, stopping
+reasons, token IDs, and eager byte-equality counts. Generation refuses to overwrite
+an output directory and exits unsuccessfully if eager differs, while retaining
+the reference and diagnostics. Use the existing comparison tool with
+`--free-running --gpu-greedy --require-byte-equal`, matching export metadata,
+and two or more repeats to validate native feedback and reset behavior. These
+are single-sequence, token-by-token inputs, not batched prefill or quality scores.
+
 **Native unary integration (2026-10-29, `11e0b6ab59`):** FP32 MUSA exp and
 default softplus now use source-registered custom ops, decompositions, lowering,
 and muDNN out shims. Other dtypes/softplus parameters retain refs decomposition;
