@@ -2,6 +2,31 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Native unary integration (2026-10-29, `11e0b6ab59`):** FP32 MUSA exp and
+default softplus now use source-registered custom ops, decompositions, lowering,
+and muDNN out shims. Other dtypes/softplus parameters retain refs decomposition;
+promoted FP32 exp subexpressions can use the native path while final dtype is
+preserved. Unary execution now checks physical storage spans and aliases and
+guards the calling device before allocation/copies/handle creation. Outputs
+must be contiguous and disjoint from inputs; transpose, offset, broadcast,
+scalar, and empty inputs are covered. This does not change BF16 model weights
+or logits into an FP32 model.
+
+All 100 Python regressions pass, including dynamic standalone runner and
+relocated-package checks. Each of three fresh native rounds passes 11 unary
+and 30 matrix tests; the additional two-device test is explicitly skipped on
+the single-device host. A same-input FP32 shim probe matches all 48 outputs
+byte-for-byte, including special values and threshold/underflow boundaries.
+
+Three fresh source-unary context-64/128/256 packages retain 4200/4200 complete
+BF16 native/HF byte matches, 2100 reset checks, and 18 EOS stops. The independent
+`precision-unary-integration-audit-v1.json` rehashes saved outputs, source and
+package metadata, GPU tokens, runtime libraries, and drained caches. The old
+unary registration/decomposition wrapper is no longer used. SDPA rounding,
+reductions, accurate softmax, and QK-view candidates still require integration;
+no default package or new performance result is promoted. See the workspace
+report `QWEN35_UNARY_INTEGRATION.md`.
+
 **Matrix integration (2026-10-29, `1dbca8613f`):** the BF16 contiguous
 single-row MM/addmm muDNN path is now in source, with storage-span and output
 alias checks and explicit empty-product handling. Output/multiplicand overlap
@@ -20,8 +45,9 @@ Replacing only the matrix object in the accepted isolated runtime retains
 library isolation, hashes, and zero cache/live counters at teardown. These
 are fresh calls over frozen trajectories, not new independent questions.
 The 2100 prior fused-eager outputs were rehashed, not rerun; 37 supported
-Python tests were rerun successfully. The remaining exp/softplus, reductions,
-softmax, and QK-view integration is still pending. No default deployment package
+Python tests were rerun successfully. That matrix-only milestone preceded the
+unary integration above; SDPA, reductions, softmax, and QK views remain pending.
+No default deployment package
 is promoted and no new performance measurement is claimed. See the workspace
 report `QWEN35_MATRIX_INTEGRATION.md` for the separate standard-CMake and
 combined-runtime artifacts.
@@ -50,8 +76,8 @@ All 32 MUSA Qwen tests and five existing attention regressions pass. A broader
 lacks `executorch.extension.pybindings._C`; its import failure is retained,
 not reported as a passing or intentionally skipped numerical test.
 
-This source integration does not yet make the experimental native math/layout
-paths a default backend feature. Other newly compiled packages still require
+This projection integration does not complete all native math/layout paths.
+Other newly compiled packages still require
 their own validation; the prototype measurements below are historical evidence,
 not a substitute for source-package acceptance. The seven new fusion tests cover
 state/reset and parameter identity, exported buffer mutation, nonzero offsets, input/layout and
