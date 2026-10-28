@@ -2,6 +2,22 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+The exporter now has a default-off `--fuse-projections` option for BF16,
+batch-one single-token inference at context 64/128/256. It concatenates FFN
+gate/up, GDN qkv/z, and GDN b/a weights; full-attention projections are unchanged.
+The model-local implementation reuses GDN's shared post-projection computation,
+preserves tied embedding/output weights and mutable states, and validates all
+layers before replacement. Training, unsupported input shapes/layouts, biased
+or non-BF16 projections, and unsupported context capacities are rejected.
+Fusion is applied after checkpoint loading, not to the on-disk checkpoint.
+
+This source integration does not yet make the experimental native math/layout
+paths a default backend feature. Fresh packages must be exported and validated
+with this option; the prototype measurements below are not automatically proof
+for a newly compiled package. The seven new fusion tests cover state/reset and
+parameter identity, exported buffer mutation, nonzero offsets, input/layout and
+weight rejection, preflight non-mutation, and the default-off CLI.
+
 **Projection-fusion candidate validation (2026-10-29):** an isolated prototype
 combines FFN gate/up and the separate GDN qkv/z and b/a pairs, retaining the
 original full-attention projections. Three separately exported BF16 packages

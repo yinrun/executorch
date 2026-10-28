@@ -157,6 +157,14 @@ def load_model(checkpoint_dir: Path, context_length: int, dtype: torch.dtype):
 def export_model(args, report):
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
     model = load_model(args.checkpoint_dir, args.context_length, dtype)
+    if args.fuse_projections:
+        from examples.musa.aoti_qwen35_fusion import (
+            FUSION_NAME,
+            fuse_qwen35_projections,
+        )
+
+        model = fuse_qwen35_projections(model)
+        report["projection_fusion"] = FUSION_NAME
     report["parameters"] = sum(value.numel() for value in model.parameters())
     report["checkpoint_hashes"] = {}
     for path in sorted(args.checkpoint_dir.iterdir()):
@@ -290,6 +298,11 @@ def main():
     parser.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--context-length", type=int, default=64)
     parser.add_argument(
+        "--fuse-projections",
+        action="store_true",
+        help="Opt into single-token BF16 FFN and GDN projection fusion (contexts 64/128/256)",
+    )
+    parser.add_argument(
         "--emit-greedy-token",
         action="store_true",
         help="Return GPU-computed greedy token as output 1 while retaining full logits",
@@ -299,6 +312,10 @@ def main():
     inputs.add_argument("--prompt")
     parser.add_argument("--generate-tokens", type=int, default=16)
     args = parser.parse_args()
+    if args.fuse_projections and (
+        args.dtype != "bf16" or args.context_length not in (64, 128, 256)
+    ):
+        parser.error("Projection fusion requires bf16 and context length 64, 128 or 256")
     if not args.token_ids or len(args.token_ids) > args.context_length:
         parser.error("Reference tokens must fit the context length")
     if any(token < 0 or token >= 248320 for token in args.token_ids):

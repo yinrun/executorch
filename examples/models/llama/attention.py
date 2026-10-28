@@ -940,6 +940,16 @@ class AttentionGatedDeltaNet(Attention):
         b = self.in_proj_b(x)
         a = self.in_proj_a(x)
 
+        return self._forward_projected(mixed_qkv, z, b, a)
+
+    def _forward_projected(
+        self,
+        mixed_qkv: torch.Tensor,
+        gate: torch.Tensor,
+        beta_input: torch.Tensor,
+        decay_input: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[Any]]:
+        batch_size, seq_len, _ = mixed_qkv.shape
         mixed_qkv = self._apply_causal_conv(mixed_qkv)
         query, key, value = torch.split(
             mixed_qkv,
@@ -954,13 +964,15 @@ class AttentionGatedDeltaNet(Attention):
             query = query.repeat_interleave(self.head_repeat, dim=2)
             key = key.repeat_interleave(self.head_repeat, dim=2)
 
-        beta = b.sigmoid()
-        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
-        core_attn_out = self._recurrent_gated_delta_rule(query, key, value, g, beta)
+        beta = beta_input.sigmoid()
+        decay = -self.A_log.float().exp() * F.softplus(
+            decay_input.float() + self.dt_bias
+        )
+        core_attn_out = self._recurrent_gated_delta_rule(query, key, value, decay, beta)
 
         core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
-        z = z.reshape(-1, self.head_v_dim)
-        core_attn_out = self.norm(core_attn_out, z)
+        gate = gate.reshape(-1, self.head_v_dim)
+        core_attn_out = self.norm(core_attn_out, gate)
         core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
 
         return self.out_proj(core_attn_out), None
