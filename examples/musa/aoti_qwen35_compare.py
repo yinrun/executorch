@@ -479,6 +479,11 @@ def main():
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument(
+        "--require-byte-equal",
+        action="store_true",
+        help="Fail after saving diagnostics if any full-vocabulary native/HF logits differ",
+    )
+    parser.add_argument(
         "--gpu-greedy",
         action="store_true",
         help="Validate and feed back the GPU int64 token in output 1",
@@ -522,10 +527,30 @@ def main():
         "teacher_forced": not args.free_running,
         "sampling": "native_gpu_argmax" if args.gpu_greedy else "controller_argmax",
         "runtime_validated": False,
+        "require_byte_equal": args.require_byte_equal,
         "steps": [],
     }
     try:
         compare(args, report)
+        report["all_logits_byte_equal"] = bool(report["steps"]) and all(
+            row["native_vs_hf"]["byte_equal"] for row in report["steps"]
+        )
+        if args.require_byte_equal and not report["all_logits_byte_equal"]:
+            first = next(
+                (
+                    row
+                    for row in report["steps"]
+                    if not row["native_vs_hf"]["byte_equal"]
+                ),
+                None,
+            )
+            location = (
+                f"session={first['session']} fixture={first['fixture']} "
+                f"position={first['position']}"
+                if first is not None
+                else "no comparisons recorded"
+            )
+            raise AssertionError(f"Exact native/HF logit acceptance failed: {location}")
     except BaseException as error:
         report.update(status="failed", error=repr(error))
         raise

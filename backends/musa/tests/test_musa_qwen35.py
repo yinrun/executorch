@@ -21,6 +21,7 @@ from executorch.examples.models.llama import attention
 from executorch.examples.models.llama.model_args import ModelArgs
 from executorch.examples.models.llama.norm import RMSNorm
 from executorch.examples.models.llama.rope import Rope
+from examples.musa import aoti_qwen35_compare as qwen35_compare
 from examples.musa.aoti_qwen35_compare import (
     compare_distributions,
     musa_cache_arguments,
@@ -42,6 +43,63 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_exact_comparison_cli_preserves_diagnostics_and_checks_every_session(self):
+        exact = {
+            "session": 0,
+            "fixture": "example",
+            "position": 0,
+            "native_vs_hf": {
+                "byte_equal": True,
+                "outside_legacy_tolerance": 0,
+                "predicted_token": 1,
+                "reference_token": 1,
+            },
+        }
+        different = {
+            **exact,
+            "session": 1,
+            "native_vs_hf": {**exact["native_vs_hf"], "byte_equal": False},
+        }
+        for strict, steps, passes in (
+            (True, [exact], True),
+            (True, [exact, different], False),
+            (True, [], False),
+            (False, [exact, different], True),
+        ):
+            with (
+                self.subTest(strict=strict, steps=steps),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                output = Path(directory) / "output"
+                arguments = ["compare"]
+                for name in ("references", "pte", "ptd", "runner"):
+                    arguments.extend([f"--{name}", str(Path(directory) / name)])
+                arguments.extend(["--output-dir", str(output)])
+                if strict:
+                    arguments.append("--require-byte-equal")
+
+                def completed_comparison(args, report):
+                    report.update(status="comparison_complete", steps=steps)
+
+                with mock.patch("sys.argv", arguments), mock.patch.object(
+                    qwen35_compare, "compare", side_effect=completed_comparison
+                ):
+                    if passes:
+                        qwen35_compare.main()
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "Exact native/HF"):
+                            qwen35_compare.main()
+                result = json.loads((output / "result.json").read_text())
+                self.assertEqual(result["require_byte_equal"], strict)
+                self.assertEqual(result["steps"], steps)
+                self.assertEqual(result["runtime_validated"], False)
+                self.assertEqual(result["all_logits_byte_equal"], steps == [exact])
+                self.assertEqual(
+                    result["status"], "comparison_complete" if passes else "failed"
+                )
+                if strict and different in steps:
+                    self.assertIn("session=1 fixture=example position=0", result["error"])
+
     def test_nonlegacy_context_requires_verified_export_metadata(self):
         self.assertEqual(
             validated_context_length({"context_length": 64}, None, None, None), 64

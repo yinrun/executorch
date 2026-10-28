@@ -2,6 +2,13 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+Use `aoti_qwen35_compare.py --require-byte-equal` for strict native/HF
+full-vocabulary acceptance. It checks every session, including prompt and reset
+calls, and exits unsuccessfully on any differing byte while preserving the
+per-step diagnostics in `result.json`. Without this flag, comparison completion
+is diagnostic only: matching tokens or passing the legacy tolerance is not
+byte-identical acceptance. Neither mode marks the entire runtime validated.
+
 **Latest context validation (2026-10-29):** independently exported context-128
 and context-256 candidates retain one MUSA delegate, all 48 mutable states, full
 BF16 logits, and GPU greedy output. HF/converted eager match 468/468 and 742/742
