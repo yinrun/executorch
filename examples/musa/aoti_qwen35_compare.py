@@ -192,6 +192,20 @@ def musa_cache_arguments(cache_bytes):
     return [f"--musa_cache_bytes={cache_bytes}"] if cache_bytes else []
 
 
+def native_eos_reached(fixture, position, predicted, eos_token_id):
+    if position < fixture["prompt_token_count"] - 1:
+        return False
+    final_position = position == len(fixture["token_ids"]) - 1
+    expects_eos = fixture.get("stop_reason") == "eos"
+    if predicted == eos_token_id:
+        if not expects_eos or not final_position:
+            raise ValueError("Native EOS does not match the reference stopping point")
+        return True
+    if expects_eos and final_position:
+        raise ValueError("Native generation did not reach the reference EOS")
+    return False
+
+
 def musa_cache_report(log):
     reports = [
         json.loads(line.removeprefix("MUSA ALLOCATION CACHE "))
@@ -223,6 +237,15 @@ def compare(args, report):
         raise ValueError("Expected at least one reference fixture")
     fixtures = select_fixtures(manifest["fixtures"], args.fixture)
     report["selected_fixtures"] = [fixture["name"] for fixture in fixtures]
+    eos_token_id = manifest.get("eos_token_id")
+    if eos_token_id is not None and (
+        type(eos_token_id) is not int or not 0 <= eos_token_id < 248320
+    ):
+        raise ValueError("Invalid reference EOS token ID")
+    if eos_token_id is None and any(
+        fixture.get("stop_reason") == "eos" for fixture in fixtures
+    ):
+        raise ValueError("EOS references must declare eos_token_id")
     for fixture in manifest["fixtures"]:
         if not 1 <= len(fixture["token_ids"]) <= 64:
             raise ValueError("Fixture must fit the exported context")
@@ -359,7 +382,13 @@ def compare(args, report):
                                     "GPU greedy token differs from the full-logit argmax"
                                 )
                             predicted = gpu_token
+                        if args.free_running and eos_token_id is not None:
+                            row["native_eos"] = native_eos_reached(
+                                fixture, position, predicted, eos_token_id
+                            )
                         print(json.dumps(row), flush=True)
+                        if row.get("native_eos"):
+                            break
             process.stdin.close()
             if process.wait(timeout=30) != 0:
                 raise RuntimeError("Runner failed at shutdown")
@@ -383,6 +412,10 @@ def compare(args, report):
     if before != {str(path): file_hash(path) for path in tracked}:
         raise AssertionError("Input artifacts changed during comparison")
     report["summary"] = summarize_comparison(report["steps"])
+    if args.free_running and eos_token_id is not None:
+        report["native_eos_stops"] = sum(
+            row.get("native_eos", False) for row in report["steps"]
+        )
     if args.free_running:
         report["summary"]["scope"] = "native_greedy_feedback_against_hf_generation"
     report["numerical_tolerance_passed"] = all(

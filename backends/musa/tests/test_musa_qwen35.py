@@ -25,6 +25,7 @@ from examples.musa.aoti_qwen35_compare import (
     compare_distributions,
     musa_cache_arguments,
     musa_cache_report,
+    native_eos_reached,
     select_fixtures,
     select_input_token,
     summarize_comparison,
@@ -39,6 +40,20 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_native_eos_stops_only_after_prompt_at_matching_reference_end(self):
+        fixture = dict(token_ids=[1, 2, 3], prompt_token_count=2, stop_reason="eos")
+        self.assertFalse(native_eos_reached(fixture, 0, 9, 9))
+        self.assertFalse(native_eos_reached(fixture, 1, 3, 9))
+        self.assertTrue(native_eos_reached(fixture, 2, 9, 9))
+        with self.assertRaisesRegex(ValueError, "stopping point"):
+            native_eos_reached(fixture, 1, 9, 9)
+        with self.assertRaisesRegex(ValueError, "did not reach"):
+            native_eos_reached(fixture, 2, 3, 9)
+        limited = {**fixture, "stop_reason": "context_limit"}
+        self.assertFalse(native_eos_reached(limited, 2, 3, 9))
+        with self.assertRaisesRegex(ValueError, "stopping point"):
+            native_eos_reached(limited, 2, 9, 9)
+
     def test_greedy_token_requires_exact_int64_and_vocabulary_range(self):
         for token in (0, 31, VOCAB_SIZE - 1):
             self.assertEqual(read_greedy_token(struct.pack("<q", token)), token)

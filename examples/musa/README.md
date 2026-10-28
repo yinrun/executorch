@@ -204,6 +204,16 @@ logits for different inputs and records a failed report. Numerical tolerance
 and generated-token agreement are separate report fields; neither is inferred
 from the other. `--runtime-preload` explicitly opts into a hash-tracked isolated
 runtime library experiment; it is not inherited from the controller environment.
+References that end at EOS must declare the tokenizer's `eos_token_id` in the
+manifest and `stop_reason: "eos"` in the fixture. In free-running mode the
+comparator stops explicitly on the native EOS prediction, ignoring prompt-only
+predictions. Early EOS, missing final EOS, or EOS at a context-limited reference
+endpoint fails validation. The report counts actual `native_eos_stops` separately
+from context-limited trajectories. Three additional context-64 fixtures reached
+EOS at 55, 53, and 22 input steps: both native rounds match all 248320 BF16
+logits byte-for-byte, GPU tokens agree, all 130 reset checks pass, and all six
+sequences explicitly stop on EOS. One fixture is a short Chinese stop-control
+case, not a complex reasoning evaluation.
 Use repeatable `--fixture NAME` arguments to isolate a failing trajectory or
 measure later fixtures after an earlier free-running divergence. Selection
 preserves manifest order and reference hashes, rejects unknown or duplicate
