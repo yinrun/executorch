@@ -2,6 +2,30 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Matrix integration (2026-10-29, `1dbca8613f`):** the BF16 contiguous
+single-row MM/addmm muDNN path is now in source, with storage-span and output
+alias checks and explicit empty-product handling. Output/multiplicand overlap
+is rejected, including independently wrapped storage; disjoint views and exact
+matrix-bias updates remain supported. Bounds checks trust declared Storage
+capacity and conservatively include padding, not arbitrary pointer validity.
+Thirty native matrix tests pass in three fresh processes. Same-input TorchMUSA
+BF16 probes pass 72/72 MM and 240/240 addmm cases byte-for-byte; the old MM
+dispatch fails 27/72, with maximum error 0.5. This old operator error is not
+the current model error.
+
+Replacing only the matrix object in the accepted isolated runtime retains
+4200/4200 full-logit native/HF byte matches across contexts 64/128/256, all
+2100 reset checks, and 18 explicit EOS stops. The independent
+`precision-matrix-integration-audit-v1.json` rechecks saved outputs, GPU tokens,
+library isolation, hashes, and zero cache/live counters at teardown. These
+are fresh calls over frozen trajectories, not new independent questions.
+The 2100 prior fused-eager outputs were rehashed, not rerun; 37 supported
+Python tests were rerun successfully. The remaining exp/softplus, reductions,
+softmax, and QK-view integration is still pending. No default deployment package
+is promoted and no new performance measurement is claimed. See the workspace
+report `QWEN35_MATRIX_INTEGRATION.md` for the separate standard-CMake and
+combined-runtime artifacts.
+
 The exporter now has a default-off `--fuse-projections` option for BF16,
 batch-one single-token inference at context 64/128/256. It concatenates FFN
 gate/up, GDN qkv/z, and GDN b/a weights; full-attention projections are unchanged.
