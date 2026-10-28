@@ -191,6 +191,29 @@ def musa_cache_arguments(cache_bytes):
     return [f"--musa_cache_bytes={cache_bytes}"] if cache_bytes else []
 
 
+def musa_cache_report(log):
+    reports = [
+        json.loads(line.removeprefix("MUSA ALLOCATION CACHE "))
+        for line in log.splitlines()
+        if line.startswith("MUSA ALLOCATION CACHE {")
+    ]
+    if len(reports) != 1:
+        raise AssertionError("Expected one native allocation-cache teardown report")
+    report = reports[0]
+    for name in (
+        "cached_bytes",
+        "cached_blocks",
+        "live_blocks",
+        "reuses",
+        "allocations",
+    ):
+        if type(report.get(name)) is not int or report[name] < 0:
+            raise AssertionError(f"Invalid allocation-cache counter: {name}")
+    if report["cached_bytes"] or report["cached_blocks"] or report["live_blocks"]:
+        raise AssertionError("Native allocation cache did not drain at teardown")
+    return report
+
+
 def compare(args, report):
     manifest = json.loads(args.references.read_text())
     if manifest["status"] != "complete" or manifest["dtype"] != "bf16":
@@ -334,16 +357,7 @@ def compare(args, report):
                 process.wait()
     report["loaded_libraries"] = runtime_libraries(log_path.read_text())
     if args.musa_cache_bytes:
-        cache_reports = [
-            json.loads(line.removeprefix("MUSA ALLOCATION CACHE "))
-            for line in log_path.read_text().splitlines()
-            if line.startswith("MUSA ALLOCATION CACHE ")
-        ]
-        if len(cache_reports) != 1:
-            raise AssertionError("Expected one native allocation-cache teardown report")
-        report["allocation_cache"] = cache_reports[0]
-        if cache_reports[0]["cached_bytes"] or cache_reports[0]["cached_blocks"]:
-            raise AssertionError("Native allocation cache did not drain at teardown")
+        report["allocation_cache"] = musa_cache_report(log_path.read_text())
     if (
         args.runtime_preload
         and str(args.runtime_preload) not in report["loaded_libraries"]

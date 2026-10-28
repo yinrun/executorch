@@ -24,6 +24,7 @@ from executorch.examples.models.llama.rope import Rope
 from examples.musa.aoti_qwen35_compare import (
     compare_distributions,
     musa_cache_arguments,
+    musa_cache_report,
     select_fixtures,
     select_input_token,
     summarize_comparison,
@@ -37,6 +38,29 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_cache_teardown_report_ignores_samples_and_rejects_leaks(self):
+        counts = dict(
+            cached_bytes=0, cached_blocks=0, live_blocks=0, reuses=9, allocations=2
+        )
+        final = "MUSA ALLOCATION CACHE " + json.dumps(counts)
+        sample = "MUSA ALLOCATION CACHE SAMPLE " + json.dumps(
+            {**counts, "cached_bytes": 4096}
+        )
+        self.assertEqual(musa_cache_report(sample + "\n" + final), counts)
+        for log in (sample, final + "\n" + final):
+            with self.assertRaises(AssertionError):
+                musa_cache_report(log)
+        for name in ("cached_bytes", "cached_blocks", "live_blocks"):
+            with self.assertRaises(AssertionError):
+                musa_cache_report(
+                    "MUSA ALLOCATION CACHE " + json.dumps({**counts, name: 1})
+                )
+        for value in (-1, True, 1.0, None):
+            with self.assertRaises(AssertionError):
+                musa_cache_report(
+                    "MUSA ALLOCATION CACHE " + json.dumps({**counts, "reuses": value})
+                )
+
     def test_native_cache_arguments_are_explicit_and_bounded(self):
         self.assertEqual(musa_cache_arguments(0), [])
         self.assertEqual(musa_cache_arguments(4096), ["--musa_cache_bytes=4096"])
