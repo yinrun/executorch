@@ -2141,3 +2141,67 @@ production use:
 The accepted runtime and compiler defaults remain unchanged. Kernel-level
 profiling is the next attribution step; pool retention must justify its
 incremental gain rather than treating all observed free time as removable.
+
+## Kernel correlation and profiling limits (2026-10-28)
+
+The three pooled activation-out models were captured with MSYS 1.9.0 in
+forward/reverse order, five warmups and thirty measured forwards per process.
+All six processes retain byte-identical final outputs and unchanged accepted
+runtime binaries. The allocator observer identifies measured windows by the
+runner's repeating synchronization callsites, not by searching for a similar
+elapsed time. SQLite synchronization events are enclosed by the corresponding
+observer calls in the same monotonic clock domain.
+
+These boundaries are SDK API returns, whereas runner timestamps occur after
+the observer finishes logging and the device guard returns. They are not
+identical timing scopes: the maximum observed duration difference is
+0.177203 ms. The first analyzer's 0.05 ms equality assertion failed and remains
+preserved. A second failed attempt assumed no GPU work before pool allocation;
+the runner actually copies inputs first. Subsequent analysis checks event
+ordering and containment instead of relaxing that equality threshold.
+
+More importantly, exported GPU timestamps do not resolve individual kernels
+in this capture. Multiple distinct correlation IDs on the same stream share
+exactly the same start/end timestamps and External Job Ref, with up to 32
+kernels in one interval. In every measured forward, most kernels share such
+intervals. The logs also contain GPU metadata warnings and, in two original
+captures, hardware clock calibration warnings. Consequently neither per-name
+kernel duration rankings nor GPU-busy/free-wait partitions are accepted.
+`analysis-v3.json` completed its arithmetic checks, but its timing interpretation
+is superseded by the explicit `kernel_timing_usable: false` audits. No new
+speedup, occupancy, or isolated allocator-overhead claim follows from these
+traces; prior uninstrumented acceptance remains the performance baseline.
+
+For call attribution, three further captures preload a read-only observer
+around the two forward convolution APIs, batch normalization, and unary
+activation. Each runs two warmups and three measured forwards. The official
+MSYS JSON export supplies correlation IDs linking every measured kernel to
+exactly one launch API; launch intervals and thread IDs then identify enclosing
+muDNN calls. This does not infer ownership from GPU timestamp overlap. Kernel
+counts remain identical to both original rounds and outputs remain byte-exact.
+
+| Model | Kernels/forward | Identity kernels | In convolution forward | In convolution+bias+activation |
+| --- | ---: | ---: | ---: | ---: |
+| MobileNetV3-Small FP16, 2x3x224x224 | 278 | 76 | 22 | 54 |
+| MobileNetV3-Large BF16, 2x3x224x224 | 323 | 78 | 30 | 48 |
+| DeepLabV3-MobileNetV3-Large BF16, 2x3x64x64 | 364 | 84 | 35 | 49 |
+
+All observed Identity kernels belong to these convolution calls, not the
+Hardswish/Hardsigmoid output-reuse implementation or batch normalization.
+Copy/transpose kernels are also attributed to convolution calls in these
+three cases. This identifies a concrete investigation target, but an Identity
+name alone does not prove a removable copy or unchanged scaling semantics.
+Unobserved API categories remain explicit rather than assigned by guesswork.
+
+Evidence lives under `kernel-profile` in the dated artifact root:
+`traces/summary.json`, `calls/summary.json`, `traces-kernel-audit.json`,
+`calls-kernel-audit.json`, and `verification.json`. Verification binds the
+source/observer/report/export hashes, all nine captures and 189 measured
+forwards, unchanged kernel counts, attribution coverage, and accepted binary
+hashes. Raw traces, logs, and both failed analyzer reports are retained.
+
+The next experiment is an isolated direct muDNN C++ convolution path, comparing
+kernel counts, numerical behavior, workspace lifetime, and uninstrumented
+latency against the accepted C API path. That replacement has not been
+implemented or promoted. This profiling milestone changes neither backend
+execution nor compiler/default runtime selection.
