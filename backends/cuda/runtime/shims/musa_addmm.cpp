@@ -164,6 +164,14 @@ AOTITorchError set_mudnn_tensor(
     return check_mudnn(
         descriptor.SetNdInfo(2, sizes, strides), "Tensor.SetNdInfo");
   }
+  if (tensor->dim() == 3 && tensor->size(1) == 1 &&
+      tensor->stride(1) == 0) {
+    const int64_t strides[] = {
+        tensor->stride(0), tensor->size(2) * tensor->stride(2), tensor->stride(2)};
+    return check_mudnn(
+        descriptor.SetNdInfo(3, tensor->sizes().data(), strides),
+        "Tensor.SetNdInfo");
+  }
   return check_mudnn(
       descriptor.SetNdInfo(
           static_cast<int64_t>(tensor->dim()),
@@ -534,7 +542,8 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   cudaStream_t stream = stream_result.get();
 
-  if (batch > 0 && m > 0 && k > 0 && n > 0 && mat1_strides[1] > 0 &&
+  if (batch > 0 && m > 0 && k > 0 && n > 0 &&
+      (mat1_strides[1] > 0 || (m == 1 && mat1_strides[1] == 0)) &&
       mat2_strides[1] > 0 && mat1_strides[0] == m * k &&
       mat2_strides[0] == k * n && out->strides()[0] == m * n) {
     ::musa::dnn::Handle handle(out->device_index());

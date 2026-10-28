@@ -504,6 +504,13 @@ as in the fixed-token upstream Llama KV-cache export; the leading batch
 stride must not overlap distinct matrices unless the operand is a read-only
 broadcast with zero batch stride. Broadcast batches use individual GEMM calls
 instead of a strided-batched GEMM.
+For packed BMM batches, a zero stride on the size-one row axis is normalized
+in the muDNN descriptor and uses the same muDNN path as its positive-stride
+equivalent. Selecting muBLAS only because of that unused stride changed BF16
+PV rounding in Qwen3.5. An exact layout-equivalence regression covers
+FP32/FP16/BF16 and fails on the old dispatch; all 20 native matrix tests pass
+with the fix. Real eight-step attention operands also match eager after the
+change. Broadcast batch strides and padded-batch fallback selection are unchanged.
 The `transposed_bmm` acceptance model exercises a transposed left-hand matrix
 through PTE/PTD export and `executor_runner` output comparison, including
 bounded dynamic batch sizes.

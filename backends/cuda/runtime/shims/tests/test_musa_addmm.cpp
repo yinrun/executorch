@@ -607,6 +607,47 @@ TEST_F(MusaAddmmTest, BmmSingleRowWithZeroRowStride) {
   }
 }
 
+TEST_F(MusaAddmmTest, BmmSingletonRowStridePreservesRounding) {
+  constexpr int64_t batch = 8;
+  constexpr int64_t reduction = 64;
+  constexpr int64_t columns = 256;
+  uint32_t state = 109;
+  auto generate = [&state](size_t count) {
+    std::vector<float> values(count);
+    for (auto& value : values) {
+      state = state * 1664525u + 1013904223u;
+      value = std::ldexp(
+          static_cast<float>((state & 255u) + 1u),
+          static_cast<int>((state >> 8) % 10u) - 14);
+      if (state & 0x80000000u) {
+        value = -value;
+      }
+    }
+    return values;
+  };
+  const auto left_values = generate(batch * reduction);
+  const auto right_values = generate(batch * reduction * columns);
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    SCOPED_TRACE(static_cast<int>(dtype));
+    std::unique_ptr<SlimTensor> left(empty_tensor(
+        dtype, {batch, 1, reduction}, {reduction, reduction, 1}));
+    std::unique_ptr<SlimTensor> zero_stride_left(empty_tensor(
+        dtype, {batch, 1, reduction}, {reduction, 0, 1}));
+    std::unique_ptr<SlimTensor> right(empty_tensor(
+        dtype, {batch, reduction, columns}, {reduction * columns, columns, 1}));
+    std::unique_ptr<SlimTensor> expected(empty_tensor(
+        dtype, {batch, 1, columns}, {columns, columns, 1}));
+    std::unique_ptr<SlimTensor> actual(empty_tensor(
+        dtype, {batch, 1, columns}, {columns, columns, 1}));
+    copy_to_device(left.get(), encode_values(left_values, dtype));
+    copy_to_device(zero_stride_left.get(), encode_values(left_values, dtype));
+    copy_to_device(right.get(), encode_values(right_values, dtype));
+    ASSERT_EQ(aoti_torch_musa_bmm_out(expected.get(), left.get(), right.get()), Error::Ok);
+    ASSERT_EQ(aoti_torch_musa_bmm_out(actual.get(), zero_stride_left.get(), right.get()), Error::Ok);
+    EXPECT_EQ(copy_from_device(actual.get(), dtype), copy_from_device(expected.get(), dtype));
+  }
+}
+
 TEST_F(MusaAddmmTest, BmmBroadcastsReadonlyBatchOperands) {
   for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
     for (bool broadcast_mat1 : {true, false}) {
