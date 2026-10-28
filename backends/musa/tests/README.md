@@ -30,7 +30,7 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | `export` | Complete `backends.musa.tests.test_musa_aoti` unittest suite |
 | `runner` | Frozen tensor snapshots/artifact failures, native MUSA and legacy device tags, foreign-backend rejection, convolution/Hardsigmoid precision, and activation/decoder output reuse through PTE/PTD and `executor_runner` |
 | `models` | Model export, PTE/PTD loading, runner execution, and MUSA eager output comparison |
-| `deployment` | Package/benchmark validation and relocated MLP FP32/SimpleCNN BF16 execution without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
+| `deployment` | Package/benchmark validation, relocated MLP FP32/SimpleCNN BF16 execution, and pooled dual-output Hardswish/Hardsigmoid chains in FP32/FP16/BF16 without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
 The six native CTest executables contain 63 GoogleTest cases. Each executable
@@ -2020,3 +2020,51 @@ configurations, relocated benchmarking and invalid-argument checks.
 `deployment/package-unit.log` records all fifteen package/benchmark unit
 tests passing. These test results do not alone certify the real-model
 packages or change the default runtime.
+
+## Accepted activation-out deployment and promotion (2026-10-28)
+
+The latest accepted local runtime is now `build-activation-out` under
+`/home/qianfan/文档/ChatGPT/ETSupport/artifacts/musa-20261026`.
+The workspace `environment.sh` selects this build for `BUILD_DIR`,
+`EXECUTORCH_MUSA_RUNNER` and runtime library lookup. The former default is
+retained intact as `CONVOLUTION_BASELINE_BUILD_DIR=build-convolution-out`
+(resolved under the artifact root). Earlier dated sections describe the
+historical candidate/default state, not the current selection.
+
+`activation-out/deployment-verification.json` records successful independent
+verification of the deployment gates:
+
+- Fifteen package/benchmark unit tests and both deployment test methods pass
+  without skips, including the six new pooled activation exports and the
+  existing four MLP/simple-CNN configurations.
+- Six real-model packages cover MobileNetV3-Small FP16, MobileNetV3-Large
+  BF16 and DeepLabV3-MobileNetV3-Large BF16 with planning off/on. All packages
+  are relocated to paths containing spaces. Twenty fresh runner processes
+  cover every accepted shape, with five forwards per process and byte-exact
+  outputs. Loader logs require the relocated shim and exclude Torch/Python
+  runtime libraries. Package manifests and embedded model ELF dependencies
+  are checked; the PTE/PTD payloads remain unchanged by packaging.
+- Each real-model package also passes the benchmark driver under Python
+  `-S`, with two fresh runner processes, two warmups and three measured
+  forwards per process (twelve additional processes in total). These are
+  deployment/benchmark functionality checks, not a new performance campaign.
+- Twelve additional standalone processes replay the previously accepted
+  ResNet18/MobileNetV2 artifacts on the new runtime, covering planning off/on
+  and batches 1/2/3. All final outputs are byte-identical. Their source
+  manifests are checked against the previous convolution-out acceptance.
+
+After selecting the new default, `activation-out/promotion-smoke/summary.json`
+records five further successful processes: both MobileNetV3 classifiers,
+DeepLab, ResNet18 and MobileNetV2, each with five forwards on its pooled
+artifact. All final outputs remain byte-identical. `ldd` and runtime loader
+logs resolve the selected build's libraries without Torch/Python runtime
+dependencies. The report binds the selected environment, binaries and
+deployment verification by SHA-256 and records `promoted: true`.
+
+Promotion changes the default runtime selection, not the global compiler
+policy. Memory planning remains disabled by default; request the validated
+pooled export explicitly with `TORCHINDUCTOR_MEMORY_PLANNING=1` and
+`TORCHINDUCTOR_MEMORY_POOL=combined`. Exporting/packaging still requires the
+Python toolchain; the deployed runner requires only the compatible host
+architecture, MUSA SDK/driver and GPU ISA. The measured speedups remain
+limited to the shapes/dtypes and shared-host campaign documented above.
