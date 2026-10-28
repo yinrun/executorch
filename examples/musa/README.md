@@ -8,11 +8,15 @@ weight converter and a single MUSA delegate:
 ```bash
 python -m examples.musa.aoti_qwen35_export \
   --checkpoint-dir /path/to/Qwen3.5-0.8B \
-  --output-dir /tmp/qwen35-musa-bf16 \
-  --dtype bf16 --context-length 64 --token-ids 9707 11 2082
+  --output-dir /tmp/qwen35-musa-fp32 \
+  --dtype fp32 --context-length 64 --token-ids 9707 11 2082
+
+python examples/musa/aoti_qwen35_validate.py \
+  --artifacts /tmp/qwen35-musa-fp32 \
+  --runner /path/to/executor_runner --output-dir /tmp/qwen35-validation
 ```
 
-The output directory must not exist. The script writes `qwen35.pte`,
+Each output directory must not exist. The exporter writes `qwen35.pte`,
 `aoti_musa_blob.ptd`, three MUSA eager reference logits, the exported graph,
 and a hash-bearing `result.json`. It checks all 48 mutable buffers (18 GDN
 convolution/recurrent pairs and six attention K/V pairs) and rejects host
@@ -21,13 +25,62 @@ not the portable fused CPU operator. Recurrent state remains FP32 with BF16
 weights. Only text, batch one, static single-token decoding is covered;
 vision, MTP, quantization, and a production generation API are not included.
 
-This is an **export bring-up, not a deployment acceptance result**. On the
-local M1000, full-model BF16 export succeeds and the corrected unit-offset
-RMSNorm gives byte-identical eager logits to Transformers 5.3.0 for the
-three reference tokens. The standalone runner's first-token argmax matches,
-but its logits fail the `atol=0.04, rtol=0.04` comparison. Multi-step native
-generation and full-model cache reset remain unvalidated. The exporter
-therefore records `status=exported` and `runtime_validated=false`.
+On the local M1000, **FP32 native decoding passes the three-token fixture**
+twice in one process, including a position-zero reset with byte-identical
+logits. Maximum error against MUSA eager is `1.25e-4`; all token IDs match.
+Eager FP32 differs from Transformers 5.3.0 MUSA by at most `1.41e-5` on that
+fixture. The native loader audit observes no Torch/Python runtime libraries.
+This is a correctness PoC, not a performance or broad quality claim.
+
+The chat fixture `What is 2 + 3? Answer briefly.` also passes: 23 prompt
+tokens followed by native greedy output `[20, 248046]` (`5`, then EOS),
+24 calls repeated after reset for 48 calls total. Every logit passes and
+every argmax matches; maximum native/eager error is `8.70e-5`.
+Transformers MUSA FP32 matches the entire reference token trajectory with
+maximum logit error `2.25e-5`. This single short answer is not a general
+language-quality evaluation.
+
+**BF16 export succeeds but native numerical acceptance fails.** The corrected
+unit-offset RMSNorm gives byte-identical eager logits to Transformers for the
+three reference tokens. The native first-token argmax matches, but its logits
+fail `atol=0.04, rtol=0.04`. Do not use argmax alone to accept this path.
+The exporter always records `status=exported`, `runtime_validated=false`;
+only a separate successful validator report establishes runtime acceptance.
+
+The validator uses Python's standard library for control and readback only;
+all model tensor computation runs in the native MUSA delegate. It checks
+every logit, exact argmax IDs, two sequences in the same process, reset
+repeatability, loader libraries, and artifact hashes. FP32 gates are
+`atol=0.001, rtol=0.001`. It fails closed and retains diagnostics on errors.
+Set `LD_LIBRARY_PATH` to the selected runtime's shared-library directories
+and MUSA SDK; do not preload Torch libraries.
+
+For a local chat template and greedy reference trajectory, replace
+`--token-ids ...` with `--prompt 'What is 2 + 3? Answer briefly.'
+--generate-tokens 16`. Tokenization additionally requires Transformers and
+the checkpoint's tokenizer files, with network loading disabled. Native
+validation feeds back the native argmax after the prompt and checks it
+against the eager trajectory. Prompt ingestion is token-by-token, not
+optimized batched prefill. Longer context, multiple prompts, and throughput
+need separate acceptance before deployment beyond this PoC.
+
+On the local TorchMUSA 2.9.0/MUSA 5.1.2 environment, eager reference generation
+for the chat prompt encountered an asynchronous device error without launch
+blocking. Prefix the **export command** with `MUSA_LAUNCH_BLOCKING=1` for
+that diagnostic workflow; its root cause is not yet established. This is
+not enabled in the native validator and is not a performance configuration.
+
+Use `package_aoti.py` to package the selected runner, shared libraries and
+model. To validate a relocated package against the same reference artifacts,
+pass `--runner PACKAGE/bin/executor_runner --pte PACKAGE/model/model.pte
+--ptd PACKAGE/model/model.ptd` to the validator and set `LD_LIBRARY_PATH` to
+`PACKAGE/lib:/usr/local/musa/lib`. The PTE/PTD hashes must still match the
+export report. FP32 weights occupy approximately 2.9 GiB in the PTD;
+the checkpoint's original BF16 storage does not make this an accepted BF16
+native inference path.
+The local FP32 chat package passes the same 48-call acceptance after moving
+to a directory containing spaces, loading its two ExecuTorch shared libraries
+from the relocated package rather than the development build.
 
 Mutable MUSA delegates retain tensor constants rather than inlining small
 buffers, which would discard cross-call updates. The server runner emits

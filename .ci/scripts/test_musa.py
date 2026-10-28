@@ -209,7 +209,11 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
                 f"backends.musa.tests.{module}",
             ]
     if "runner" in selected:
-        for module in ("test_musa_activation_out", "test_musa_convolution_out"):
+        for module in (
+            "test_musa_activation_out",
+            "test_musa_convolution_out",
+            "test_musa_qwen35",
+        ):
             yield module, [
                 sys.executable,
                 "-c",

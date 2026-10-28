@@ -33,6 +33,13 @@ also require GNU `readelf` and `patchelf` (`--patchelf` accepts an explicit path
 | `deployment` | Package/benchmark validation, relocated MLP FP32/SimpleCNN BF16 execution, and pooled dual-output Hardswish/Hardsigmoid chains in FP32/FP16/BF16 without Torch/Python runtime libraries, including synchronized timing and fresh-process repeatability |
 | `all` | All of the above, in order |
 
+The `runner` suite also includes `test_musa_qwen35`: small MUSA GDN state/reset
+and export fixtures, unit-offset RMSNorm rounding, and full-vocabulary logit
+validation failures. These tests do not require model weights. Full
+Qwen3.5-0.8B checkpoint export and native multi-step validation are separate
+commands documented in `examples/musa/README.md`; passing the small fixtures
+does not imply that a complete model or BF16 native decoding passes.
+
 The six native CTest executables contain 63 GoogleTest cases. Each executable
 runs in three fresh processes by default (`--native-repeats`). The padded
 no-bias addmm regression is enabled by default again after the earlier packing

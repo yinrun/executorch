@@ -5,6 +5,7 @@ import gc
 import hashlib
 import json
 import operator
+import os
 from pathlib import Path
 
 import torch
@@ -119,14 +120,58 @@ def export_model(args, report):
                 report["checkpoint_hashes"][path.name] = hashlib.file_digest(
                     checkpoint_file, "sha256"
                 ).hexdigest()
-    for position, token in enumerate(args.token_ids):
+    tokenizer = None
+    if args.prompt is not None:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.checkpoint_dir, local_files_only=True
+        )
+        args.token_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": args.prompt}],
+            tokenize=True,
+            return_dict=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        if not args.token_ids or any(
+            not isinstance(token, int) or not 0 <= token < 248320
+            for token in args.token_ids
+        ):
+            raise ValueError("Tokenizer must return a nonempty list of valid token IDs")
+        if len(args.token_ids) + args.generate_tokens - 1 > args.context_length:
+            raise ValueError("Prompt and requested generation exceed context length")
+        report.update(
+            prompt=args.prompt,
+            prompt_token_count=len(args.token_ids),
+            generated_token_ids=[],
+        )
+    prompt_length = len(args.token_ids)
+    report["token_ids"] = args.token_ids
+    position = 0
+    while position < len(args.token_ids):
+        token = args.token_ids[position]
         token_ids = torch.tensor([[token]], dtype=torch.int64, device="musa")
         input_pos = torch.tensor([position], dtype=torch.int64, device="musa")
         expected = model(token_ids, {"input_pos": input_pos})
         if not torch.isfinite(expected).all().item():
             raise RuntimeError("MUSA eager reference produced non-finite logits")
         _write_tensor(expected, args.output_dir / f"eager-{position}.bin")
-        report["reference_tokens"].append(expected.argmax().item())
+        predicted = expected.argmax().item()
+        report["reference_tokens"].append(predicted)
+        if tokenizer is not None and position >= prompt_length - 1:
+            report["generated_token_ids"].append(predicted)
+            if (
+                predicted != tokenizer.eos_token_id
+                and len(report["generated_token_ids"]) < args.generate_tokens
+            ):
+                args.token_ids.append(predicted)
+        position += 1
+    if tokenizer is not None:
+        report["generated_text"] = tokenizer.decode(
+            report["generated_token_ids"], skip_special_tokens=True
+        )
+        print(report["generated_text"], flush=True)
     for name, buffer in model.named_buffers():
         if name.endswith(STATE_SUFFIXES):
             buffer.zero_()
@@ -176,7 +221,11 @@ def export_model(args, report):
     ptd = args.output_dir / "aoti_musa_blob.ptd"
     report.update(pte=str(pte), ptd=str(ptd), delegates=len(delegates))
     report["artifacts"] = {}
-    for path in (pte, ptd):
+    reference_paths = [
+        args.output_dir / f"eager-{position}.bin"
+        for position in range(len(args.token_ids))
+    ]
+    for path in (pte, ptd, *reference_paths):
         with path.open("rb") as artifact:
             report["artifacts"][path.name] = hashlib.file_digest(
                 artifact, "sha256"
@@ -189,12 +238,19 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--context-length", type=int, default=64)
-    parser.add_argument("--token-ids", type=int, nargs="+", default=[9707, 11, 2082])
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--token-ids", type=int, nargs="+", default=[9707, 11, 2082])
+    inputs.add_argument("--prompt")
+    parser.add_argument("--generate-tokens", type=int, default=16)
     args = parser.parse_args()
     if not args.token_ids or len(args.token_ids) > args.context_length:
         parser.error("Reference tokens must fit the context length")
     if any(token < 0 or token >= 248320 for token in args.token_ids):
         parser.error("Reference token is outside the Qwen3.5 vocabulary")
+    if args.prompt is not None and (
+        args.generate_tokens < 1 or args.generate_tokens > args.context_length
+    ):
+        parser.error("Generation length must be positive and fit the context")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     report = {
         "status": "running",
@@ -206,6 +262,8 @@ def main():
         "reference_tokens": [],
         "mtp": False,
         "runtime_validated": False,
+        "torch_version": str(torch.__version__),
+        "musa_launch_blocking": os.environ.get("MUSA_LAUNCH_BLOCKING", "0"),
     }
     try:
         torch.set_num_threads(4)

@@ -1,5 +1,6 @@
 """MUSA coverage for Qwen3.5 recurrent state and export dispatch."""
 
+import struct
 import unittest
 from unittest import mock
 
@@ -16,6 +17,58 @@ from executorch.examples.models.llama import attention
 from executorch.examples.models.llama.model_args import ModelArgs
 from executorch.examples.models.llama.norm import RMSNorm
 from executorch.examples.models.llama.rope import Rope
+from examples.musa.aoti_qwen35_validate import (
+    compare_logits,
+    runtime_libraries,
+    tensor_values,
+    VOCAB_SIZE,
+)
+
+
+class TestQwen35LogitValidation(unittest.TestCase):
+    def test_runtime_library_audit_preserves_spaces(self):
+        path = "/tmp/relocated package/lib/libextension_cuda.so"
+        self.assertEqual(runtime_libraries(f"123: calling init: {path}\n"), [path])
+        for name in (
+            "libtorch_cpu.so",
+            "libc10.so",
+            "libpython3.12.so",
+            "libmusa_python.so",
+        ):
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                runtime_libraries(f"123: calling init: /tmp/relocated package/{name}\n")
+        with self.assertRaises(AssertionError):
+            runtime_libraries("")
+
+    def test_logits_require_full_finite_vocabulary(self):
+        for dtype, word in (("fp32", struct.pack("<f", 1)), ("bf16", b"\x80\x3f")):
+            with self.subTest(dtype=dtype):
+                payload = word * VOCAB_SIZE
+                row = compare_logits(payload, payload, dtype)
+                self.assertEqual(row["outside_tolerance"], 0)
+                self.assertEqual(row["max_error"], 0)
+                self.assertEqual(row["predicted_token"], row["reference_token"])
+                with self.assertRaises(ValueError):
+                    tensor_values(payload[:-1], dtype)
+                nan = (
+                    struct.pack("<f", float("nan")) if dtype == "fp32" else b"\xc0\x7f"
+                )
+                with self.assertRaises(ValueError):
+                    tensor_values(nan + payload[len(word) :], dtype)
+
+    def test_token_and_numeric_failures_are_independent(self):
+        reference = struct.pack("<f", 1) * VOCAB_SIZE
+        changed = struct.pack("<f", 1.0001) + reference[4:]
+        row = compare_logits(reference, changed, "fp32")
+        self.assertEqual(row["outside_tolerance"], 0)
+        changed = reference[:4] + struct.pack("<f", 1.0001) + reference[8:]
+        row = compare_logits(changed, reference, "fp32")
+        self.assertNotEqual(row["predicted_token"], row["reference_token"])
+        self.assertEqual(row["outside_tolerance"], 0)
+        changed = struct.pack("<f", 2) + reference[4:]
+        row = compare_logits(changed, reference, "fp32")
+        self.assertEqual(row["predicted_token"], row["reference_token"])
+        self.assertEqual(row["outside_tolerance"], 1)
 
 
 @unittest.skipUnless(MUSA_AVAILABLE, "MUSA is not available")
