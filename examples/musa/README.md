@@ -95,6 +95,25 @@ Although mean errors decrease slightly, this is not whole-model acceptance.
 The experimental C++ changes are not backend defaults; remaining recurrent
 state/reduction differences need independent isolation and validation.
 
+The next isolated FP32 reduction candidate identifies a separate first-token
+failure in layer 18 (zero-based): identical residual input produces a one-ULP
+mean-square difference in FFN RMSNorm, crossing a BF16 rounding boundary.
+An explicit-axis muDNN C++ Reduce shim aligns all 24 inspected stages of that
+block. It also aligns all inspected stages and FP32 recurrent states of layer
+22 over the original three-token sequence. Neither experiment changes the
+eager model or reference tensors.
+
+On the same 91-step trajectories, repeated twice, this candidate increases
+byte-identical steps from 3 to 31. Chinese-fixture maximum errors decrease
+from `0.8125`/`0.609375` to `0.375`/`0.25`, and mean errors from
+`0.03249442`/`0.03436223` to `0.01690326`/`0.01652340`. However, 60 of 91 steps
+still violate the original tolerance. One fridge prompt-position argmax now
+differs at position 21; the evidence fixture has no argmax mismatches, and
+all 32 generated-token predictions still match under teacher forcing. Reset
+outputs are byte-identical and the native-library audit passes. This is an
+isolated accuracy experiment, not a default-backend promotion, free-running
+generation acceptance, or performance result.
+
 For longer BF16 diagnostics against official Transformers and converted
 ExecuTorch eager references, use the separate teacher-forced comparator:
 
@@ -135,7 +154,10 @@ Unlike acceptance validation, this diagnostic continues past numerical or
 argmax mismatches, always feeding the reference trajectory rather than native
 predictions. It reports every logit's error, top-k overlap, softmax total
 variation, and KL(reference || actual), separating native/HF, eager/HF, and
-native/eager differences. Two repetitions check byte-identical cache reset;
+native/eager differences. Its `summary` aggregates first-session fixture
+metrics, separates prompt/generation ranking failures, and counts reset
+checks without double-counting repeated steps. A single run reports reset
+agreement as null, not passed. Two repetitions check byte-identical cache reset;
 invalid tensors, changed hashes, loader violations, and process failures
 still fail closed. `status="comparison_complete"` means the measurement
 completed, **not** that precision passed; `runtime_validated` stays false.

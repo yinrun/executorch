@@ -97,6 +97,66 @@ def compare_payloads(actual, reference, dtype):
     return row
 
 
+def summarize_comparison(steps):
+    primary = [row for row in steps if row["session"] == 0]
+    if not primary:
+        raise ValueError("Expected at least one first-session comparison")
+    repeated = [row for row in steps if row["session"] > 0]
+    fixtures = []
+    for name in dict.fromkeys(row["fixture"] for row in primary):
+        rows = [row for row in primary if row["fixture"] == name]
+        metrics = [row["native_vs_hf"] for row in rows]
+        phases = {}
+        for phase in ("prompt", "generation"):
+            selected = [row for row in rows if row["phase"] == phase]
+            phases[phase] = {
+                "steps": len(selected),
+                "argmax_mismatch_positions": [
+                    row["position"]
+                    for row in selected
+                    if row["native_vs_hf"]["predicted_token"]
+                    != row["native_vs_hf"]["reference_token"]
+                ],
+            }
+        fixtures.append(
+            {
+                "name": name,
+                "steps": len(rows),
+                "byte_equal_steps": sum(metric["byte_equal"] for metric in metrics),
+                "et_hf_byte_equal_steps": sum(
+                    row["et_vs_hf"]["byte_equal"] for row in rows
+                ),
+                "max_error": max(metric["max_error"] for metric in metrics),
+                "mean_error": math.fsum(metric["mean_error"] for metric in metrics)
+                / len(rows),
+                "max_total_variation": max(
+                    metric["total_variation"] for metric in metrics
+                ),
+                "steps_outside_legacy_tolerance": sum(
+                    metric["outside_legacy_tolerance"] > 0 for metric in metrics
+                ),
+                "first_difference_position": next(
+                    (
+                        row["position"]
+                        for row in rows
+                        if not row["native_vs_hf"]["byte_equal"]
+                    ),
+                    None,
+                ),
+                "phases": phases,
+            }
+        )
+    return {
+        "scope": "teacher_forced_fixed_trajectories",
+        "native_calls": len(steps),
+        "reset_checks": len(repeated),
+        "reset_byte_equal": (
+            all(row["reset_byte_equal"] for row in repeated) if repeated else None
+        ),
+        "fixtures": fixtures,
+    }
+
+
 def compare(args, report):
     manifest = json.loads(args.references.read_text())
     if manifest["status"] != "complete" or manifest["dtype"] != "bf16":
@@ -234,6 +294,7 @@ def compare(args, report):
     }
     if before != {str(path): file_hash(path) for path in tracked}:
         raise AssertionError("Input artifacts changed during comparison")
+    report["summary"] = summarize_comparison(report["steps"])
     report["status"] = "comparison_complete"
 
 

@@ -21,7 +21,10 @@ from executorch.examples.models.llama import attention
 from executorch.examples.models.llama.model_args import ModelArgs
 from executorch.examples.models.llama.norm import RMSNorm
 from executorch.examples.models.llama.rope import Rope
-from examples.musa.aoti_qwen35_compare import compare_distributions
+from examples.musa.aoti_qwen35_compare import (
+    compare_distributions,
+    summarize_comparison,
+)
 from examples.musa.aoti_qwen35_validate import (
     compare_logits,
     runtime_libraries,
@@ -31,6 +34,83 @@ from examples.musa.aoti_qwen35_validate import (
 
 
 class TestQwen35LogitValidation(unittest.TestCase):
+    def test_comparison_summary_separates_numeric_and_ranking_failures(self):
+        steps = []
+        for position, phase in enumerate(("prompt", "generation")):
+            steps.append(
+                {
+                    "session": 0,
+                    "fixture": "example",
+                    "position": position,
+                    "phase": phase,
+                    "native_vs_hf": {
+                        "byte_equal": False,
+                        "max_error": 0.5 if position == 0 else 0.001,
+                        "mean_error": 0.25 if position == 0 else 0.001,
+                        "total_variation": 0.1 if position == 0 else 0.0001,
+                        "outside_legacy_tolerance": 1 if position == 0 else 0,
+                        "reference_token": 0,
+                        "predicted_token": position,
+                    },
+                    "et_vs_hf": {"byte_equal": True},
+                }
+            )
+        summary = summarize_comparison(steps)
+        self.assertEqual(summary["scope"], "teacher_forced_fixed_trajectories")
+        self.assertIsNone(summary["reset_byte_equal"])
+        fixture = summary["fixtures"][0]
+        self.assertEqual(fixture["steps"], 2)
+        self.assertEqual(fixture["byte_equal_steps"], 0)
+        self.assertEqual(fixture["et_hf_byte_equal_steps"], 2)
+        self.assertEqual(fixture["steps_outside_legacy_tolerance"], 1)
+        self.assertEqual(fixture["max_error"], 0.5)
+        self.assertAlmostEqual(fixture["mean_error"], 0.1255)
+        self.assertEqual(fixture["max_total_variation"], 0.1)
+        self.assertEqual(fixture["first_difference_position"], 0)
+        self.assertEqual(fixture["phases"]["prompt"]["argmax_mismatch_positions"], [])
+        self.assertEqual(
+            fixture["phases"]["generation"]["argmax_mismatch_positions"], [1]
+        )
+        steps.extend(
+            {**row, "session": 1, "reset_byte_equal": True} for row in steps.copy()
+        )
+        summary = summarize_comparison(steps)
+        self.assertEqual(summary["native_calls"], 4)
+        self.assertEqual(summary["reset_checks"], 2)
+        self.assertTrue(summary["reset_byte_equal"])
+        self.assertEqual(summary["fixtures"][0]["steps"], 2)
+        steps[-1]["reset_byte_equal"] = False
+        self.assertFalse(summarize_comparison(steps)["reset_byte_equal"])
+
+    def test_comparison_summary_exact_and_empty(self):
+        row = {
+            "session": 0,
+            "fixture": "first",
+            "position": 0,
+            "phase": "generation",
+            "native_vs_hf": {
+                "byte_equal": True,
+                "max_error": 0.0,
+                "mean_error": 0.0,
+                "total_variation": 0.0,
+                "outside_legacy_tolerance": 0,
+                "reference_token": 1,
+                "predicted_token": 1,
+            },
+            "et_vs_hf": {"byte_equal": True},
+        }
+        summary = summarize_comparison([row, {**row, "fixture": "second"}])
+        self.assertEqual(
+            [item["name"] for item in summary["fixtures"]], ["first", "second"]
+        )
+        for fixture in summary["fixtures"]:
+            self.assertEqual(fixture["byte_equal_steps"], 1)
+            self.assertIsNone(fixture["first_difference_position"])
+            self.assertEqual(fixture["phases"]["prompt"]["steps"], 0)
+        for steps in ([], [{**row, "session": 1}]):
+            with self.assertRaises(ValueError):
+                summarize_comparison(steps)
+
     def test_distribution_comparison_exact_and_shifted_logits(self):
         reference = [-2.0, 0.0, 1.0, 3.0]
         exact = compare_distributions(reference, reference)
