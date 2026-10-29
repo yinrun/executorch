@@ -2,6 +2,43 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Source-integrated reductions (`a5720d982c`, 2026-10-29):** the scoped
+BF16 query-normalization sum and FP32 sum/mean paths now live in MusaBackend
+and the standard native shim library. BF16 covers `[1,1,16,128]` last-axis sum;
+FP32 covers last-axis widths 128/256/1024 and `[1,16,128,128]` axis-2 sum.
+Inputs must be nonempty, static, rank 1–8; unsupported shapes, promoted dtypes,
+multi-axis reductions and CPU graphs retain their previous lowering. Native
+validation checks storage bounds, physical aliases, device/dtype and exact
+output layout, while allowing disjoint shared-pool views.
+
+Direct `examples.musa.aoti_qwen35_export` exports with `--dtype bf16`,
+`--valid-length-attention`, `--fuse-projections` and `--emit-greedy-token`
+now need no isolated export passes or hand-linked probe objects. Fresh standard
+CMake binaries and context-64/128/256 v2 packages pass 5872/5872 full-vocabulary
+native/HF byte comparisons, 2936 reset checks and 20 EOS stops across seven
+suites. This repeats 2936 frozen reference positions twice, not 5872 new
+independent prompts; only the legacy suite uses teacher forcing. The former
+Chinese counterexample passes. HF/fused-eager references are rehashed, not
+regenerated. All measured logit errors are zero without relaxed tolerances.
+
+Fifty-six Python tests and 168 same-input native/TorchMUSA reduction checks
+pass. Each of three C++ rounds passes 61 tests with three explicit dual-device
+skips. The single-BF16-value negative control still fails the strict gate despite
+passing the old tolerance. Independent auditing verifies 14287 files, full
+saved logits, token feedback, resets/EOS, native-library isolation and zero
+exit cache/live counters. See workspace `QWEN35_REDUCTION_INTEGRATION.md` and
+`precision-source-reduction-audit-v2.json` for evidence.
+
+Use an ASCII, space-free `TORCHINDUCTOR_CACHE_DIR` with this installed compiler.
+The first source-only export used a Chinese cache path and failed at load time:
+TorchInductor's Unicode symbol-name regex did not match GNU ld's byte-wise
+binary-path mangling. That failed v1 package ran zero inference steps and remains
+preserved. The accepted v2 packages use fresh ASCII caches; their model/results
+paths remain Chinese. No system PyTorch files were modified. Arbitrary cache
+paths, independent BF16 packaging/relocation and default-entrypoint promotion
+are not accepted yet. This round makes no new performance claim. Historical
+milestones below retain their original validation scope.
+
 **Valid-length attention implementation (2026-10-29, experimental):**
 `--valid-length-attention` opts into an exportable opaque MUSA operator for
 BF16, batch-one, single-token Qwen attention with context 64/128/256. Runtime
@@ -11,8 +48,8 @@ remain explicit. Native execution validates storage bounds, output aliasing,
 device, geometry and causal-prefix controls. It reads only position/mask on
 the host; model tensor arithmetic stays on MUSA. Each attention call currently
 synchronizes the stream for those controls, so this is not a graph-capture
-or performance acceptance. The option defaults off. Full-model integration
-still needs the isolated BF16-sum and FP32-reduction passes; standalone
+or performance acceptance. The option defaults off. At this earlier milestone,
+full-model integration still needed isolated BF16-sum and FP32-reduction passes; standalone
 operator support alone does not make the full Qwen export source-only.
 Fresh source-path eager replay now matches all 836 frozen HF rows. Three newly
 exported context-64/128/256 packages pass 5872/5872 full-vocabulary BF16 native/HF
