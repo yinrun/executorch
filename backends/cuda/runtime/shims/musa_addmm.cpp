@@ -230,6 +230,62 @@ Error fill_empty_product(SlimTensor* out, SlimTensor* self, double beta) {
   return check_mudnn(operation.Run(handle, output, output), "Unary.Run");
 }
 
+Error pack_bmm_operand(
+    SlimTensor* operand,
+    std::optional<SlimTensor>& packed,
+    cudaStream_t stream) {
+  const int64_t batch = operand->size(0);
+  const int64_t rows = operand->size(1);
+  const int64_t columns = operand->size(2);
+  const auto strides = operand->strides();
+  const bool dense_row =
+      (rows == 1 || strides[1] == columns) && strides[2] == 1;
+  const bool dense_column = strides[1] == 1 && strides[2] == rows;
+  if ((dense_row || dense_column) &&
+      (batch <= 1 || strides[0] == 0 || strides[0] >= rows * columns)) {
+    return Error::Ok;
+  }
+  const bool row_major = strides[2] == 1 && strides[1] >= columns;
+  const bool column_major = strides[1] == 1 && strides[2] >= rows;
+  ET_CHECK_OR_RETURN_ERROR(
+      row_major || column_major,
+      NotSupported,
+      "MUSA bmm cannot pack a matrix without a dense inner axis");
+  const int64_t inner = row_major ? columns : rows;
+  const int64_t outer = row_major ? rows : columns;
+  const int64_t pitch = row_major ? strides[1] : strides[2];
+  const bool separate_batches =
+      batch <= 1 || strides[0] == 0 || strides[0] / outer >= pitch;
+  const bool interleaved_batches =
+      strides[0] >= inner && (pitch - inner) / strides[0] >= batch - 1;
+  ET_CHECK_OR_RETURN_ERROR(
+      separate_batches || interleaved_batches,
+      NotSupported,
+      "MUSA bmm cannot pack overlapping matrix batches");
+  const int64_t packed_strides[] = {
+      rows * columns, row_major ? columns : 1, row_major ? 1 : rows};
+  packed.emplace(executorch::backends::aoti::slim::empty_strided(
+      operand->sizes(),
+      executorch::backends::aoti::slim::IntArrayRef(packed_strides, 3),
+      operand->dtype(),
+      operand->device()));
+  const size_t element_size = operand->itemsize();
+  for (int64_t index = 0; index < batch; ++index) {
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpy2DAsync(
+        static_cast<char*>(packed->data_ptr()) +
+            index * packed_strides[0] * element_size,
+        inner * element_size,
+        static_cast<const char*>(operand->data_ptr()) +
+            index * strides[0] * element_size,
+        pitch * element_size,
+        inner * element_size,
+        outer,
+        cudaMemcpyDeviceToDevice,
+        stream));
+  }
+  return Error::Ok;
+}
+
 }  // namespace
 
 extern "C" {
@@ -611,6 +667,22 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
     return fill_empty_product(out, out, 0.0);
   }
 
+  auto device_guard = CUDAGuard::create(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
+  auto stream_result = getCurrentCUDAStream(out->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
+  cudaStream_t stream = stream_result.get();
+  std::optional<SlimTensor> packed_mat1;
+  std::optional<SlimTensor> packed_mat2;
+  ET_CHECK_OK_OR_RETURN_ERROR(pack_bmm_operand(mat1, packed_mat1, stream));
+  ET_CHECK_OK_OR_RETURN_ERROR(pack_bmm_operand(mat2, packed_mat2, stream));
+  if (packed_mat1) {
+    mat1 = &*packed_mat1;
+  }
+  if (packed_mat2) {
+    mat2 = &*packed_mat2;
+  }
+
   const auto mat1_strides = mat1->strides();
   const bool mat1_row_major =
       (m == 1 || mat1_strides[1] == k) && mat1_strides[2] == 1 &&
@@ -634,12 +706,6 @@ AOTI_SHIM_EXPORT AOTITorchError aoti_torch_musa_bmm_out(
       mat2_row_major || mat2_column_major,
       NotSupported,
       "MUSA bmm supports contiguous or transposed mat2 only");
-  auto device_guard = CUDAGuard::create(out->device_index());
-  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
-  auto stream_result = getCurrentCUDAStream(out->device_index());
-  ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
-  cudaStream_t stream = stream_result.get();
-
   if (batch > 0 && m > 0 && k > 0 && n > 0 &&
       (mat1_strides[1] > 0 || (m == 1 && mat1_strides[1] == 0)) &&
       mat2_strides[1] > 0 && mat1_strides[0] == m * k &&

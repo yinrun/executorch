@@ -58,7 +58,8 @@ uint16_t float_to_half_bits(float value) {
   }
   const uint32_t exponent = (bits >> 23) & 0xff;
   const uint32_t mantissa = bits & 0x7fffff;
-  return static_cast<uint16_t>(((exponent - 112) << 10) | (mantissa >> 13));
+  return static_cast<uint16_t>(
+      ((bits >> 16) & 0x8000) | ((exponent - 112) << 10) | (mantissa >> 13));
 }
 
 float half_bits_to_float(uint16_t value) {
@@ -70,7 +71,8 @@ float half_bits_to_float(uint16_t value) {
   }
   const uint32_t exponent = (value >> 10) & 0x1f;
   const uint32_t mantissa = value & 0x3ff;
-  uint32_t bits = ((exponent + 112) << 23) | (mantissa << 13);
+  uint32_t bits = (static_cast<uint32_t>(value & 0x8000) << 16) |
+      ((exponent + 112) << 23) | (mantissa << 13);
   float result;
   std::memcpy(&result, &bits, sizeof(result));
   return result;
@@ -872,6 +874,69 @@ TEST_F(MusaAddmmTest, BmmRejectsOverlappingBatches) {
   delete output;
   delete mat1;
   delete mat2;
+}
+
+TEST_F(MusaAddmmTest, BmmPacksInterleavedAndPaddedMatrices) {
+  const std::array<std::vector<int64_t>, 4> left_layouts = {
+      std::vector<int64_t>{4, 12, 1}, {18, 6, 1}, {3, 1, 9}, {0, 6, 1}};
+  const std::array<std::vector<int64_t>, 4> right_layouts = {
+      std::vector<int64_t>{4, 1, 12}, {16, 1, 8}, {2, 6, 1}, {12, 3, 1}};
+  for (ScalarType dtype : {ScalarType::Float, ScalarType::Half, ScalarType::BFloat16}) {
+    for (size_t layout = 0; layout < left_layouts.size(); ++layout) {
+      for (int64_t offset : {0, 3}) {
+        const auto& left_strides = left_layouts[layout];
+        const auto& right_strides = right_layouts[layout];
+        const int64_t left_size = offset + 1 + 2 * left_strides[0] +
+            2 * left_strides[1] + 3 * left_strides[2];
+        const int64_t right_size = offset + 1 + 2 * right_strides[0] +
+            3 * right_strides[1] + right_strides[2];
+        std::vector<float> left_values(left_size, -19);
+        std::vector<float> right_values(right_size, -23);
+        std::vector<float> expected(18, 0);
+        for (int64_t batch = 0; batch < 3; ++batch) {
+          for (int64_t row = 0; row < 3; ++row) {
+            for (int64_t inner = 0; inner < 4; ++inner) {
+              left_values[offset + batch * left_strides[0] + row * left_strides[1] +
+                          inner * left_strides[2]] = row - inner;
+            }
+          }
+          for (int64_t inner = 0; inner < 4; ++inner) {
+            for (int64_t column = 0; column < 2; ++column) {
+              right_values[offset + batch * right_strides[0] + inner * right_strides[1] +
+                           column * right_strides[2]] = inner + column + batch;
+            }
+          }
+          for (int64_t row = 0; row < 3; ++row) {
+            for (int64_t column = 0; column < 2; ++column) {
+              for (int64_t inner = 0; inner < 4; ++inner) {
+                expected[batch * 6 + row * 2 + column] +=
+                    (row - inner) * (inner + column + batch);
+              }
+            }
+          }
+        }
+        std::unique_ptr<SlimTensor> left(empty_tensor(dtype, {left_size}, {1}));
+        std::unique_ptr<SlimTensor> right(empty_tensor(dtype, {right_size}, {1}));
+        std::unique_ptr<SlimTensor> output(empty_tensor(dtype, {3, 3, 2}, {6, 2, 1}));
+        copy_to_device(left.get(), encode_values(left_values, dtype));
+        copy_to_device(right.get(), encode_values(right_values, dtype));
+        left->set_sizes_and_strides(
+            std::array<int64_t, 3>{3, 3, 4},
+            executorch::runtime::IntArrayRef(left_strides.data(), left_strides.size()),
+            offset);
+        right->set_sizes_and_strides(
+            std::array<int64_t, 3>{3, 4, 2},
+            executorch::runtime::IntArrayRef(right_strides.data(), right_strides.size()),
+            offset);
+        ASSERT_EQ(aoti_torch_musa_bmm_out(output.get(), left.get(), right.get()), Error::Ok);
+        EXPECT_EQ(copy_from_device(output.get(), dtype), expected);
+        left->set_sizes_and_strides(std::array<int64_t, 1>{left_size}, std::array<int64_t, 1>{1}, 0);
+        right->set_sizes_and_strides(std::array<int64_t, 1>{right_size}, std::array<int64_t, 1>{1}, 0);
+        EXPECT_EQ(copy_from_device(left.get(), dtype), left_values);
+        EXPECT_EQ(copy_from_device(right.get(), dtype), right_values);
+      }
+    }
+  }
 }
 
 TEST_F(MusaAddmmTest, BmmSingleRowWithZeroRowStride) {
