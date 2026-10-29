@@ -416,6 +416,16 @@ while token 440 wins in HF batch by **1.52588e-5**. The frozen
 argmax gate. Matching generated text does not erase these failures. The
 independent HF step comparison is running; its outcome is not yet known.
 
+A subsequent `multi-image-prefix136-audit-v1.json` snapshot independently
+rehashes and compares the first 136 completed prompt positions while that same
+HF step process is still alive. Native versus HF step has maximum **1.46627e-4**,
+zero out-of-gate elements and zero argmax mismatches. At position 135, both
+select token **12391**, whereas HF batch selects **440**; HF step versus HF
+batch therefore reproduces the argmax change. This supports a batch/recurrent
+path explanation for this near tie, not a blanket accuracy pass. Prompt
+outlier positions **443/462/463**, the remaining prompt and independent decode
+are outside this partial snapshot and still require the full reference run.
+
 The queued `deployment-boundary-pipeline-v1` waits for that verified reference
 pipeline to exit and requires the full multi-image step gate to pass before
 running any GPU work. It then reruns all three original prepared cases twice
