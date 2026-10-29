@@ -341,6 +341,15 @@ exported = export_with_musa_sdpa_decomposition(model, (patches,)).run_decomposit
 replacement_counts = use_native_vision_math(exported)
 ```
 
+While the full stepwise reference is still running, an independently rehashed
+first-128-position snapshot (`hf-step-prefix128-audit-v1.json`) includes both
+previously failing positions. Native versus HF step has maximum **1.8787e-4**,
+zero out-of-gate logits and matching argmaxes. On the same prefix, HF step
+versus HF batch itself has maximum **0.00417376** and 599 out-of-gate logits,
+where native versus batch has 754. This supports batch/recurrent arithmetic
+as the dominant remaining discrepancy at those positions; it is not proof
+for the unfinished 428-position trajectory and does not erase the batch failure.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
