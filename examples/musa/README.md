@@ -155,12 +155,49 @@ the new layouts. No CPU tensor execution is added.
 provides a single-token wrapper with separate cache positions, three-axis
 interleaved MRoPE and a runtime image-embedding selector. Host position metadata
 and GPU MRoPE match HF, including multiple images and position 4095; small-model
-text/image selection and exported cache mutation pass unit tests. This does
-not yet prove full 4B multimodal execution or a context-4096 boundary sequence.
+text/image selection and exported cache mutation pass unit tests. These unit
+checks alone do not prove full 4B execution or a context-4096 boundary sequence.
 The final regression runs 80 Python tests without skips. The independent
 `vision-stage-audit-v1.json` rehashes the artifacts, rereads both PTDs and all
 native feature outputs, checks a perturbed-output negative control and verifies
 the ten protected 0.8B files. Its status is `passed_vision_component_only`.
+
+### Original report multimodal generation
+
+The complete 4B five-input step now exports as 4710 nodes, 64 mutable states
+and one MUSA delegate. Inputs are token ID, physical cache position, three-axis
+MRoPE position, FP32 image embedding and an image-selection flag. All 426
+original text tensor byte strings remain unchanged in PTD. The six-step
+text/image interface probe passes twice: 12 native/eager full-logit comparisons,
+maximum error **2.5273e-5**, matching GPU argmax and six byte-exact reset pairs.
+Evidence: `multimodal-step-export-v1` and `multimodal-step-native-v1`.
+
+`multimodal-generation-v1` then runs the original text, single-image and
+two-image questions, using freshly executed native vision features. It retains
+context capacity 4096, greedy feedback and a 160-generated-token limit, with
+thinking explicitly disabled. Prompt lengths are 28, 334 and 538; generation
+lengths are 89, 95 and 68 including EOS. Each case finishes at EOS twice in the
+same runner process. All 2298 full-vocabulary outputs and GPU token outputs are
+saved; the 1149 cross-session reset pairs are byte-identical. The CPU controller
+handles tokenization, input/output transport and metadata, not model tensors.
+
+`multimodal-generation-audit-v1.json` independently rereads those outputs,
+checks their hashes, GPU greedy feedback, image rows, physical/MRoPE positions,
+EOS, native library isolation and ten protected 0.8B artifacts. The text case's
+232 checks also pass against the frozen independent HF reference, with maximum
+error **3.1233e-5**. The three fresh visual encodings pass the existing feature
+gate. The audit status is deliberately `passed_generation_and_reset_only`:
+image-question full-logit accuracy against independent HF is not yet accepted.
+
+Answers correctly identify the three shapes/colors and chart values 12/7/19,
+but OCR remains imperfect: `LLAMA 42` becomes `ILLAMA 42`, and the second image's
+text is incomplete. Readable output and deterministic reset do not establish
+numerical correctness, nor identify the cause of OCR errors. Full HF image/text
+trajectory comparison is the next gate; first validate batched reference
+prefill against the frozen stepwise text reference before using it for images.
+These runs are not fair throughput measurements, standalone native-controller
+deployment acceptance, original-BF16 quantization-loss measurements or an
+actual position-4095 cache boundary test.
 
 ```bash
 python -m examples.musa.aoti_gguf_inventory \
