@@ -403,6 +403,32 @@ All 40 bundle files are rehashed; 14 packager regression tests pass. These
 host-only checks do not establish GPU inference after relocation or actual
 context-4096 execution; those remain pending, and no default is promoted.
 
+The complete production-feature multi-image HF **batch** comparison has now
+finished and failed its unchanged gate. Independent
+`multi-image-batch-reference-audit-v1.json` rereads **150,233,600** logits over
+605 aligned positions: maximum **0.00351620**, mean **1.89803e-5**, **505**
+out-of-gate elements, and one argmax mismatch. All 68 generated IDs still agree
+through EOS. The outliers are confined to prompt positions 443 (20), 462 (378)
+and 463 (107); decode has none. The argmax difference is at prompt position
+135, with no tolerance outlier there: token 12391 wins natively by **1.90735e-5**,
+while token 440 wins in HF batch by **1.52588e-5**. The frozen
+`multi-image-batch-margin-v1.json` verifies this near tie without relaxing the
+argmax gate. Matching generated text does not erase these failures. The
+independent HF step comparison is running; its outcome is not yet known.
+
+The queued `deployment-boundary-pipeline-v1` waits for that verified reference
+pipeline to exit and requires the full multi-image step gate to pass before
+running any GPU work. It then reruns all three original prepared cases twice
+through the relocated package, including fresh native vision encoding, followed
+by a separate synthetic context-boundary test. That test uses 4095 prompt tokens
+and actually decodes at cache position 4095, requiring the controller to stop at
+capacity rather than execute position 4096; two complete runs check reset.
+A synthetic stop-ID sentinel prevents ordinary chat EOS from truncating this
+capacity test. Three host checks of its exact fixture builder pass, including
+oversized-prompt and invalid-MRoPE rejection. The actual GPU boundary run is
+still pending; this is not long-context independent numerical accuracy or a
+performance claim. Neither waiter starts a competing GPU job.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
