@@ -341,7 +341,7 @@ exported = export_with_musa_sdpa_decomposition(model, (patches,)).run_decomposit
 replacement_counts = use_native_vision_math(exported)
 ```
 
-While the full stepwise reference is still running, an independently rehashed
+While the full stepwise reference was still running, an independently rehashed
 first-128-position snapshot (`hf-step-prefix128-audit-v1.json`) includes both
 previously failing positions. Native versus HF step has maximum **1.8787e-4**,
 zero out-of-gate logits and matching argmaxes. On the same prefix, HF step
@@ -349,6 +349,21 @@ versus HF batch itself has maximum **0.00417376** and 599 out-of-gate logits,
 where native versus batch has 754. This supports batch/recurrent arithmetic
 as the dominant remaining discrepancy at those positions; it is not proof
 for the unfinished 428-position trajectory and does not erase the batch failure.
+
+The full `hf-single-image-gelu-step-v1` run subsequently completed all 428
+aligned positions with independent greedy generation through EOS. The native
+controller and HF step reference agree on all 95 generated IDs and every
+argmax. `single-image-step-complete-audit-v1.json` independently rehashes sources
+and rereads all 106,280,960 logits per comparison: native versus HF step has
+maximum **0.00100231**, mean **3.26145e-6**, and **zero** out-of-gate elements
+under the unchanged `atol=rtol=0.001` rule. This is tolerance agreement, not
+byte equality. Native versus HF batch still has **754** out-of-gate elements;
+HF step versus HF batch itself has **599**. All three comparisons have matching
+argmaxes. The result supports a batch/recurrent numerical-path explanation,
+but does not turn the original batch gate into a pass or establish quantization
+loss against original floating-point weights. Multi-image independent precision,
+actual context-4096 execution, relocated 4B deployment and fair performance
+measurements remain separate unfinished gates.
 
 ### Native prepared-fixture controller
 
