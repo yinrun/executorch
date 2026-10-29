@@ -2,6 +2,36 @@
 
 ## Qwen3.5-0.8B text bring-up
 
+**Runtime-only BF16 deployment (2026-10-29):** the standard source build and
+context-256 export now pass independent packaging and relocation to a path with
+Chinese characters and spaces. Two new qualitative prompts produce 512 fresh
+HF/MUSA BF16 steps, all byte-identical to fused valid-length ET eager. The moved
+package passes 1024 native calls on these inputs plus 648 frozen regression
+calls: all 1672 complete vocabulary logits match byte-for-byte, with 836 reset
+checks and two EOS stops. Both new prompts hit the context limit, not EOS.
+One perturbed BF16 value still passes the old tolerance but fails the exact gate.
+This does not claim arbitrary-input bitwise equivalence or answer quality.
+
+The package includes hash-checked export metadata and an explicit 512 MiB cache
+default. Actual load logs show package-local ExecuTorch libraries and no
+Torch/Python dependencies; native `.text` matches the standard build. Twenty-one
+packaging/reference tests and ten CI-planning tests pass. The independent audit
+checks 17093 files, including rehashed evidence for the earlier 5872 source-only
+comparisons; those earlier GPU comparisons were not rerun in this round.
+
+On the final context-256 graph, six alternating runs against the correct
+packed-valid v4 shim retain all 1512 inline logit/token checks and improve decode
+median from 16.156 to 16.616 tok/s (+2.85%). Serial single-token prompt median is
+16.521 tok/s, not batched prefill. The separate same-graph context-64 comparison
+of optimized isolated v5 versus source integration is 16.696 to 16.624 tok/s
+(-0.43%); source integration alone is not a speedup. Both are shared-GPU,
+unlocked-clock measurements. Aggregate method-host time accounts for 95.61% of
+final decode wall time but includes GPU waits, not just kernel execution.
+Shared profile job windows do not support exclusive per-kernel percentages.
+See workspace `QWEN35_BF16_DEPLOYMENT.md`, `deployed-bf16-audit-v1.json` and
+`bf16-default-promotion-v1/result.json` for acceptance and default-entrypoint
+verification. Historical milestones below retain their original scope.
+
 **Source-integrated reductions (`a5720d982c`, 2026-10-29):** the scoped
 BF16 query-normalization sum and FP32 sum/mean paths now live in MusaBackend
 and the standard native shim library. BF16 covers `[1,1,16,128]` last-axis sum;
@@ -35,8 +65,9 @@ TorchInductor's Unicode symbol-name regex did not match GNU ld's byte-wise
 binary-path mangling. That failed v1 package ran zero inference steps and remains
 preserved. The accepted v2 packages use fresh ASCII caches; their model/results
 paths remain Chinese. No system PyTorch files were modified. Arbitrary cache
-paths, independent BF16 packaging/relocation and default-entrypoint promotion
-are not accepted yet. This round makes no new performance claim. Historical
+paths were not accepted at this milestone; independent BF16 packaging/relocation
+and default-entrypoint promotion were still pending then. This reduction-only
+round makes no new performance claim. Historical
 milestones below retain their original validation scope.
 
 **Valid-length attention implementation (2026-10-29, experimental):**
@@ -126,12 +157,15 @@ an existing trajectory:
 MUSA_LAUNCH_BLOCKING=1 "$PYTHON" -m examples.musa.aoti_qwen35_generate_reference \
   --checkpoint-dir /path/to/Qwen3.5-0.8B \
   --prompts examples/musa/qwen35_precision_prompts.json \
-  --context-length 256 --fuse-projections --output-dir /tmp/qwen35-fresh-reference
+  --context-length 256 --fuse-projections --valid-length-attention \
+  --output-dir /tmp/qwen35-fresh-reference
 ```
 
 The JSON input is a nonempty list of unique `name` and nonempty `prompt` pairs.
 HF generates until EOS or the context limit; ET eager replays those exact inputs
 and checks every BF16 vocabulary value, optionally with source projection fusion.
+`--valid-length-attention` selects the matching causal-prefix eager path and
+records it in the manifest; omitting it retains the historical padded default.
 The manifest records checkpoint/prompt hashes, FP32 RoPE buffer dtypes, stopping
 reasons, token IDs, and eager byte-equality counts. Generation refuses to overwrite
 an output directory and exits unsuccessfully if eager differs, while retaining
@@ -726,6 +760,21 @@ hashes in `manifest.json`. It rejects Torch/Python dependencies, unexpected
 external libraries, and non-relocatable search paths. Failed packaging does
 not publish a partial output directory, and existing packages are not
 overwritten. Do not use this tool on untrusted binaries.
+
+Optionally pass `--export-metadata /tmp/model/result.json` to check the exported
+PTE/PTD hashes and include `model/export.json`. Its artifact names/hashes match
+the packaged files, and `source_export_metadata_sha256` identifies the original
+metadata without modifying it. This permits the strict Qwen comparison tool to
+validate a relocated package. Export-stage `runtime_validated` fields are not
+rewritten into acceptance claims; retain a separate runtime validation report.
+Undefined embedded `__triton_*` binary symbols are rejected before publication,
+including the observed Unicode compiler-cache mangling failure.
+
+`--musa-cache-bytes 536870912` records an optional 512 MiB allocator-cache
+default in `manifest.json` and `run.sh`. The default is zero when omitted;
+explicit runner arguments override the launcher default, including
+`--musa_cache_bytes=0`. This is a cache limit, not a model-memory limit. Check
+accuracy and exit live/cache counters with the selected runtime configuration.
 
 The target needs a compatible Linux architecture/glibc/libstdc++, MUSA SDK,
 GPU driver, GPU ISA matching the embedded kernels, GPU access, and writable
