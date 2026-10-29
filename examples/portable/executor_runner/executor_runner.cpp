@@ -30,6 +30,7 @@
 #include <optional>
 #if defined(EXECUTORCH_USE_MUSA)
 #include <executorch/examples/musa/benchmark.h>
+#include <executorch/examples/musa/qwen35_generation.h>
 #include <executorch/extension/cuda/cuda_allocator.h>
 #include <limits>
 #endif
@@ -121,6 +122,24 @@ DEFINE_uint32(
     musa_warmup_executions,
     10,
     "Unmeasured executions before MUSA benchmark samples; used only with --musa_benchmark_output.");
+DEFINE_string(
+    musa_qwen35_fixture,
+    "",
+    "Prefix of prepared Qwen3.5-4B multimodal fixture files.");
+DEFINE_string(
+    musa_qwen35_output, "", "Native Qwen3.5 generation and timing JSON output.");
+DEFINE_string(
+    musa_qwen35_dump_prefix,
+    "",
+    "Optional full-logit dump prefix for native generation validation.");
+DEFINE_bool(
+    musa_qwen35_validate_only,
+    false,
+    "Validate the fixture without loading a model or executing GPU work.");
+DEFINE_uint32(
+    musa_qwen35_max_new_tokens, 160, "Maximum generated tokens, including EOS.");
+DEFINE_uint32(musa_qwen35_warmup_runs, 1, "Unmeasured complete native generations.");
+DEFINE_uint32(musa_qwen35_runs, 3, "Measured complete native generations.");
 #endif
 DEFINE_string(
     method_name,
@@ -452,6 +471,38 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+#if defined(EXECUTORCH_USE_MUSA)
+  std::optional<executorch::examples::musa::Qwen35Fixture> qwen35_fixture;
+  ET_CHECK_MSG(
+      !FLAGS_musa_qwen35_validate_only || !FLAGS_musa_qwen35_fixture.empty(),
+      "Qwen3.5 validation requires a fixture");
+  if (!FLAGS_musa_qwen35_fixture.empty()) {
+    ET_CHECK_MSG(
+        !FLAGS_server_mode && FLAGS_inputs.empty() &&
+            FLAGS_input_shapes.empty() && FLAGS_musa_benchmark_output.empty() &&
+            FLAGS_output_file.empty() && FLAGS_num_executions == 1,
+        "Qwen3.5 generation cannot be combined with other runner input/output modes");
+    qwen35_fixture.emplace();
+    std::string fixture_error;
+    ET_CHECK_MSG(
+        qwen35_fixture->load(FLAGS_musa_qwen35_fixture, fixture_error),
+        "%s",
+        fixture_error.c_str());
+    ET_CHECK_MSG(
+        qwen35_fixture->validate_generation(
+            FLAGS_musa_qwen35_max_new_tokens, fixture_error),
+        "%s",
+        fixture_error.c_str());
+    if (FLAGS_musa_qwen35_validate_only) {
+      ET_LOG(Info, "Qwen3.5 fixture validation passed; no model was loaded");
+      return 0;
+    }
+    ET_CHECK_MSG(
+        !FLAGS_musa_qwen35_output.empty(),
+        "Qwen3.5 generation requires a JSON output path");
+  }
+#endif
+
   PrintOutputMode print_output_mode;
   if (FLAGS_print_output == "none") {
     print_output_mode = PrintOutputMode::None;
@@ -774,6 +825,23 @@ int main(int argc, char** argv) {
             load_tick_ratio.numerator / load_tick_ratio.denominator /
             1000000.0);
   }
+
+#if defined(EXECUTORCH_USE_MUSA)
+  if (qwen35_fixture) {
+    ET_CHECK_MSG(
+        !bundle_io, "Qwen3.5 fixture mode does not support bundled programs");
+    executorch::examples::musa::run_qwen35_generation(
+        *method,
+        *method_meta,
+        *qwen35_fixture,
+        FLAGS_musa_qwen35_output,
+        FLAGS_musa_qwen35_dump_prefix,
+        FLAGS_musa_qwen35_max_new_tokens,
+        FLAGS_musa_qwen35_warmup_runs,
+        FLAGS_musa_qwen35_runs);
+    return 0;
+  }
+#endif
 
   if (FLAGS_server_mode) {
     ET_CHECK_MSG(

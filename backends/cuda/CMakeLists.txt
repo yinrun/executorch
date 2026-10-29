@@ -543,6 +543,10 @@ if(BUILD_TESTING)
   include(${EXECUTORCH_ROOT}/tools/cmake/Test.cmake)
 
   if(EXECUTORCH_BUILD_MUSA)
+    et_cxx_test(
+      test_musa_qwen35_fixture SOURCES
+      runtime/shims/tests/test_musa_qwen35_fixture.cpp
+    )
     foreach(
       _musa_test addmm convolution batch_norm activation causal_attention reduce gguf device
       storage allocator

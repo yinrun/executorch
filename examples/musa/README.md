@@ -199,6 +199,79 @@ These runs are not fair throughput measurements, standalone native-controller
 deployment acceptance, original-BF16 quantization-loss measurements or an
 actual position-4095 cache boundary test.
 
+The first complete independent image/text comparison is now preserved as a
+failure (`hf-multimodal-batched-v1`). Text passes 116 positions, but the single
+image's 428-position trajectory has 96649 out-of-gate logits, maximum error
+**0.0232811**, despite identical generated IDs. All violations are in the prompt;
+the multi-image reference was not reached. Feeding identical native visual
+features to HF batch prefill reduces violations to 40 and the maximum to
+**0.0028620**. First-16-position stepwise HF probes pass with either feature
+source, reaching **6.6102e-5** maximum error with identical native features.
+These diagnostics separate feature propagation from batch/recurrent arithmetic;
+they do not establish correctness for the untested remainder.
+
+`vision-stages-v1` exports 30 intermediate outputs and reproduces the original
+native final features byte-for-byte. Patch embedding and positional addition
+are exact; the first block differs by at most **5.0068e-6**. Differences grow to
+outliers in block 23 (maximum **1.201416**, four out-of-gate values), although
+the merged features still pass the earlier component gate. Further intra-block
+diagnosis is needed; do not relax the complete-model tolerance to pass this case.
+
+### Native prepared-fixture controller
+
+The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
+4B step. Tokenization and image preprocessing happen before the loop; the
+fixture carries native vision features, not raw images. Six little-endian files
+share a prefix: `.tokens.bin` (int64 prompt), `.positions.bin` (three axis-major
+int64 prompt coordinates), `.image_rows.bin` (int64, -1 for text),
+`.embeddings.bin` (FP32 rows of 2560), `.eos.bin` (int64 stop IDs), and
+`.expected.bin` (int64 generated IDs, empty when no expected sequence is given).
+Image rows must be sequential and correspond exactly to image placeholders.
+
+```bash
+executor_runner --musa_qwen35_fixture=/path/single_image \
+  --musa_qwen35_validate_only
+executor_runner --model_path=/path/qwen35_4b_multimodal_step.pte \
+  --data_path=/path/aoti_musa_blob.ptd \
+  --musa_qwen35_fixture=/path/single_image \
+  --musa_qwen35_output=/path/native.json \
+  --musa_qwen35_max_new_tokens=160 --musa_qwen35_warmup_runs=1 \
+  --musa_qwen35_runs=3 --musa_cache_bytes=536870912
+```
+
+Each generation resets through physical position zero and uses the GPU argmax
+as feedback. A host full-logit scan checks finiteness and argmax; it does not
+replace GPU token selection. Expected IDs, when supplied, are checked online
+but are never fed back. EOS, token limit and physical context limit stop the
+loop. Input dtype/shape, token ranges, finite image features and prompt/decode
+MRoPE bounds are checked. The six files are bounded before allocation.
+
+JSON separates serial-token prompt processing from subsequent decode steps;
+the first generated token belongs to prompt processing. Timings synchronize
+the device and include host input preparation and output validation. They
+exclude model loading, tokenization and vision encoding. Optional
+`--musa_qwen35_dump_prefix=/path/logits` saves every full-logit output for
+validation, outside per-step timing but inside total loop wall time; disable
+it for benchmarking. Warmup runs remain explicitly labeled in the report.
+This is not batched prefill or an integrated image/tokenizer application.
+
+The isolated `build-native-generation-v1` compiles the new runner and passes
+nine host-only C++ fixture tests. Five prepared fixtures (including a 4096-token
+prompt) pass native input validation; five malformed-file/NaN/range cases are
+rejected. Fixture validation does not execute the model, so that 4096-token
+case is not yet a runtime boundary acceptance.
+
+`native-generation-audit-v2` verifies 244 byte-exact outputs against the frozen
+runner: two six-step text/image interface runs and two complete 116-step text
+generations. Online expected-token checking rejects a deliberately changed
+expected ID, and the subsequent unchanged positive control succeeds. The first
+validation harness had already completed all 244 positive checks, then failed
+by requiring an assertion message from a build with logging disabled. That
+failure remains intact; v2 reaudits the saved positives and runs the paired
+negative/positive controls without depending on disabled logging. Full original
+image-question controller runs, real context-boundary execution, relocated
+deployment and repeated performance measurements remain separate gates.
+
 ```bash
 python -m examples.musa.aoti_gguf_inventory \
   --models /path/Qwen3.5-4B-Q4_K_M.gguf /path/mmproj-Qwen3.5-4B-BF16.gguf \
