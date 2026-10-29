@@ -467,6 +467,28 @@ validation, outside per-step timing but inside total loop wall time; disable
 it for benchmarking. Warmup runs remain explicitly labeled in the report.
 This is not batched prefill or an integrated image/tokenizer application.
 
+After accuracy acceptance, summarize non-diagnostic native timings with:
+
+```bash
+python -m examples.musa.aoti_qwen35_benchmark_report \
+  --generation /path/native.json --vision /path/vision-benchmark.json \
+  --output /path/new-performance-summary.json
+```
+
+The standard-library-only summarizer requires at least one warmup and three
+measured runs, rejects logits dumps, incomplete reports, non-finite timings,
+inconsistent counts and changed greedy sequences, and refuses to overwrite
+results. It reports minimum/median/maximum rates separately for serial-token
+prompt and subsequent decode, excluding warmup and assigning the first
+generated token to prompt processing. Vision timings must come from the native
+`--musa_benchmark_output` synchronized-method report. Neither those method
+times nor the generation loop includes model loading, tokenization or image
+preprocessing; the loop also excludes vision encoding. End-to-end request
+latency must be measured separately. Summaries explicitly do not establish
+independent accuracy, batched prefill, pure-GPU time or a speedup against the
+historical llama.cpp report. Host regression tests use synthetic timings, not
+new model performance measurements.
+
 The isolated `build-native-generation-v1` compiles the new runner and passes
 nine host-only C++ fixture tests. Five prepared fixtures (including a 4096-token
 prompt) pass native input validation; five malformed-file/NaN/range cases are
