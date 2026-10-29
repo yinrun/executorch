@@ -513,8 +513,28 @@ not batched prefill. Fresh requests include model loading, native vision,
 generation and output, but exclude raw-image preprocessing and tokenization.
 These correctness-first packed kernels are not a performance-optimized release;
 the historical unhealthy llama.cpp 1.77 tok/s result is not a speedup baseline.
-Process-attributed memory validation and the final consolidated reproduction
-report remain unfinished.
+The consolidated workspace reproduction report is `QWEN35_4B_Q4KM_REPORT.md`;
+the final requirement-by-requirement completion audit remains unfinished.
+
+A separate, untimed `memory-profile-4b-v2` run uses MUPTI driver callbacks to
+account for synchronous and asynchronous allocation/free requests in the same
+unchanged package. Three vision outputs remain byte-identical and all three
+generated ID sequences match their references. Independently reconstructed
+requested-byte peaks are **943,278,624** for each 1200-patch vision input,
+**837,368,224** for the 800-patch input and **3,221,175,496** for each text-model
+case (approximately **0.8785 / 0.7799 / 3.0000 GiB**). All six traces end with
+zero live requested bytes, no unmatched releases and no unsupported successful
+allocation API. `memory-profile-4b-audit-v1.json` rehashes sources and outputs,
+reconstructs the event balances and verifies the saved features and IDs.
+
+This measures process driver-API requested lifetimes, not physical residency:
+async releases are accounted at enqueue return, excluding pending releases,
+pool reservations and driver-internal overhead. Sequential vision/text process
+peaks must not be summed as concurrent memory. Profiler timings are not used as
+benchmark measurements. Known synchronous and mixed async/host probes reconstruct
+20,480 and 196,608 requested bytes respectively. Earlier MEMORY2 tracing returned
+success but zero events, and the first model callback probe missed async APIs;
+both failures remain frozen and are not accepted as memory measurements.
 
 ### Native prepared-fixture controller
 
