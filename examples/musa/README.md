@@ -377,8 +377,31 @@ the PTD segments and all feature outputs, checks native library isolation
 files. These are non-instrumented vision exports, not full multimodal accuracy,
 same-process vision reset, context-4096 or performance acceptance. The original
 multi-image question is being rerun with these production features in the C++
-controller, empty expected-token input and two reset runs; its independent
-HF full-logit comparison remains pending.
+controller, empty expected-token input and two reset runs. Both runs have now
+completed 605 steps with the same 68 generated IDs through EOS. The independent
+`multi-image-production-audit-v1.json` rehashes inputs/artifacts and rereads
+150,233,600 logits per run: all 605 reset pairs are byte-identical, the original
+538-token prompt and three-axis positions are unchanged, and all 500 image
+rows come from the production native features. This is generation/reset
+acceptance, not independent model precision. Separate HF batch and step
+reference jobs run sequentially and retain failures; their full-logit
+comparison is still pending.
+
+`production-package-candidate-v1` packages the text step and both vision grids
+using `package_aoti.py`, preserving PTE/PTD hashes, checking four ELF objects per
+component, and setting a 512 MiB allocator-cache default. A separate copy at
+`relocated 4B 候选 v1` contains original prepared prompt/position files and image
+patches plus a shell `run_case.sh` entry point. It executes the native vision
+models, concatenates features in image order, then invokes the C++ generator
+with empty expected-token input; inference needs no Python. Tokenization and
+raw-image preprocessing are not bundled, so this is a prepared-case deployment
+candidate rather than an arbitrary-image/chat application. Six host fixture
+checks (including rejected oversized context and invalid position) and six
+launcher negative checks pass from an unrelated working directory. The loader
+selects relocated libraries despite a conflicting inherited library path.
+All 40 bundle files are rehashed; 14 packager regression tests pass. These
+host-only checks do not establish GPU inference after relocation or actual
+context-4096 execution; those remain pending, and no default is promoted.
 
 ### Native prepared-fixture controller
 
