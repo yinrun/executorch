@@ -440,8 +440,8 @@ crossing counts, so 505 minus 380 is not a count of independent implementation
 bugs. The native-versus-batch failure remains frozen. These results validate
 the original multi-image trajectory against a matched step reference, not
 arbitrary inputs, original floating-point quantization loss or performance.
-The relocated full-trajectory validation has subsequently passed; the actual
-4096 boundary job is now running and has no final result yet.
+The relocated full-trajectory validation and the actual 4096 boundary job
+have subsequently passed; their independent audits are described below.
 
 The queued `deployment-boundary-pipeline-v1` waits for that verified reference
 pipeline to exit and requires the full multi-image step gate to pass before
@@ -452,8 +452,8 @@ and actually decodes at cache position 4095, requiring the controller to stop at
 capacity rather than execute position 4096; two complete runs check reset.
 A synthetic stop-ID sentinel prevents ordinary chat EOS from truncating this
 capacity test. Three host checks of its exact fixture builder pass, including
-oversized-prompt and invalid-MRoPE rejection. The actual GPU boundary run is
-now in progress; this is not long-context independent numerical accuracy or a
+oversized-prompt and invalid-MRoPE rejection. The actual GPU boundary run has
+now completed; this is not long-context independent numerical accuracy or a
 performance claim. Neither waiter starts a competing GPU job.
 
 `relocated-4b-runtime-validation-v1` completes the three original cases twice
@@ -474,8 +474,22 @@ and rejects seven negative controls covering changed native/reset outputs,
 out-of-tolerance values, NaN, wrong vocabulary shape, near-tie argmax changes
 and wrong feedback IDs. This accepts relocation for the prepared cases only:
 the HF batch failures are retained, raw-image preprocessing/tokenization are
-not bundled, actual context-boundary execution remains unfinished, and the
-benchmark waiter has not started measurements or established performance.
+not bundled, and this audit itself does not establish context-boundary
+execution or performance.
+
+`native-context4096-execution-v1` subsequently finishes two actual 4096-step
+runs, with 4095 synthetic prompt tokens followed by a real decode at cache
+position **4095**. Both generate two tokens and stop with `context_limit`,
+rather than execute position 4096 or stop at the synthetic EOS sentinel.
+All **8192** saved full-vocabulary outputs are finite and the **4096** reset
+pairs are byte-identical. Oversized prompts and invalid MRoPE positions are
+rejected through the real runner entry before model loading, not only through
+the host validate-only path. `context4096-execution-audit-v1.json` independently
+rehashes the package, fixtures, runner logs and saved outputs; it checks
+**2,034,237,440** finite logit elements, both boundary greedy IDs and the stop
+contract. This is capacity/reset coverage, not independent long-sequence
+accuracy or measured throughput. The sequential benchmark has now started
+after these gates passed; its complete performance result is still pending.
 
 ### Native prepared-fixture controller
 
