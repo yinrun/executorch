@@ -323,6 +323,23 @@ HF-step-versus-HF-batch, retaining full logits and independent greedy feedback.
 input alignment, greedy tokens, protected hashes and regression counts; its
 status remains `audited_accuracy_failure_with_improvement` for the batch gate.
 
+For non-instrumented exports, `use_native_vision_math` in
+`aoti_qwen35_gguf_vision_native.py` explicitly converts an undecomposed exported
+vision graph before partitioning. It requires 49 affine LayerNorms, 24 FP32
+softmaxes, 24 tanh GELUs and one erf GELU on one consistent 800/1200-patch grid.
+Every replacement is validated before any graph node is changed; partial,
+mixed-grid and already-converted graphs are rejected. Parameters, output
+nodes and original weight bytes are not replaced. Four host/meta tests pass.
+This conversion is not automatic and its host tests are not native production
+export acceptance; both original grids and all three images must be checked.
+
+```python
+from examples.musa.aoti_qwen35_gguf_vision_native import use_native_vision_math
+
+exported = export_with_musa_sdpa_decomposition(model, (patches,)).run_decompositions({})
+replacement_counts = use_native_vision_math(exported)
+```
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
