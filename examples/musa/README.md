@@ -277,6 +277,20 @@ matrix/norm/softmax tests pass without skips. The first standalone single-image
 candidate run uses the original prompt and candidate native features, with
 expected IDs disabled so native greedy feedback remains independent.
 
+That single-image run is complete (`native-single-image-softmax-v2`): all 428
+input positions remain aligned with the frozen independent HF trajectory and
+all 95 generated IDs match through EOS. Full-logit maximum decreases from
+**0.0232811** to **0.0102887**, and out-of-gate elements from **96649** to
+**21112**. Every violation remains in the 334-token prompt; decode has none.
+Thus the original image/text gate still fails despite improved errors and
+identical IDs. This does not validate multi-image accuracy, fair performance,
+4096-position execution or a relocated deployment. Next isolate the already
+observed same-input GELU discrepancy, then rerun the complete-model gate.
+`single-image-softmax-audit-v2.json` independently checks all 106280960 logits,
+input-prefix alignment, greedy feedback, hashes, 20 protected files and the
+88 Python/39 native regressions. Its explicit status is
+`audited_accuracy_failure_with_improvement`.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
