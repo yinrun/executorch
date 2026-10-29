@@ -19,6 +19,8 @@ NATIVE_TARGETS = tuple(
         "convolution",
         "batch_norm",
         "activation",
+        "causal_attention",
+        "reduce",
         "device",
         "storage",
         "allocator",
@@ -214,6 +216,10 @@ def commands(args, cmake, ctest, flatc, torch_prefix):
             "test_musa_activation_out",
             "test_musa_convolution_out",
             "test_musa_qwen35",
+            "test_musa_qwen35_fusion",
+            "test_musa_qwen35_generate_reference",
+            "test_musa_causal_attention",
+            "test_musa_reduction",
         ):
             yield module, [
                 sys.executable,

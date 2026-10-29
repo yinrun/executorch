@@ -75,6 +75,15 @@ def inspect_elf(path: Path, readelf: str) -> dict:
             raise ValueError(
                 f"Non-relocatable runtime search path in {path.name}: {search}"
             )
+    symbols = subprocess.check_output([readelf, "--wide", "-Ws", str(path)], text=True)
+    unresolved = sorted(
+        set(re.findall(r"\bUND\s+(__triton_\w+_(?:start|end|size))\b", symbols))
+    )
+    if unresolved:
+        raise ValueError(
+            f"Unresolved embedded Triton binary symbols in {path.name}: {unresolved}; "
+            "re-export and check compiler cache paths"
+        )
     return {"needed": needed, "rpath": paths}
 
 
@@ -122,10 +131,19 @@ def model_libraries(pte: Path, ptd: Path) -> dict[str, bytes]:
 
 
 def package(
-    build_dir: Path, pte: Path, ptd: Path, output: Path, patchelf: str, readelf: str
+    build_dir: Path,
+    pte: Path,
+    ptd: Path,
+    output: Path,
+    patchelf: str,
+    readelf: str,
+    export_metadata: Path | None = None,
+    musa_cache_bytes: int = 0,
 ) -> dict:
     if output.exists():
         raise FileExistsError(f"Refusing to overwrite {output}")
+    if type(musa_cache_bytes) is not int or not 0 <= musa_cache_bytes < 2**64:
+        raise ValueError("MUSA cache bytes must be an unsigned 64-bit integer")
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = {
         "bin/executor_runner": build_dir / "executor_runner",
@@ -137,12 +155,35 @@ def package(
     for source in sources.values():
         if not source.is_file():
             raise FileNotFoundError(source)
+    metadata = None
+    if export_metadata is not None:
+        payload = export_metadata.read_bytes()
+        metadata = json.loads(payload)
+        if not isinstance(metadata, dict) or not isinstance(
+            metadata.get("artifacts"), dict
+        ):
+            raise ValueError("Export metadata must contain artifact hashes")
+        packaged_artifacts = {}
+        for source, name in ((pte, "model.pte"), (ptd, "model.ptd")):
+            with source.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if metadata["artifacts"].get(source.name) != digest:
+                raise ValueError(
+                    f"Export metadata package hash mismatch: {source.name}"
+                )
+            packaged_artifacts[name] = digest
+        metadata = {
+            **metadata,
+            "artifacts": packaged_artifacts,
+            "source_export_metadata_sha256": hashlib.sha256(payload).hexdigest(),
+        }
     manifest = {
         "version": 1,
         "platform": "linux",
         "requirements": "Matching host architecture and embedded-kernel GPU ISA, compatible MUSA SDK/driver; no Python/Torch runtime",
         "elf": {},
         "files": {},
+        "runtime_defaults": {"musa_cache_bytes": musa_cache_bytes},
     }
     with tempfile.TemporaryDirectory(
         prefix=".musa-package-", dir=output.parent
@@ -166,8 +207,23 @@ def package(
             library.write_bytes(data)
             manifest["elf"][f"model:{key}"] = inspect_elf(library, readelf)
         launcher = root / "run.sh"
-        launcher.write_text(LAUNCHER)
+        launcher_text = LAUNCHER
+        if musa_cache_bytes:
+            launcher_text = launcher_text.replace(
+                'exec "$ROOT/bin/executor_runner"',
+                f'exec "$ROOT/bin/executor_runner" --musa_cache_bytes={musa_cache_bytes}',
+            )
+        launcher.write_text(launcher_text)
         launcher.chmod(0o755)
+        if metadata is not None:
+            for name, expected in metadata["artifacts"].items():
+                with (root / "model" / name).open("rb") as stream:
+                    actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                if actual != expected:
+                    raise ValueError("Model changed while copying into the package")
+            (root / "model/export.json").write_text(
+                json.dumps(metadata, indent=2) + "\n"
+            )
         for path in sorted(root.rglob("*")):
             if path.is_file():
                 data = path.read_bytes()
@@ -186,11 +242,25 @@ def main() -> None:
     parser.add_argument("--pte", type=Path, required=True)
     parser.add_argument("--ptd", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--export-metadata", type=Path)
+    parser.add_argument(
+        "--musa-cache-bytes",
+        type=int,
+        default=0,
+        help="Opt into a bounded allocation cache in run.sh; requires a supporting runner",
+    )
     parser.add_argument("--patchelf", default="patchelf")
     parser.add_argument("--readelf", default="readelf")
     args = parser.parse_args()
     package(
-        args.build_dir, args.pte, args.ptd, args.output_dir, args.patchelf, args.readelf
+        args.build_dir,
+        args.pte,
+        args.ptd,
+        args.output_dir,
+        args.patchelf,
+        args.readelf,
+        args.export_metadata,
+        args.musa_cache_bytes,
     )
     print(f"Packaged MUSA runtime: {args.output_dir}")
 

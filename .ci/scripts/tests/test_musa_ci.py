@@ -48,6 +48,8 @@ class MusaCiTest(unittest.TestCase):
             list(musa_ci.NATIVE_TARGETS),
         )
         self.assertIn("test_musa_storage", commands["build"])
+        self.assertIn("test_musa_causal_attention", commands["build"])
+        self.assertIn("test_musa_reduce", commands["build"])
         self.assertIn("--no-tests=error", commands["native"])
         self.assertEqual(
             commands["native"][commands["native"].index("--parallel") + 1], "1"
@@ -67,6 +69,13 @@ class MusaCiTest(unittest.TestCase):
         self.assertIn("runner", commands)
         self.assertIn("test_musa_activation_out", commands)
         self.assertIn("test_musa_convolution_out", commands)
+        for name in (
+            "test_musa_qwen35_fusion",
+            "test_musa_qwen35_generate_reference",
+            "test_musa_causal_attention",
+            "test_musa_reduction",
+        ):
+            self.assertIn(name, commands)
         self.assertIn("test_musa_package", commands)
         self.assertIn("test_musa_benchmark", commands)
         self.assertIn("test_musa_deployment", commands)

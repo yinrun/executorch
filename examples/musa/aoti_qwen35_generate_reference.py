@@ -124,6 +124,9 @@ def generate(args, report):
         prefill="token_by_token",
         fixtures=fixtures,
         eager_projection_fusion="disabled",
+        eager_attention_path=(
+            "bf16_valid_length_causal" if args.valid_length_attention else "padded"
+        ),
         eager_byte_equal=0,
         eager_steps=0,
         first_eager_difference=None,
@@ -170,7 +173,12 @@ def generate(args, report):
         del model, output, cache
         gc.collect()
         torch.musa.empty_cache()
-        model = load_model(args.checkpoint_dir, args.context_length, torch.bfloat16)
+        model = load_model(
+            args.checkpoint_dir,
+            args.context_length,
+            torch.bfloat16,
+            valid_length_attention=args.valid_length_attention,
+        )
         if args.fuse_projections:
             from examples.musa.aoti_qwen35_fusion import (
                 FUSION_NAME,
@@ -216,6 +224,11 @@ def main():
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--context-length", type=int, choices=(64, 128, 256), required=True)
     parser.add_argument("--fuse-projections", action="store_true")
+    parser.add_argument(
+        "--valid-length-attention",
+        action="store_true",
+        help="Replay ET eager with the source-integrated BF16 valid-prefix attention",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     args.checkpoint_dir = args.checkpoint_dir.resolve()
