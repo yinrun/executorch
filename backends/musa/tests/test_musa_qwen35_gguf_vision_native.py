@@ -8,6 +8,7 @@ import torch.nn.functional as functional
 from executorch.backends.musa.vision_gelu import VISION_GELU
 from executorch.backends.musa.vision_layer_norm import VISION_LAYER_NORM
 from executorch.backends.musa.vision_softmax import VISION_SOFTMAX
+from examples.musa.aoti_qwen35_gguf_vision import GgufVision, VisionConfig
 from examples.musa.aoti_qwen35_gguf_vision_native import use_native_vision_math
 
 
@@ -63,6 +64,23 @@ class TestNativeVisionExport(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "complete 24-block"):
             use_native_vision_math(exported)
         self.assertEqual(str(exported.graph), original)
+
+    def test_original_architecture_metadata_without_diagnostic_outputs(self):
+        for height in (20, 30):
+            with torch.device("meta"):
+                model = GgufVision(VisionConfig(), ((1, height, 40),)).eval()
+            model = model.to("meta")
+            patches = torch.empty((height * 40, 1536), device="meta")
+            with torch.no_grad():
+                exported = torch.export.export(model, (patches,))
+            original_parameters = dict(exported.state_dict)
+            counts = use_native_vision_math(exported)
+            self.assertEqual(sum(counts.values()), 98)
+            output_nodes = tuple(exported.graph.nodes)[-1].args[0]
+            self.assertEqual(len(output_nodes), 1)
+            self.assertEqual(output_nodes[0].meta["val"].shape, (height * 10, 2560))
+            for name, parameter in original_parameters.items():
+                self.assertIs(exported.state_dict[name], parameter)
 
     def test_mixed_grids_are_not_partially_rewritten(self):
         exported = self.export_fixture(merged_rows=300)

@@ -329,7 +329,8 @@ vision graph before partitioning. It requires 49 affine LayerNorms, 24 FP32
 softmaxes, 24 tanh GELUs and one erf GELU on one consistent 800/1200-patch grid.
 Every replacement is validated before any graph node is changed; partial,
 mixed-grid and already-converted graphs are rejected. Parameters, output
-nodes and original weight bytes are not replaced. Four host/meta tests pass.
+nodes and original weight bytes are not replaced. Five host/meta tests pass,
+including actual 24-layer model exports on both grids with only one final output.
 This conversion is not automatic and its host tests are not native production
 export acceptance; both original grids and all three images must be checked.
 
