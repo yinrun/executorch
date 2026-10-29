@@ -23,6 +23,7 @@ from executorch.backends.musa.reduction import (
     HEADER as _MUSA_REDUCTION_HEADER,
     replace_reductions as _replace_musa_reductions,
 )
+from executorch.backends.musa.gguf import GGUF_DECODE, dequantize_gguf_impl
 from executorch.backends.cuda.cuda_weight_collector import (
     AOTI_DEVICE_TYPE_CPU,
     SERIALIZED_DEVICE_TYPE_MUSA,
@@ -828,6 +829,7 @@ class MusaBackend(AotiBackend, BackendDetails):
     @classmethod
     def get_decomposition_table(cls) -> Dict[Any, Any]:
         return {
+            GGUF_DECODE: dequantize_gguf_impl,
             torch.ops.aten.scaled_dot_product_attention.default: (
                 _decompose_scaled_dot_product_attention
             ),

@@ -1,5 +1,46 @@
 # MUSA AOTI model acceptance
 
+## Qwen3.5-4B GGUF bring-up
+
+The next target is the unchanged Qwen3.5-4B Q4_K_M GGUF with its BF16 vision
+projector, not a uniform INT4 requantization of the accepted 0.8B model. The local
+text artifact contains 203 Q4_K, 24 Q5_K, 22 Q6_K and 177 F32 tensors; the vision
+artifact contains 98 BF16 and 200 F32 tensors. Qwen3-VL-8B adaptation is deferred.
+
+`examples.musa.aoti_gguf_inventory` records per-file/per-tensor hashes, encodings,
+dimensions and byte sizes without changing weights. It rejects unsupported
+encodings, malformed rows and files changing during inspection. It requires the
+`gguf` Python package (or the checked llama.cpp `gguf-py` on `PYTHONPATH`).
+
+`backends.musa.gguf` adds GPU-only Q4_K/Q5_K/Q6_K block decoding. A dedicated
+`executorch_musa.gguf_decode` op preserves the Edge graph boundary; only the MUSA
+delegate decomposes it. FP16 scale bytes are decoded arithmetically, including
+subnormals, rather than depending on an unavailable native dtype-view shim.
+This path materializes decoded matrices and is **not yet a packed-weight fused
+linear/embedding implementation or full-model support**.
+
+Fifty-seven decoder/Qwen/reference/packaging regressions pass, including native
+PTE execution of the three decoders, all 65536 FP16 scale encodings in GPU eager,
+45 dtype/width decode combinations and changed-bit negative controls. Three
+16-row samples from the actual 4B GGUF decode byte-exactly in native execution.
+The accompanying FP32 matrix outputs are not byte-identical to PyTorch/MUSA
+(maximum absolute errors up to 5.484e-6); the original strict probe failure is
+preserved, not relabeled as full acceptance. Quantized linear/embedding, 4B text
+state/mapping, BF16 vision, context-4096 multimodal inference and deployment
+benchmarks remain pending. See workspace `QWEN35_4B_Q4KM_PLAN.md` for the complete
+scope and the report/log discrepancies motivating fresh GPU reference runs.
+
+```bash
+python -m examples.musa.aoti_gguf_inventory \
+  --models /path/Qwen3.5-4B-Q4_K_M.gguf /path/mmproj-Qwen3.5-4B-BF16.gguf \
+  --output /tmp/qwen35-4b-inventory.json
+python -m unittest backends.musa.tests.test_musa_gguf -v
+```
+
+Native tests require `EXECUTORCH_MUSA_RUNNER` and its compatible library path;
+GPU/runner skips are not native acceptance. These tests do not use CPU model
+inference, but do use the independent GGUF block decoder as a file-format oracle.
+
 ## Qwen3.5-0.8B text bring-up
 
 **Runtime-only BF16 deployment (2026-10-29):** the standard source build and
