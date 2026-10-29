@@ -278,6 +278,7 @@ if(EXECUTORCH_BUILD_MUSA)
        runtime/shims/musa_convolution.cpp runtime/shims/musa_batch_norm.cpp
        runtime/shims/musa_activation.cpp runtime/shims/musa_causal_attention.cpp
        runtime/shims/musa_reduce.cpp runtime/shims/musa_gguf.cpp
+       runtime/shims/musa_vision_layer_norm.cpp
   )
   find_library(MUSA_MUDNN_LIBRARY mudnn HINTS ${MUSAToolkit_LIBRARY_DIR} REQUIRED)
   find_library(MUSA_MUDNN_CXX_LIBRARY mudnncxx
@@ -549,7 +550,7 @@ if(BUILD_TESTING)
     )
     foreach(
       _musa_test addmm convolution batch_norm activation causal_attention reduce gguf device
-      storage allocator
+      storage allocator vision_layer_norm
     )
       et_cxx_test(
         test_musa_${_musa_test} SOURCES

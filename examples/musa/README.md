@@ -225,6 +225,26 @@ currently uses a fused Triton normalization kernel. Matching that implementation
 is a candidate fix to validate, not proof that all downstream discrepancies
 are explained or that complete image/text accuracy has been repaired.
 
+The opt-in `VisionLayerNorm` now routes contiguous FP32 `[800,1024]` and
+`[1200,1024]` affine inputs through muDNN Welford on the current stream.
+It rejects unsupported shapes, nonpositive/nonfinite epsilon and overlapping
+outputs; ordinary models are not automatically rewritten. Four native tests
+and four Python tests pass, including byte-identical TorchMUSA/native outputs
+on both grids and nearly constant rows. No original model package is replaced.
+
+`vision-block0-norm-v1` makes norm1, QKV, rotary Q/K and scaled attention
+scores byte-identical. The first remaining same-input discrepancy is softmax,
+maximum **2.3842e-7**; block output maximum is **3.8147e-6**. Applying all 49
+norm replacements in `vision-stages-norm-v1` reduces the first image's final
+feature maximum from **2.0313e-4** to **1.3423e-4**, but block 23 still has
+one out-of-gate value (maximum **0.745850**). This is a diagnostic improvement,
+not full-vision exactness or repaired end-to-end image/text accuracy. The next
+controlled candidate is TorchMUSA-compatible muDNN softmax with identical inputs.
+The 84-test packed/GGUF/Qwen/vision regression passes without skips on the new
+runtime. `vision-norm-audit-v1.json` independently rehashes the diagnostics,
+checks all 298 original vision tensors in the candidate PTD and preserves
+17 protected files. Its status is `audited_candidate_diagnostic_only`.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
