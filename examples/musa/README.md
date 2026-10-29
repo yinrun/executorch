@@ -217,6 +217,14 @@ outliers in block 23 (maximum **1.201416**, four out-of-gate values), although
 the merged features still pass the earlier component gate. Further intra-block
 diagnosis is needed; do not relax the complete-model tolerance to pass this case.
 
+`vision-block0-v1` further exposes 17 stages and reproduces that block's native
+output byte-for-byte. Cosine/sine are exact; the first same-input discrepancy is
+the first FP32 LayerNorm, maximum **2.3842e-6**. Installed TorchMUSA implements
+FP32 LayerNorm using muDNN C++ with `VarMode::WELFORD`; the exported native path
+currently uses a fused Triton normalization kernel. Matching that implementation
+is a candidate fix to validate, not proof that all downstream discrepancies
+are explained or that complete image/text accuracy has been repaired.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
