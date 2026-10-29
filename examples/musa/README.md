@@ -89,7 +89,28 @@ All 232 steps retain logits and GPU token outputs. This is a generation/reset
 test, not 232 independent-reference accuracy comparisons or a performance test.
 Sixty-six decoder/packed/mapping/Qwen/reference/packaging tests pass with no skips.
 
-Independent long-sequence accuracy is still open. Fresh diagnostic llama.cpp
+The original report text prompt now passes an independent Transformers-derived
+same-GGUF GPU reference for all **116 positions / 28805120 logits**. Its 89
+generated token IDs (including EOS) match native greedy feedback exactly. Maximum
+absolute error is **3.6478e-5**, mean absolute error **1.5475e-6**, and no value
+exceeds the predeclared `atol=rtol=0.001` gate. This compares one native sequence
+against one fresh reference; the second native sequence is a separately rehashed
+reset check. It is not native/reference byte equality or arbitrary-prompt proof.
+
+`aoti_qwen35_gguf_reference.py` uses Transformers attention, MLP, RoPE and dynamic
+cache with explicit GGUF norm, negative-A and tiled/grouped-head adapters, not
+the ExecuTorch transformer. It independently maps all 426 tensors but shares the
+separately tested GPU K-quant decoder. An optional bounded FP32 decoded cache is
+reference-only; deployed PTD bytes remain unchanged. The 8 GiB reference cache
+has byte-identical outputs to the uncached short probe on its three positions.
+Four adapter/cache tests pass. Independent artifact rechecking validates saved
+logits, greedy inputs, hashes, the perturbed-output negative control and ten
+protected 0.8B files. Evidence: `hf-trajectory-v1/result.json` and
+`hf-trajectory-audit-v1.json` under the workspace GGUF artifact directory.
+No original floating-point 4B checkpoint was compared, so this does not measure
+quantization loss. Module/cache device checks are not a full kernel trace.
+
+Fresh diagnostic llama.cpp
 runs report all layers offloaded but expose CPU Q6_K embedding GET_ROWS; forcing
 the embedding weight onto MUSA does not fix the missing operator support. Their
 three sampled argmax values agree, but logits differ by up to about 0.466 and
