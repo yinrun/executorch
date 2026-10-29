@@ -245,6 +245,38 @@ runtime. `vision-norm-audit-v1.json` independently rehashes the diagnostics,
 checks all 298 original vision tensors in the candidate PTD and preserves
 17 protected files. Its status is `audited_candidate_diagnostic_only`.
 
+The next opt-in `VISION_SOFTMAX` candidate uses muDNN `ACCURATE` on contiguous
+FP32 `[16,N,N]`, where N is 800 or 1200, without globally rewriting softmax.
+Four native and four Python tests pass, covering both grids, extreme finite
+scores, byte-identical TorchMUSA/native results, stream ordering, disjoint
+offset storage and overlap rejection. The standalone runner does not load
+Torch or Python libraries. `vision-block0-softmax-v1`, combined with Welford
+norms, matches all first 14 checkpoints byte-for-byte through the first MLP
+linear. The next same-input discrepancy is tanh-approximate GELU, maximum
+**2.3842e-7**; block output maximum falls to **9.5367e-7**. This remains an
+opt-in diagnostic, not full-model accuracy acceptance.
+
+The first full-vision softmax candidate deliberately remains recorded as a
+failure: Inductor padded a producer row from 1200 to 1216 elements, violating
+the contiguous-only shim contract. Lowering now freezes an exact contiguous
+input layout with `ExternKernel.require_contiguous`. A scaled-input producer
+regression reproduces the old native API failure and passes with the fix,
+while standalone direct-input cases remain byte-identical. The expanded
+four-test softmax suite passes; the old full-vision export is not overwritten.
+
+`vision-stages-softmax-v2` now executes all 24 blocks and merger. All 30
+checkpoints pass the unchanged `atol=rtol=0.001` component gate. Block 23's
+maximum falls to **0.266235** with no out-of-gate values; its large absolute
+maximum is permitted only by the relative term. Final feature maximum is
+**1.4639e-4**, mean **4.7978e-7**: the maximum is not monotonically better than
+the norm-only candidate. `vision-softmax-audit-v2.json` verifies all 298 raw
+vision tensors and 20 protected files. A full-logit single-image comparison
+must still be rerun; this component gate is not end-to-end acceptance.
+On the softmax runtime, all 88 selected Python regressions and 39 native
+matrix/norm/softmax tests pass without skips. The first standalone single-image
+candidate run uses the original prompt and candidate native features, with
+expected IDs disabled so native greedy feedback remains independent.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input

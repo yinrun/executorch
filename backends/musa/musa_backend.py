@@ -28,6 +28,7 @@ from executorch.backends.musa.gguf_packed import HEADER as _MUSA_GGUF_HEADER
 from executorch.backends.musa.vision_layer_norm import (
     HEADER as _MUSA_VISION_LAYER_NORM_HEADER,
 )
+from executorch.backends.musa.vision_softmax import HEADER as _MUSA_VISION_SOFTMAX_HEADER
 from executorch.backends.cuda.cuda_weight_collector import (
     AOTI_DEVICE_TYPE_CPU,
     SERIALIZED_DEVICE_TYPE_MUSA,
@@ -655,6 +656,7 @@ def _musa_aoti_compile_context():
             self.header.splice(f'#include "{_MUSA_REDUCTION_HEADER}"')
             self.header.splice(f'#include "{_MUSA_GGUF_HEADER}"')
             self.header.splice(f'#include "{_MUSA_VISION_LAYER_NORM_HEADER}"')
+            self.header.splice(f'#include "{_MUSA_VISION_SOFTMAX_HEADER}"')
 
     def alloc_from_pool_without_expansion(self, name, offset, dtype, shape, stride):
         if "musa" not in self.get_codegened_graph().device_types:
@@ -833,6 +835,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_gguf_linear_out": None,
             "aoti_torch_musa_gguf_embedding_out": None,
             "aoti_torch_musa_vision_layer_norm_out": None,
+            "aoti_torch_musa_vision_softmax_out": None,
         }
 
     @classmethod
