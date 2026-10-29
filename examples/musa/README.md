@@ -440,8 +440,8 @@ crossing counts, so 505 minus 380 is not a count of independent implementation
 bugs. The native-versus-batch failure remains frozen. These results validate
 the original multi-image trajectory against a matched step reference, not
 arbitrary inputs, original floating-point quantization loss or performance.
-The relocated full-trajectory validation is now running serially; the actual
-4096 boundary job has not started yet.
+The relocated full-trajectory validation has subsequently passed; the actual
+4096 boundary job is now running and has no final result yet.
 
 The queued `deployment-boundary-pipeline-v1` waits for that verified reference
 pipeline to exit and requires the full multi-image step gate to pass before
@@ -453,8 +453,29 @@ capacity rather than execute position 4096; two complete runs check reset.
 A synthetic stop-ID sentinel prevents ordinary chat EOS from truncating this
 capacity test. Three host checks of its exact fixture builder pass, including
 oversized-prompt and invalid-MRoPE rejection. The actual GPU boundary run is
-still pending; this is not long-context independent numerical accuracy or a
+now in progress; this is not long-context independent numerical accuracy or a
 performance claim. Neither waiter starts a competing GPU job.
+
+`relocated-4b-runtime-validation-v1` completes the three original cases twice
+from an unrelated working directory through the Chinese/space-path package.
+Fresh native vision features match HF exactly. All **2298** full-vocabulary
+outputs match the frozen pre-relocation native outputs byte-for-byte, with
+**1149** byte-exact reset pairs; all also pass the independent HF step reference
+under unchanged tolerances with matching argmax and generated IDs. Text,
+single-image and multi-image maximum errors are respectively **3.12328e-5**,
+**0.00100231** and **4.69208e-4**. Empty expected-token fixtures ensure the
+controller generates autonomously, not by replaying a supplied answer.
+
+`relocated-4b-runtime-audit-v1.json` independently rereads all **570,639,360**
+logits, checks the original input coordinates, image order, feedback and EOS,
+rehashes the **40** package files and verifies relocated runtime libraries
+without Torch/Python dependencies. Its comparator passes two positive controls
+and rejects seven negative controls covering changed native/reset outputs,
+out-of-tolerance values, NaN, wrong vocabulary shape, near-tie argmax changes
+and wrong feedback IDs. This accepts relocation for the prepared cases only:
+the HF batch failures are retained, raw-image preprocessing/tokenization are
+not bundled, actual context-boundary execution remains unfinished, and the
+benchmark waiter has not started measurements or established performance.
 
 ### Native prepared-fixture controller
 
