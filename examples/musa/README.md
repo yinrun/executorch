@@ -426,6 +426,23 @@ path explanation for this near tie, not a blanket accuracy pass. Prompt
 outlier positions **443/462/463**, the remaining prompt and independent decode
 are outside this partial snapshot and still require the full reference run.
 
+The full multi-image HF step reference subsequently completed and passed:
+**605** aligned positions, **68** matching generated IDs through EOS, maximum
+native/reference error **4.69208e-4**, mean **3.88476e-6**, zero out-of-gate
+elements and zero argmax mismatches. `multi-image-step-reference-audit-v1.json`
+independently rehashes inputs/sources and rereads all **150,233,600** logits.
+`multi-image-step-batch-audit-v1.json` also rereads the two independent HF
+trajectories: their maximum difference is **0.00329113**, with **380**
+out-of-gate elements at the same prompt positions 443/462/463 and an argmax
+change at 135. This supports batch/recurrent arithmetic as the explanation
+for the observed discrepancy; small native differences can change threshold
+crossing counts, so 505 minus 380 is not a count of independent implementation
+bugs. The native-versus-batch failure remains frozen. These results validate
+the original multi-image trajectory against a matched step reference, not
+arbitrary inputs, original floating-point quantization loss or performance.
+The relocated full-trajectory validation is now running serially; the actual
+4096 boundary job has not started yet.
+
 The queued `deployment-boundary-pipeline-v1` waits for that verified reference
 pipeline to exit and requires the full multi-image step gate to pass before
 running any GPU work. It then reruns all three original prepared cases twice
