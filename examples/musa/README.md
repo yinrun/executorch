@@ -489,7 +489,32 @@ rehashes the package, fixtures, runner logs and saved outputs; it checks
 **2,034,237,440** finite logit elements, both boundary greedy IDs and the stop
 contract. This is capacity/reset coverage, not independent long-sequence
 accuracy or measured throughput. The sequential benchmark has now started
-after these gates passed; its complete performance result is still pending.
+after these gates passed and has now completed all three prepared cases.
+
+`benchmark-4b-runtime-audit-v1.json` independently rehashes the reports and
+recomputes all distributions from native timing samples. Each phase uses one
+warmup and three measured runs; the fresh-process request measurement excludes
+one warmup request and measures three more. All **24** generated sequences
+match their frozen HF step token IDs, and all **15** saved vision outputs match
+HF byte-for-byte. No full logits are saved in these timing runs. The measured
+medians on the shared, unlocked M1000 are:
+
+| Original case | Serial prompt (tok/s) | Decode (tok/s) | Fresh prepared request (s) |
+| --- | ---: | ---: | ---: |
+| Text | 1.0904 | 1.0949 | 120.988 |
+| Single image | 1.0938 | 1.0915 | 418.619 |
+| Two images | 1.0940 | 1.0941 | 594.710 |
+
+Decode minimum rates are respectively **1.0759 / 1.0885 / 1.0897 tok/s**.
+Vision method execution medians are **2003.988 / 1986.992 / 1286.328 ms** for
+the shapes/chart/text images. Generation timing includes synchronized host
+prepare/execute/output validation, not pure GPU time. Prompt is serial-token,
+not batched prefill. Fresh requests include model loading, native vision,
+generation and output, but exclude raw-image preprocessing and tokenization.
+These correctness-first packed kernels are not a performance-optimized release;
+the historical unhealthy llama.cpp 1.77 tok/s result is not a speedup baseline.
+Process-attributed memory validation and the final consolidated reproduction
+report remain unfinished.
 
 ### Native prepared-fixture controller
 
