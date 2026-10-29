@@ -35,7 +35,7 @@ operations. Native MUSA kernels read unchanged Q4_K/Q5_K/Q6_K bytes directly;
 linear accumulates in FP32 without a dense weight allocation. Embedding decodes
 only selected rows and synchronously rejects invalid indices. Both require
 contiguous raw uint8 rows; linear inputs/outputs are FP32, indices are int64.
-The eager linear implementation still decodes a matrix for reference testing;
+The eager linear implementation decodes temporary row chunks for reference testing;
 only the exported native path is the packed fused implementation. This first
 kernel is not an optimized GEMM/prefill implementation or graph-capture promise.
 
@@ -64,6 +64,38 @@ tests with no skips, five native GGUF tests and eleven existing native reduction
 tests. One existing two-device reduction test is explicitly skipped on this
 single-device setup. The accepted 0.8B runtime and deployment artifacts are not
 overwritten by these versioned builds.
+
+`examples.musa.aoti_qwen35_gguf.load_gguf_text(path, context_length=4096)` loads
+the complete 32-layer text model without converting its packed weights to HF
+matrices. It validates architecture, tensor names, shapes and formats; preserves
+the GGUF tiled GDN head order, negative decay coefficients and already-offset
+norm weights; and shares the original Q6_K embedding/output storage. Auxiliary
+weights, activations and state use FP32. This does not turn the quantized model
+into the earlier BF16 0.8B deployment. Eager linear references decode at most
+4096 weight rows per call to bound temporary memory; the native kernel remains
+packed throughout execution.
+
+The first full-model export has one delegate, 4697 graph nodes and 64 mutable
+GDN/KV buffers, with a capacity of 4096 positions. All 426 original GGUF tensors
+match their PTD segments byte-for-byte; the shared head is serialized once.
+Three input tokens replayed twice pass the predeclared FP32 comparison gate
+(`atol=rtol=0.001`) against GPU eager, with maximum error 1.669e-5 and matching
+GPU argmax. Reset outputs are byte-identical, not native/eager outputs.
+
+The report's heterogeneous-computing text question also runs natively twice
+with thinking disabled: each run generates 89 tokens including EOS, reaches
+position 115, and the two runs' 116 full-logit outputs are byte-identical.
+All 232 steps retain logits and GPU token outputs. This is a generation/reset
+test, not 232 independent-reference accuracy comparisons or a performance test.
+Sixty-six decoder/packed/mapping/Qwen/reference/packaging tests pass with no skips.
+
+Independent long-sequence accuracy is still open. Fresh diagnostic llama.cpp
+runs report all layers offloaded but expose CPU Q6_K embedding GET_ROWS; forcing
+the embedding weight onto MUSA does not fix the missing operator support. Their
+three sampled argmax values agree, but logits differ by up to about 0.466 and
+the GPU-only reference gate fails. These results are not accepted as a healthy
+GPU baseline. BF16 vision, single/multi-image tests, actual context-4096 boundary
+coverage, deployable model packaging and fair repeated benchmarks remain pending.
 
 ```bash
 python -m examples.musa.aoti_gguf_inventory \

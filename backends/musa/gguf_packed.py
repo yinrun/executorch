@@ -47,9 +47,11 @@ def embedding_meta(value, packed, quant_type):
 
 def linear_eager(value, packed, quant_type):
     packed_shape(value, packed, quant_type, False)
-    return torch.nn.functional.linear(
-        value, dequantize_gguf(packed, QUANT_NAMES[quant_type])
-    )
+    outputs = []
+    for start in range(0, packed.shape[0], 4096):
+        dense = dequantize_gguf(packed[start : start + 4096], QUANT_NAMES[quant_type])
+        outputs.append(torch.nn.functional.linear(value, dense))
+    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
 
 
 def embedding_eager(value, packed, quant_type):
