@@ -277,11 +277,40 @@ if(EXECUTORCH_BUILD_MUSA)
   list(APPEND _aoti_cuda_shim_sources runtime/shims/musa_addmm.cpp
        runtime/shims/musa_convolution.cpp runtime/shims/musa_batch_norm.cpp
        runtime/shims/musa_activation.cpp runtime/shims/musa_causal_attention.cpp
-       runtime/shims/musa_reduce.cpp
+       runtime/shims/musa_reduce.cpp runtime/shims/musa_gguf.cpp
   )
   find_library(MUSA_MUDNN_LIBRARY mudnn HINTS ${MUSAToolkit_LIBRARY_DIR} REQUIRED)
   find_library(MUSA_MUDNN_CXX_LIBRARY mudnncxx
                HINTS ${MUSAToolkit_LIBRARY_DIR} REQUIRED)
+  find_program(EXECUTORCH_MUSA_MCC mcc
+               HINTS "${MUSAToolkit_ROOT}/bin" /usr/local/musa/bin REQUIRED)
+  set(EXECUTORCH_MUSA_ARCHITECTURES "22" CACHE STRING
+      "MUSA architectures for native GGUF kernels"
+  )
+  set(_musa_gguf_arch_flags "")
+  foreach(_arch IN LISTS EXECUTORCH_MUSA_ARCHITECTURES)
+    if(NOT _arch MATCHES "^[0-9]+$")
+      message(FATAL_ERROR "Invalid MUSA architecture: ${_arch}")
+    endif()
+    list(APPEND _musa_gguf_arch_flags "--cuda-gpu-arch=mp_${_arch}")
+  endforeach()
+  if(NOT _musa_gguf_arch_flags)
+    message(FATAL_ERROR "EXECUTORCH_MUSA_ARCHITECTURES must not be empty")
+  endif()
+  set(_musa_gguf_object "${CMAKE_CURRENT_BINARY_DIR}/musa_gguf_kernels.o")
+  add_custom_command(
+    OUTPUT "${_musa_gguf_object}"
+    COMMAND "${EXECUTORCH_MUSA_MCC}" -x musa -std=c++17 -O3 -fPIC
+            -ffp-contract=off ${_musa_gguf_arch_flags}
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime/shims/musa_gguf_kernels.mu"
+            -o "${_musa_gguf_object}"
+    DEPENDS runtime/shims/musa_gguf_kernels.mu
+    VERBATIM
+  )
+  set_source_files_properties(
+    "${_musa_gguf_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE
+  )
+  list(APPEND _aoti_cuda_shim_sources "${_musa_gguf_object}")
 endif()
 
 add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
@@ -515,7 +544,7 @@ if(BUILD_TESTING)
 
   if(EXECUTORCH_BUILD_MUSA)
     foreach(
-      _musa_test addmm convolution batch_norm activation causal_attention reduce device
+      _musa_test addmm convolution batch_norm activation causal_attention reduce gguf device
       storage allocator
     )
       et_cxx_test(

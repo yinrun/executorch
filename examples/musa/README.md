@@ -16,8 +16,8 @@ encodings, malformed rows and files changing during inspection. It requires the
 `executorch_musa.gguf_decode` op preserves the Edge graph boundary; only the MUSA
 delegate decomposes it. FP16 scale bytes are decoded arithmetically, including
 subnormals, rather than depending on an unavailable native dtype-view shim.
-This path materializes decoded matrices and is **not yet a packed-weight fused
-linear/embedding implementation or full-model support**.
+This decoder path materializes decoded matrices; it remains useful as a GPU
+reference, not as the native packed-weight execution implementation.
 
 Fifty-seven decoder/Qwen/reference/packaging regressions pass, including native
 PTE execution of the three decoders, all 65536 FP16 scale encodings in GPU eager,
@@ -25,21 +25,60 @@ PTE execution of the three decoders, all 65536 FP16 scale encodings in GPU eager
 16-row samples from the actual 4B GGUF decode byte-exactly in native execution.
 The accompanying FP32 matrix outputs are not byte-identical to PyTorch/MUSA
 (maximum absolute errors up to 5.484e-6); the original strict probe failure is
-preserved, not relabeled as full acceptance. Quantized linear/embedding, 4B text
-state/mapping, BF16 vision, context-4096 multimodal inference and deployment
-benchmarks remain pending. See workspace `QWEN35_4B_Q4KM_PLAN.md` for the complete
+preserved, not relabeled as full acceptance. The 4B text state/mapping, BF16
+vision, context-4096 multimodal inference and deployment benchmarks remain
+pending. See workspace `QWEN35_4B_Q4KM_PLAN.md` for the complete
 scope and the report/log discrepancies motivating fresh GPU reference runs.
+
+`backends.musa.gguf_packed` now provides opaque `GgufLinear` and `GgufEmbedding`
+operations. Native MUSA kernels read unchanged Q4_K/Q5_K/Q6_K bytes directly;
+linear accumulates in FP32 without a dense weight allocation. Embedding decodes
+only selected rows and synchronously rejects invalid indices. Both require
+contiguous raw uint8 rows; linear inputs/outputs are FP32, indices are int64.
+The eager linear implementation still decodes a matrix for reference testing;
+only the exported native path is the packed fused implementation. This first
+kernel is not an optimized GEMM/prefill implementation or graph-capture promise.
+
+Standard MUSA CMake builds compile `musa_gguf_kernels.mu` with `mcc`; the SDK
+compiler is now required. `EXECUTORCH_MUSA_ARCHITECTURES` defaults to `22` and
+accepts a semicolon-separated list of target architecture numbers. The current
+device validation is MP22 only. Non-MUSA builds do not compile these kernels.
+
+Native PTE tests retain each raw weight exactly once in PTD, shared by embedding
+and linear, with no dense matrix constant. Five real 32-row 4B tensor probes
+cover Q4_K/Q5_K/Q6_K and K=2560/4096/9216. Embeddings are byte-exact; linear is
+checked against an FP64 MUSA oracle with an accumulation error bound and a
+perturbed-output negative control, not a byte-equality claim.
+
+The full Q6_K shared embedding/output head, **248320 x 2560**, also executes as
+one native delegate. PTD is **521472256 bytes**, containing the original
+521472000-byte packed weight once, not a Q4 rewrite or FP32 expansion. Two test
+activation rows yield 496640 checked outputs: maximum error is 1.073e-6 versus
+FP32 MUSA and 4.341e-7 versus the FP64 MUSA oracle. Both argmax indices agree;
+7680 selected embedding values are byte-exact. Three executions were made but
+only the last execution's outputs were saved. These are operator inputs, not
+generated model answers, and do not establish transformer or vision accuracy.
+
+The final packed build passes 62 Python decoder/packed/Qwen/reference/packaging
+tests with no skips, five native GGUF tests and eleven existing native reduction
+tests. One existing two-device reduction test is explicitly skipped on this
+single-device setup. The accepted 0.8B runtime and deployment artifacts are not
+overwritten by these versioned builds.
 
 ```bash
 python -m examples.musa.aoti_gguf_inventory \
   --models /path/Qwen3.5-4B-Q4_K_M.gguf /path/mmproj-Qwen3.5-4B-BF16.gguf \
   --output /tmp/qwen35-4b-inventory.json
 python -m unittest backends.musa.tests.test_musa_gguf -v
+EXECUTORCH_MUSA_GGUF_RUNNER=/path/to/new/build/executor_runner \
+  python -m unittest backends.musa.tests.test_musa_gguf_packed -v
 ```
 
 Native tests require `EXECUTORCH_MUSA_RUNNER` and its compatible library path;
 GPU/runner skips are not native acceptance. These tests do not use CPU model
 inference, but do use the independent GGUF block decoder as a file-format oracle.
+Packed tests require `EXECUTORCH_MUSA_GGUF_RUNNER` and the newly built shim in
+`LD_LIBRARY_PATH`; an older 0.8B deployment package does not contain these symbols.
 
 ## Qwen3.5-0.8B text bring-up
 
