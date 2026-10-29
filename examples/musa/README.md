@@ -115,8 +115,52 @@ runs report all layers offloaded but expose CPU Q6_K embedding GET_ROWS; forcing
 the embedding weight onto MUSA does not fix the missing operator support. Their
 three sampled argmax values agree, but logits differ by up to about 0.466 and
 the GPU-only reference gate fails. These results are not accepted as a healthy
-GPU baseline. BF16 vision, single/multi-image tests, actual context-4096 boundary
+GPU baseline. Complete single/multi-image answers, actual context-4096 boundary
 coverage, deployable model packaging and fair repeated benchmarks remain pending.
+
+### Original BF16/F32 vision component
+
+`aoti_qwen35_gguf_vision.py` loads all 298 original projector tensors, preserving
+98 BF16 matrices and 200 F32 tensors. Activations, attention and normalization
+are FP32; matrix weights are cast on device for computation. This is the original
+mixed-storage projector, not a claim of all-BF16 arithmetic. Two static-grid
+exports (30x40 and 20x40 patches) each retain all 298 original tensor byte strings
+in PTD, including the two original F32 temporal patch slices.
+
+The three report PNGs keep their original dimensions and use the local HF image
+processor. Each image's 24 block outputs and final merged features match an
+independently mapped HF GPU vision model exactly in eager mode: 72 block checks
+and 2048000 projected FP32 values. Reconstructing the original Conv3D operation
+from the two stored temporal slices is important: separate linear products plus
+addition had small initial errors that grew in outlier hidden activations. That
+failed `vision-probe-v1` is preserved; `vision-probe-v2` changes the computation,
+not its comparison threshold.
+
+Native execution passes the same `atol=rtol=0.001` gate on all three projected
+feature arrays. Maximum errors for shapes/chart/text are respectively
+**2.0313e-4 / 1.6344e-4 / 2.0647e-4**. Two fresh-process executions per image
+produce byte-identical outputs (six calls total). The native library audit
+excludes Torch/Python dependencies. Evidence is in `vision-native-v2` and
+`vision-export-800-v1`; `vision-export-v1` retains its original native failure.
+These are vision features, not complete image-question answers or a benchmark.
+
+The original native failure exposed interleaved-head and padded-row BMM layouts
+which the shim rejected. `musa_addmm.cpp` now packs only such supported layouts
+using stream-aware device-to-device 2D copies, retaining existing dense paths,
+span/alias checks and rejection of overlapping batches. All 31 native matrix
+tests pass, including FP32/FP16/BF16, offsets and input-preservation checks for
+the new layouts. No CPU tensor execution is added.
+
+`aoti_qwen35_gguf_multimodal.py` prepares host image-placeholder metadata and
+provides a single-token wrapper with separate cache positions, three-axis
+interleaved MRoPE and a runtime image-embedding selector. Host position metadata
+and GPU MRoPE match HF, including multiple images and position 4095; small-model
+text/image selection and exported cache mutation pass unit tests. This does
+not yet prove full 4B multimodal execution or a context-4096 boundary sequence.
+The final regression runs 80 Python tests without skips. The independent
+`vision-stage-audit-v1.json` rehashes the artifacts, rereads both PTDs and all
+native feature outputs, checks a perturbed-output negative control and verifies
+the ten protected 0.8B files. Its status is `passed_vision_component_only`.
 
 ```bash
 python -m examples.musa.aoti_gguf_inventory \
