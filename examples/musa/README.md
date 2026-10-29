@@ -291,6 +291,38 @@ input-prefix alignment, greedy feedback, hashes, 20 protected files and the
 88 Python/39 native regressions. Its explicit status is
 `audited_accuracy_failure_with_improvement`.
 
+The next opt-in `VISION_GELU` uses muDNN C++ `GELU_TANH` and `GELU` for the
+original FP32 vision MLP/merger shapes `[N,4096]`, N=200/300/800/1200. It fixes
+input layout at lowering and checks mode, shape, dtype, device, storage bounds
+and output overlap. Four native and four Python tests pass, including both
+approximations, all original row counts, small/large signed inputs and a
+producer-before-GELU path. Original BF16/F32 weights are not changed.
+
+Combined with Welford and accurate softmax, `vision-block0-gelu-v1` matches
+all 17 checkpoints byte-for-byte. `vision-stages-gelu-v1` matches all 30 full
+vision checkpoints, including every block and the final 768000 features, for
+the original shapes image. The independent audit verifies 298 original
+tensor payloads and 23 protected files. This exactness does not yet cover
+the other two original images or a non-instrumented production export.
+
+`native-single-image-gelu-v1` completes 428 aligned positions with independent
+native greedy feedback and the same 95 generated IDs. Against the frozen HF
+batched-prefill reference, maximum logit error is **0.00436163**, with **754**
+out-of-gate elements, all in the prompt (previously 0.0102887 and 21112).
+Thus batched-reference accuracy still fails. A complete stepwise HF reference
+using its own original visual features is needed to separate native execution
+error from batch/chunk-versus-recurrent arithmetic; do not relax the gate or
+discard the preserved batched failure.
+The remaining batched violations occur only at positions 123 (750 elements)
+and 124 (four). All 92 selected Python regressions and 43 native
+matrix/norm/softmax/GELU tests pass without skips on the isolated GELU runtime.
+The complete independent stepwise reference is launched separately as
+`hf-single-image-gelu-step-v1`; it compares both native-versus-step and
+HF-step-versus-HF-batch, retaining full logits and independent greedy feedback.
+`single-image-gelu-audit-v1.json` independently rechecks all 106280960 logits,
+input alignment, greedy tokens, protected hashes and regression counts; its
+status remains `audited_accuracy_failure_with_improvement` for the batch gate.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
