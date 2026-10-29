@@ -536,6 +536,36 @@ benchmark measurements. Known synchronous and mixed async/host probes reconstruc
 success but zero events, and the first model callback probe missed async APIs;
 both failures remain frozen and are not accepted as memory measurements.
 
+### Raw image and question entry
+
+`aoti_qwen35_gguf_run.py` adds host-side local tokenizer/image preprocessing
+around the unchanged native package. It does not load a Python model: image
+encoding and text inference run in separate native MUSA subprocesses. The
+checkpoint directory supplies matching Qwen3.5-4B tokenizer/processor metadata,
+not floating-point model weights. Example:
+
+```bash
+python -m examples.musa.aoti_qwen35_gguf_run \
+  --bundle '/path/relocated 4B 候选 v1' \
+  --checkpoint /path/Qwen3.5-4B \
+  --prompt 'Describe this image.' --image /path/image.png \
+  --output /path/new-request
+```
+
+Omit `--image` for text, or repeat it for ordered multiple images. The current
+vision exports accept only processor grids **1x30x40** and **1x20x40**; other
+grids are rejected, not silently resized to a different model contract. Prompts
+must fit the 4096-position capacity. The output directory must not exist.
+`--prepare-only` produces host fixtures without starting inference;
+`--dump-logits` optionally saves every native logit vector. Normal output includes
+`prepared.json`, native logs, `native.json`, `answer.txt` and `result.json`.
+The request timer includes preprocessing, loading, vision, generation and text
+decoding after module import; an external process timer is needed to include
+Python startup/imports. Nine host tests cover input contracts, patch ordering,
+nonfinite inputs, overwrite rejection, native failures and output decoding.
+Original-case raw-input GPU validation and inclusive wall-clock measurement
+remain pending at this implementation milestone.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
