@@ -2,6 +2,18 @@
 
 ## Qwen3.5-4B GGUF bring-up
 
+**Latest requested-target result (2026-10-30):** the original Qwen3.5-4B
+Q4_K_M + BF16/F32 vision artifacts run the report's text, single-image and
+multi-image cases through native MUSA, including a raw-image/question host
+entry. Matching HF step precision, relocation/reset, actual context-4096
+execution, repeated timing and process allocation accounting are validated.
+Decode medians are approximately 1.09 tok/s; these packed kernels are not yet
+performance-optimized. HF batch-comparison failures remain recorded, and the
+raw-image entry supports only the two exported grids. The workspace report
+`QWEN35_4B_Q4KM_REPORT.md` and `requirements-review-4b-v2.json` collect final
+scope and evidence. The following paragraphs preserve chronological stage
+history; their earlier pending statuses are not the current summary.
+
 The next target is the unchanged Qwen3.5-4B Q4_K_M GGUF with its BF16 vision
 projector, not a uniform INT4 requantization of the accepted 0.8B model. The local
 text artifact contains 203 Q4_K, 24 Q5_K, 22 Q6_K and 177 F32 tensors; the vision
@@ -513,8 +525,12 @@ not batched prefill. Fresh requests include model loading, native vision,
 generation and output, but exclude raw-image preprocessing and tokenization.
 These correctness-first packed kernels are not a performance-optimized release;
 the historical unhealthy llama.cpp 1.77 tok/s result is not a speedup baseline.
-The consolidated workspace reproduction report is `QWEN35_4B_Q4KM_REPORT.md`;
-the final requirement-by-requirement completion audit remains unfinished.
+The consolidated workspace reproduction report is `QWEN35_4B_Q4KM_REPORT.md`.
+The final baseline requirement audit rehashes **14,868** files, rereads the
+426 text and both sets of 298 vision PTD payloads, and verifies 23 protected
+historical artifacts. Fresh regressions pass **101 Python + 43 C++** tests
+without skips. Raw-input workflow evidence is added separately below; the
+batch-reference failures are retained rather than converted into passes.
 
 A separate, untimed `memory-profile-4b-v2` run uses MUPTI driver callbacks to
 account for synchronous and asynchronous allocation/free requests in the same
@@ -563,8 +579,18 @@ The request timer includes preprocessing, loading, vision, generation and text
 decoding after module import; an external process timer is needed to include
 Python startup/imports. Nine host tests cover input contracts, patch ordering,
 nonfinite inputs, overwrite rejection, native failures and output decoding.
-Original-case raw-input GPU validation and inclusive wall-clock measurement
-remain pending at this implementation milestone.
+`raw-input-4b-validation-v1` now runs the original three questions and images
+through this entry, regenerating all tokens, patches and positions. Three host
+preflights match the frozen fixtures byte-for-byte. Each case then runs once
+for warmup and three times for measurement in fresh processes: all **12**
+generated sequences and decoded answers match the independent HF step
+reference, and all **12** saved vision outputs are byte-identical to HF.
+`raw-input-4b-audit-v1.json` independently rehashes outputs and recomputes the
+statistics. Full external process wall-clock medians are **141.506 / 445.456 /
+623.896 seconds** for text/single-image/multi-image, including Python startup,
+tokenization, raw-image preprocessing, native loading/vision/generation and
+answer decoding/output. These are not the earlier prepared-request numbers
+or new saved full-logit comparisons. The native package remains unchanged.
 
 ### Native prepared-fixture controller
 
