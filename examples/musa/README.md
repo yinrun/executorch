@@ -365,6 +365,21 @@ loss against original floating-point weights. Multi-image independent precision,
 actual context-4096 execution, relocated 4B deployment and fair performance
 measurements remain separate unfinished gates.
 
+Both plain, final-feature-only vision exports are now executed:
+`vision-production-1200-v1` covers the original shapes and chart images;
+`vision-production-800-v1` covers the original text image. Two fresh native
+processes per image produce features byte-identical to the frozen independent
+HF reference (**4,096,000 FP32 elements**, six calls). Each PTE has one MUSA
+delegate, and each PTD preserves all **298** original BF16/F32 tensor payloads.
+`vision-production-audit-v1.json` independently rehashes artifacts, rereads
+the PTD segments and all feature outputs, checks native library isolation
+(no Torch/Python inference libraries), and verifies 23 protected historical
+files. These are non-instrumented vision exports, not full multimodal accuracy,
+same-process vision reset, context-4096 or performance acceptance. The original
+multi-image question is being rerun with these production features in the C++
+controller, empty expected-token input and two reset runs; its independent
+HF full-logit comparison remains pending.
+
 ### Native prepared-fixture controller
 
 The MUSA `executor_runner` has an opt-in C++ greedy loop for this five-input
