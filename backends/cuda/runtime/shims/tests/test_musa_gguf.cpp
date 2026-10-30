@@ -52,13 +52,13 @@ float expected(int64_t quant_type, int row, int column) {
   return base * (group % 2 == 0 ? 1 : quant_type == 12 ? 2 : 18) - 0.5f;
 }
 
-SlimTensor weight(int64_t quant_type, int64_t columns) {
+SlimTensor weight(int64_t quant_type, int64_t columns, int rows = 3) {
   const int64_t bytes = quant_type == 12 ? 144 : quant_type == 13 ? 176 : 210;
-  auto owner = tensor({3 * (columns / 256) * bytes + 2}, ScalarType::Byte);
-  auto packed = owner.as_strided({3, (columns / 256) * bytes},
+  auto owner = tensor({rows * (columns / 256) * bytes + 2}, ScalarType::Byte);
+  auto packed = owner.as_strided({rows, (columns / 256) * bytes},
                                  {(columns / 256) * bytes, 1}, 1);
   std::vector<uint8_t> data(packed.numel(), 0);
-  for (int row = 0; row < 3; ++row) {
+  for (int row = 0; row < rows; ++row) {
     for (int64_t index = 0; index < columns / 256; ++index) {
       auto* block = data.data() + (row * (columns / 256) + index) * bytes;
       const auto bits = 0x3c00 + row * 0x400;
@@ -140,6 +140,42 @@ TEST_F(MusaGgufTest, LinearBatchesWidthsAndExactRepresentableSums) {
         }
         EXPECT_EQ(actual[row], sum);
         EXPECT_EQ(actual[3 + row], 2 * sum);
+      }
+    }
+  }
+}
+
+TEST_F(MusaGgufTest, DecodePreservesReductionOrderAndPartialRowTiles) {
+  for (int quant_type : {12, 13, 14}) {
+    for (int columns : {256, 768, 2560, 4096, 9216, 12288}) {
+      for (int rows : {1, 3, 4, 5, 9}) {
+        auto packed = weight(quant_type, columns, rows);
+        auto input = tensor({1, columns});
+        std::vector<float> values(columns);
+        for (int column = 0; column < columns; ++column) {
+          values[column] = std::sin(static_cast<float>(column * 13));
+        }
+        write(input, values);
+        auto output = tensor({1, rows});
+        ASSERT_EQ(
+            aoti_torch_musa_gguf_linear_out(&output, &input, &packed, quant_type),
+            Error::Ok);
+        const auto actual = read(output);
+        for (int row = 0; row < rows; ++row) {
+          std::vector<float> partial(128, 0);
+          for (int lane = 0; lane < 128; ++lane) {
+            for (int column = lane; column < columns; column += 128) {
+              partial[lane] = std::fma(
+                  expected(quant_type, row, column), values[column], partial[lane]);
+            }
+          }
+          for (int stride = 64; stride > 0; stride /= 2) {
+            for (int lane = 0; lane < stride; ++lane) {
+              partial[lane] += partial[lane + stride];
+            }
+          }
+          EXPECT_EQ(actual[row], partial[0]);
+        }
       }
     }
   }

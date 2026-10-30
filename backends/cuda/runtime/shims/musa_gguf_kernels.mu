@@ -2,6 +2,7 @@
 #include <musa_fp16.h>
 
 #include <cstdint>
+#include <limits>
 
 namespace {
 
@@ -75,6 +76,38 @@ __global__ void linear_kernel(float* output, const float* input,
 }
 
 template <int QuantType>
+__global__ void linear_decode_kernel(float* output, const float* input,
+                                    const uint8_t* packed, int rows, int columns) {
+  constexpr int bytes = QuantType == 12 ? 144 : QuantType == 13 ? 176 : 210;
+  const int lane = threadIdx.x % 32;
+  const int row = blockIdx.x * 4 + threadIdx.x / 32;
+  if (row >= rows) {
+    return;
+  }
+  const auto* weight_row =
+      packed + static_cast<int64_t>(row) * (columns / 256) * bytes;
+  float partial[4] = {};
+  for (int block = 0; block < columns / 256; ++block) {
+    const auto* weight_block = weight_row + static_cast<int64_t>(block) * bytes;
+    #pragma unroll
+    for (int group = 0; group < 4; ++group) {
+      const int element = lane + group * 32;
+      const float first = decode_weight<QuantType>(weight_block, element);
+      const float second = decode_weight<QuantType>(weight_block, element + 128);
+      partial[group] = fmaf(first, input[block * 256 + element], partial[group]);
+      partial[group] = fmaf(second, input[block * 256 + element + 128], partial[group]);
+    }
+  }
+  float accumulator = (partial[0] + partial[2]) + (partial[1] + partial[3]);
+  for (int stride = 16; stride > 0; stride /= 2) {
+    accumulator += __shfl_down_sync(0xffffffff, accumulator, stride, 32);
+  }
+  if (lane == 0) {
+    output[row] = accumulator;
+  }
+}
+
+template <int QuantType>
 __global__ void embedding_kernel(float* output, const int64_t* indices,
                                  const uint8_t* packed, int* invalid,
                                  int64_t rows, int64_t columns, int64_t count) {
@@ -103,6 +136,22 @@ extern "C" musaError_t executorch_musa_gguf_linear_launch(
     float* output, const float* input, const uint8_t* packed, int64_t rows,
     int64_t columns, int64_t batches, int64_t quant_type, musaStream_t stream) {
   const auto grid = static_cast<unsigned int>(rows * batches);
+  if (batches == 1 && columns <= std::numeric_limits<int>::max()) {
+    const auto decode_grid = static_cast<unsigned int>((rows + 3) / 4);
+    if (quant_type == 12) {
+      linear_decode_kernel<12><<<decode_grid, 128, 0, stream>>>(
+          output, input, packed, static_cast<int>(rows), static_cast<int>(columns));
+    } else if (quant_type == 13) {
+      linear_decode_kernel<13><<<decode_grid, 128, 0, stream>>>(
+          output, input, packed, static_cast<int>(rows), static_cast<int>(columns));
+    } else if (quant_type == 14) {
+      linear_decode_kernel<14><<<decode_grid, 128, 0, stream>>>(
+          output, input, packed, static_cast<int>(rows), static_cast<int>(columns));
+    } else {
+      return musaErrorInvalidValue;
+    }
+    return musaGetLastError();
+  }
   if (quant_type == 12) {
     linear_kernel<12>
         <<<grid, 128, 0, stream>>>(output, input, packed, rows, columns);
