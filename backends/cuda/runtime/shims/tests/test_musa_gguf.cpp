@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include <executorch/backends/aoti/slim/cuda/guard.h>
@@ -197,6 +199,81 @@ TEST_F(MusaGgufTest, RejectsOutOfRangeIndicesWithoutReadingWeightOutOfBounds) {
             Error::Ok);
 }
 
+TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
+  for (int quant_type : {12, 13, 14}) {
+    const int block_bytes = quant_type == 12 ? 144
+        : quant_type == 13                   ? 176
+                                             : 210;
+    for (int columns : {256, 768, 2560, 4096, 9216, 12288}) {
+      for (int rows : {1, 5, 17, 127, 128, 129}) {
+        SCOPED_TRACE(quant_type);
+        SCOPED_TRACE(columns);
+        SCOPED_TRACE(rows);
+        const int row_bytes = columns / 256 * block_bytes;
+        std::vector<uint8_t> data(rows * row_bytes);
+        uint32_t random_state = 0x73841a9d;
+        for (auto& byte : data) {
+          random_state ^= random_state << 13;
+          random_state ^= random_state >> 17;
+          random_state ^= random_state << 5;
+          byte = static_cast<uint8_t>(random_state);
+        }
+        for (size_t block = 0; block < data.size(); block += block_bytes) {
+          const auto scale = block + (quant_type == 14 ? 208 : 0);
+          data[scale + 1] = (data[scale + 1] & 0x83) | 0x38;
+          if (quant_type != 14) {
+            data[block + 3] = (data[block + 3] & 0x83) | 0x34;
+          }
+        }
+        auto reference_packed = tensor({rows, row_bytes}, ScalarType::Byte);
+        write(reference_packed, data);
+        auto batch_input = tensor({2, columns});
+        std::vector<float> values(2 * columns);
+        for (int column = 0; column < columns; ++column) {
+          values[column] = std::sin(static_cast<float>(column * 13)) * 3;
+          values[columns + column] = values[column];
+        }
+        write(batch_input, values);
+        auto reference_output = tensor({2, rows});
+        ASSERT_EQ(
+            aoti_torch_musa_gguf_linear_out(
+                &reference_output, &batch_input, &reference_packed, quant_type),
+            Error::Ok);
+        const auto expected_values = read(reference_output);
+        values.resize(columns);
+        for (int packed_offset : {0, 1, 2, 4, 16}) {
+          auto owner = tensor({rows * row_bytes + 16}, ScalarType::Byte);
+          auto packed = owner.as_strided(
+              {rows, row_bytes}, {row_bytes, 1}, packed_offset);
+          write(packed, data);
+          for (int input_offset : {0, 1, 4}) {
+            SCOPED_TRACE(packed_offset);
+            SCOPED_TRACE(input_offset);
+            auto input_owner = tensor({columns + 4});
+            auto input = input_owner.as_strided(
+                {1, columns}, {columns, 1}, input_offset);
+            write(input, values);
+            auto output_owner = tensor({rows + 1});
+            auto output = output_owner.as_strided({1, rows}, {rows, 1}, 1);
+            ASSERT_EQ(
+                aoti_torch_musa_gguf_linear_out(
+                    &output, &input, &packed, quant_type),
+                Error::Ok);
+            const auto actual = read(output);
+            for (int row = 0; row < rows; ++row) {
+              ASSERT_TRUE(std::isfinite(actual[row]));
+              ASSERT_EQ(
+                  std::memcmp(
+                      &actual[row], &expected_values[row], sizeof(float)),
+                  0);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_F(MusaGgufTest, RejectsShapeTypeStridesAliasesAndStorageViolations) {
   auto packed = weight(12, 256);
   auto input = tensor({1, 256});
@@ -251,6 +328,34 @@ TEST_F(MusaGgufTest, UsesCallingStreamOnDeviceZero) {
     int device = -1;
     ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
     EXPECT_EQ(device, 0);
+  }
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
+TEST_F(MusaGgufTest, VectorDecodeUsesCallingStreamWithPartialRowTile) {
+  cudaStream_t stream;
+  ASSERT_EQ(musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  {
+    auto guard = executorch::backends::cuda::CUDAStreamGuard::create(stream, 0);
+    ASSERT_TRUE(guard.ok());
+    auto packed = tensor({129, 144}, ScalarType::Byte);
+    std::vector<uint8_t> data(129 * 144, 0);
+    for (int row = 0; row < 129; ++row) {
+      auto* block = data.data() + row * 144;
+      block[1] = 0x3c;
+      std::fill(block + 4, block + 12, 1);
+      std::fill(block + 12, block + 144, 0x11);
+    }
+    write(packed, data);
+    auto input = tensor({1, 256});
+    write(input, std::vector<float>(256, 1));
+    auto output = tensor({1, 129});
+    ASSERT_EQ(cudaMemsetAsync(input.data_ptr(), 0, input.nbytes(), stream), cudaSuccess);
+    ASSERT_EQ(aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 12), Error::Ok);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    for (float value : read(output)) {
+      EXPECT_EQ(value, 0);
+    }
   }
   EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
