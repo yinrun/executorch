@@ -142,3 +142,62 @@ New local artifacts under `artifacts/gguf-20261029` are
 `decode-attention-final-audit-v1.json` and
 `decode-attention-profile-blocking-v1`. Their adjacent build/export/validation/
 benchmark/audit/profile scripts retain the exact commands and scope.
+
+## Vectorized packed decode (2026-10-31)
+
+The next candidate vectorizes the existing `gguf_linear` MUSA implementation;
+it does not change the operator or model mathematics. Contiguous input groups
+use `float4` loads. Q4/Q5 use 32-bit or 128-bit packed reads and byte-lane
+bit-plane decoding, reusing scale/minimum calculations. Q6 uses paired 16-bit
+reads because its 210-byte blocks are not necessarily 32-bit aligned.
+
+Q4/Q5 use width 16 for at least 128 rows with 16-byte-aligned packed storage,
+otherwise width 4; Q6 uses width 4. Each thread holds consecutive original
+reduction lanes. Subgroup shuffles followed by component reduction preserve
+the original 128-lane addition tree and per-lane FP32 FMA order. Misaligned
+input/storage retains the scalar decode fallback; batched input retains the
+generic path. No weight preprocessing, persistent cache, extra weight copy,
+quantization change, TF32, or reduced-precision activation is introduced.
+
+Validation on MP22/M1000 passed eight native GGUF tests, including 1620
+dtype/shape/offset/bit-plane combinations with bitwise output comparisons and
+a nondefault-stream partial-row-tile test. Eleven attention tests passed;
+the two-device test remained skipped. MP21 compilation passed, but MP21
+runtime behavior was not tested. Eleven real matrix geometries with three
+inputs each produced 863328 byte-identical output values. Large Q4 kernels
+were approximately 2x faster and the full Q6 head was 1.585x faster in this
+microbenchmark; these are not model throughput measurements.
+
+The three original prepared cases produced 2298 full-logit outputs that were
+byte-identical to the preceding grouped-attention candidate, including all
+1149 reset pairs. Autonomous tokens, EOS and step counts matched. Rehashed
+frozen matched-HF-step references still passed the unchanged elementwise
+`atol=rtol=0.001` gate, with zero outliers or argmax mismatches. HF and vision
+were not rerun; historical HF batch failures remain failures. The candidate's
+full 4096-step model trajectory and relocation remain unvalidated.
+
+A fresh normal A/B/B/A test used the same grouped-attention PTE/PTD on both
+sides, changing only the shim. The 28-token prompt, 17 generated tokens,
+16 decode steps, one warmup and two measured runs per process, and complete
+output checking were unchanged. Profiling, launch blocking and logits dumps
+were disabled:
+
+| Runtime | Minimum decode tok/s | Median decode tok/s | Maximum decode tok/s |
+| --- | ---: | ---: | ---: |
+| Grouped attention, scalar packed decode | 4.074 | 4.113 | 4.117 |
+| Grouped attention, vectorized packed decode | 7.042 | 7.250 | 7.262 |
+
+The paired median gain is 1.763x on the shared, unlocked desktop GPU. This
+short-sequence result does not establish full-case or long-context throughput.
+The 10 tok/s target is **not achieved**. A separate blocking profile attributes
+87.53% of kernel time to packed Linear, including 17.20% for the full Q6 head;
+those times are not normal token latency. Large Q4 matrices and the Q6 head
+remain the next performance priorities. Whole-input shared-memory staging and
+wider Q6 variants were slower and are not part of the implementation.
+
+Only the shim needs replacement relative to the grouped-attention candidate;
+that candidate's PTE/PTD is reused unchanged. The original frozen package is
+not overwritten. Local artifacts under `artifacts/gguf-20261029` include
+`build-decode-vector-v1`, `gemv-vector-v1`, `decode-vector-validation-v1`,
+`decode-vector-benchmark-v1`, `decode-vector-final-audit-v1.json` and
+`decode-vector-profile-blocking-v1`, with adjacent reproduction scripts.
