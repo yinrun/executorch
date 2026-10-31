@@ -1,4 +1,4 @@
-"""Valid-prefix BF16 attention metadata, export, and eager contracts."""
+"""Valid-prefix BF16 and grouped FP32 attention contracts."""
 
 import json
 import os
@@ -24,17 +24,33 @@ class AttentionModule(torch.nn.Module):
         return CAUSAL_ATTENTION(query, key, value, position, mask)
 
 
-def inputs(device, capacity=64):
+def inputs(device, capacity=64, grouped_fp32=False):
+    dtype = torch.float32 if grouped_fp32 else torch.bfloat16
+    query_heads, kv_heads = (16, 4) if grouped_fp32 else (8, 8)
     return (
-        torch.zeros((1, 8, 1, 256), device=device, dtype=torch.bfloat16),
-        torch.zeros((1, 8, capacity, 256), device=device, dtype=torch.bfloat16),
-        torch.ones((1, 8, capacity, 256), device=device, dtype=torch.bfloat16),
+        torch.zeros((1, query_heads, 1, 256), device=device, dtype=dtype),
+        torch.zeros((1, kv_heads, capacity, 256), device=device, dtype=dtype),
+        torch.ones((1, kv_heads, capacity, 256), device=device, dtype=dtype),
         torch.tensor([capacity - 1], device=device, dtype=torch.int64),
         torch.ones((1, capacity), device=device, dtype=torch.bool),
     )
 
 
 class TestMusaCausalAttentionMetadata(unittest.TestCase):
+    def test_grouped_fp32_metadata_and_opaque_export(self):
+        for capacity in (1, 31, 4096):
+            tensors = inputs("meta", capacity, grouped_fp32=True)
+            output = CAUSAL_ATTENTION(*tensors)
+            self.assertEqual(output.shape, tensors[0].shape)
+            self.assertEqual(output.dtype, torch.float32)
+            self.assertTrue(output.is_contiguous())
+            exported = torch.export.export(AttentionModule(), tensors)
+            targets = [node.target for node in exported.graph.nodes if node.op == "call_function"]
+            self.assertEqual(targets, [CAUSAL_ATTENTION])
+        for capacity in (0, 4097):
+            with self.assertRaises(RuntimeError):
+                CAUSAL_ATTENTION(*inputs("meta", capacity, grouped_fp32=True))
+
     def test_generated_headers_exist_under_direct_and_package_imports(self):
         from executorch.backends.musa import musa_backend
         from executorch.backends.musa.causal_attention import HEADER
@@ -99,6 +115,27 @@ class TestMusaCausalAttentionMetadata(unittest.TestCase):
 
 @unittest.skipUnless(hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA")
 class TestMusaCausalAttentionEager(unittest.TestCase):
+    def test_grouped_fp32_matches_expanded_reference(self):
+        torch.manual_seed(20261031)
+        with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
+            for capacity in (31, 4096):
+                query, key, value, position, mask = inputs("musa", capacity, grouped_fp32=True)
+                query.normal_(std=0.25)
+                for length in (1, 7, capacity):
+                    key.normal_(std=0.25)
+                    value.normal_()
+                    position.fill_(length - 1)
+                    mask.copy_(torch.arange(capacity, device="musa").reshape(1, -1) < length)
+                    key[..., length:, :] = float("nan")
+                    value[..., length:, :] = float("nan")
+                    expanded_key = key[..., :length, :].repeat_interleave(4, dim=1)
+                    expanded_value = value[..., :length, :].repeat_interleave(4, dim=1)
+                    scores = query @ expanded_key.transpose(-2, -1)
+                    expected = torch.softmax(scores * 0.0625, dim=-1) @ expanded_value
+                    actual = CAUSAL_ATTENTION(query, key, value, position, mask)
+                    torch.testing.assert_close(actual, expected, atol=3e-6, rtol=3e-6)
+                    self.assertTrue(torch.isfinite(actual).all().item())
+
     def test_valid_prefix_excludes_nonfinite_future_and_preserves_inputs(self):
         with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
             for capacity in (64, 128, 256):
@@ -155,9 +192,9 @@ class TestMusaCausalAttentionRunner(unittest.TestCase):
             )),
         }
         with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
-            for capacity in (64, 128, 256):
+            for capacity, grouped_fp32 in ((64, False), (128, False), (256, False), (31, True), (4096, True)):
                 for planned in (False, True):
-                    tensors = inputs("musa", capacity)
+                    tensors = inputs("musa", capacity, grouped_fp32=grouped_fp32)
                     exported = torch.export.export(AttentionModule(), tensors)
                     with tempfile.TemporaryDirectory() as directory:
                         root = Path(directory)
@@ -179,7 +216,14 @@ class TestMusaCausalAttentionRunner(unittest.TestCase):
                                 "--print_output=none", "--num_executions=3", "--musa_cache_bytes=536870912",
                             ], env=environment, capture_output=True, text=True, timeout=90)
                             self.assertEqual(result.returncode, 0, result.stderr)
-                            self.assertEqual((root / "output-0.bin").read_bytes(), (root / "expected.bin").read_bytes())
+                            actual_bytes = (root / "output-0.bin").read_bytes()
+                            expected_bytes = (root / "expected.bin").read_bytes()
+                            if grouped_fp32:
+                                actual = torch.frombuffer(bytearray(actual_bytes), dtype=torch.float32)
+                                expected = torch.frombuffer(bytearray(expected_bytes), dtype=torch.float32)
+                                torch.testing.assert_close(actual, expected, atol=3e-6, rtol=3e-6)
+                            else:
+                                self.assertEqual(actual_bytes, expected_bytes)
                             libraries = runtime_libraries(result.stderr)
                             self.assertTrue(libraries)
                             self.assertFalse(any("libtorch" in path or "libpython" in path for path in libraries))

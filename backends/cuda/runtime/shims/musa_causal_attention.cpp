@@ -80,18 +80,26 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
         InvalidArgument,
         "MUSA causal attention requires backed device tensors");
   }
+  const bool grouped_fp32 = query->dtype() == ScalarType::Float;
+  const int64_t query_heads = grouped_fp32 ? 16 : 8;
+  const int64_t kv_heads = grouped_fp32 ? 4 : 8;
+  const int64_t group_size = query_heads / kv_heads;
   for (auto* tensor : {output, query, key, value}) {
     ET_CHECK_OR_RETURN_ERROR(
-        tensor->dtype() == ScalarType::BFloat16 && tensor->dim() == 4,
+        tensor->dtype() == query->dtype() && tensor->dim() == 4 &&
+            (grouped_fp32 || tensor->dtype() == ScalarType::BFloat16),
         NotSupported,
-        "MUSA causal attention requires rank-four BF16 tensors");
+        "MUSA causal attention requires matching rank-four BF16 or FP32 tensors");
   }
   const int64_t capacity = key->size(2);
   ET_CHECK_OR_RETURN_ERROR(
-      query->size(0) == 1 && query->size(1) == 8 && query->size(2) == 1 &&
-          query->size(3) == 256 && output->sizes() == query->sizes() &&
-          key->size(0) == 1 && key->size(1) == 8 && key->size(3) == 256 &&
-          (capacity == 64 || capacity == 128 || capacity == 256) &&
+      query->size(0) == 1 && query->size(1) == query_heads &&
+          query->size(2) == 1 && query->size(3) == 256 &&
+          output->sizes() == query->sizes() && key->size(0) == 1 &&
+          key->size(1) == kv_heads && key->size(3) == 256 &&
+          (grouped_fp32
+               ? (capacity > 0 && capacity <= 4096)
+               : (capacity == 64 || capacity == 128 || capacity == 256)) &&
           value->sizes() == key->sizes(),
       NotSupported,
       "MUSA causal attention supports Qwen single-token geometry only");
@@ -132,7 +140,7 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   const auto stream = stream_result.get();
   alignas(16) int64_t index = -1;
-  alignas(16) std::array<uint8_t, 256> host_mask{};
+  alignas(16) std::array<uint8_t, 4096> host_mask{};
   {
     struct ControlScratch {
       void* data = nullptr;
@@ -148,7 +156,7 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
       }
     };
     ControlScratch control{nullptr, stream};
-    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMallocHost(&control.data, 272));
+    ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMallocHost(&control.data, capacity + 16));
     control.pending = true;
     ET_CUDA_CHECK_OR_RETURN_ERROR(cudaMemcpyAsync(
         control.data,
@@ -165,7 +173,8 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
     ET_CUDA_CHECK_OR_RETURN_ERROR(cudaStreamSynchronize(stream));
     control.pending = false;
     std::memcpy(&index, control.data, sizeof(index));
-    std::memcpy(host_mask.data(), static_cast<char*>(control.data) + 16, capacity);
+    std::memcpy(
+        host_mask.data(), static_cast<char*>(control.data) + 16, capacity);
   }
   ET_CHECK_OR_RETURN_ERROR(
       index >= 0 && index < capacity,
@@ -179,13 +188,13 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
         "MUSA causal attention mask must describe the valid causal prefix");
   }
 
-  const size_t score_bytes = 8 * length * sizeof(uint16_t);
+  const size_t score_bytes = query_heads * length * query->itemsize();
   const std::array<size_t, 5> sizes = {
       score_bytes,
       score_bytes,
-      score_bytes * 2,
-      score_bytes * 2,
-      score_bytes};
+      grouped_fp32 ? 0 : score_bytes * 2,
+      grouped_fp32 ? score_bytes : score_bytes * 2,
+      grouped_fp32 ? 0 : score_bytes};
   std::array<size_t, 5> offsets{};
   size_t allocation_size = 0;
   for (size_t buffer = 0; buffer < sizes.size(); ++buffer) {
@@ -208,30 +217,24 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   dnn::Tensor query_tensor, key_tensor, value_tensor, score_tensor,
       scaled_tensor;
   dnn::Tensor fp32_scores, fp32_probabilities, probabilities, output_tensor;
-  const auto bf16 = dnn::Tensor::Type::BFLOAT16;
   const auto fp32 = dnn::Tensor::Type::FLOAT;
+  const auto dtype = grouped_fp32 ? fp32 : dnn::Tensor::Type::BFLOAT16;
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      query_tensor, query->data_ptr(), dtype, {kv_heads, group_size, 256}));
   ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(query_tensor, query->data_ptr(), bf16, {8, 1, 256}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(key_tensor, key->data_ptr(), bf16, {8, length, 256}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(value_tensor, value->data_ptr(), bf16, {8, length, 256}));
-  ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(key_tensor.SetNdInfo(
-      {8, length, 256}, {capacity * 256, 256, 1})));
+      set_tensor(key_tensor, key->data_ptr(), dtype, {kv_heads, length, 256}));
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      value_tensor, value->data_ptr(), dtype, {kv_heads, length, 256}));
+  ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(
+      key_tensor.SetNdInfo({kv_heads, length, 256}, {capacity * 256, 256, 1})));
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(value_tensor.SetNdInfo(
-      {8, length, 256}, {capacity * 256, 256, 1})));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(score_tensor, buffers[0], bf16, {8, 1, length}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(scaled_tensor, buffers[1], bf16, {8, 1, length}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_scores, buffers[2], fp32, {8, 1, length}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_probabilities, buffers[3], fp32, {8, 1, length}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(probabilities, buffers[4], bf16, {8, 1, length}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(output_tensor, output->data_ptr(), bf16, {8, 1, 256}));
+      {kv_heads, length, 256}, {capacity * 256, 256, 1})));
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      score_tensor, buffers[0], dtype, {kv_heads, group_size, length}));
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      scaled_tensor, buffers[1], dtype, {kv_heads, group_size, length}));
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      output_tensor, output->data_ptr(), dtype, {kv_heads, group_size, 256}));
   dnn::BatchMatMul product;
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(
       product.SetComputeMode(dnn::BatchMatMul::ComputeMode::TENSOR)));
@@ -242,12 +245,19 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
       check_mudnn(product.Run(handle, score_tensor, query_tensor, key_tensor)));
   ET_CHECK_OK_OR_RETURN_ERROR(
       run_unary(handle, scaled_tensor, score_tensor, dnn::Unary::Mode::MUL));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      run_unary(handle, fp32_scores, scaled_tensor, dnn::Unary::Mode::CAST));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_scores, buffers[2], fp32, {1, 8, 1, length}));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_probabilities, buffers[3], fp32, {1, 8, 1, length}));
+  if (!grouped_fp32) {
+    ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+        fp32_scores, buffers[2], fp32, {kv_heads, group_size, length}));
+    ET_CHECK_OK_OR_RETURN_ERROR(
+        run_unary(handle, fp32_scores, scaled_tensor, dnn::Unary::Mode::CAST));
+  }
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      fp32_scores,
+      buffers[grouped_fp32 ? 1 : 2],
+      fp32,
+      {1, query_heads, 1, length}));
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      fp32_probabilities, buffers[3], fp32, {1, query_heads, 1, length}));
   dnn::Softmax softmax;
   ET_CHECK_OK_OR_RETURN_ERROR(
       check_mudnn(softmax.SetMode(dnn::Softmax::Mode::SOFTMAX)));
@@ -271,10 +281,17 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
       softmax.Run(handle, fp32_probabilities, fp32_scores, workspace);
   ET_CHECK_OK_OR_RETURN_ERROR(workspace_error);
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(softmax_status));
-  ET_CHECK_OK_OR_RETURN_ERROR(
-      set_tensor(fp32_probabilities, buffers[3], fp32, {8, 1, length}));
-  ET_CHECK_OK_OR_RETURN_ERROR(run_unary(
-      handle, probabilities, fp32_probabilities, dnn::Unary::Mode::CAST));
+  ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+      probabilities,
+      buffers[grouped_fp32 ? 3 : 4],
+      dtype,
+      {kv_heads, group_size, length}));
+  if (!grouped_fp32) {
+    ET_CHECK_OK_OR_RETURN_ERROR(set_tensor(
+        fp32_probabilities, buffers[3], fp32, {kv_heads, group_size, length}));
+    ET_CHECK_OK_OR_RETURN_ERROR(run_unary(
+        handle, probabilities, fp32_probabilities, dnn::Unary::Mode::CAST));
+  }
   ET_CHECK_OK_OR_RETURN_ERROR(check_mudnn(product.SetTranspose(false, false)));
   return check_mudnn(
       product.Run(handle, output_tensor, probabilities, value_tensor));

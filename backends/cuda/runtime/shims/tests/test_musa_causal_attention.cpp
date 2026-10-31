@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -153,6 +154,182 @@ class MusaCausalAttentionTest : public ::testing::Test {
   }
 };
 
+struct GroupedInputs {
+  SlimTensor query = tensor({1, 16, 1, 256}, ScalarType::Float);
+  SlimTensor output = tensor({1, 16, 1, 256}, ScalarType::Float);
+  SlimTensor key;
+  SlimTensor value;
+  SlimTensor position = tensor({1}, ScalarType::Long);
+  SlimTensor mask;
+  int64_t capacity;
+
+  explicit GroupedInputs(int64_t size)
+      : key(tensor({1, 4, size, 256}, ScalarType::Float)),
+        value(tensor({1, 4, size, 256}, ScalarType::Float)),
+        mask(tensor({1, size}, ScalarType::Bool)),
+        capacity(size) {}
+
+  Error run(SlimTensor* destination = nullptr) {
+    return aoti_torch_musa_causal_attention_out(
+        destination == nullptr ? &output : destination,
+        &query,
+        &key,
+        &value,
+        &position,
+        &mask);
+  }
+
+  std::vector<float> set_length(int64_t length) {
+    std::vector<float> queries(4096);
+    std::vector<float> keys(
+        4 * capacity * 256, std::numeric_limits<float>::quiet_NaN());
+    auto values = keys;
+    for (int64_t head = 0; head < 16; ++head) {
+      for (int64_t channel = 0; channel < 256; ++channel) {
+        queries[head * 256 + channel] =
+            static_cast<float>((head * 7 + channel * 3) % 31 - 15) / 32;
+      }
+    }
+    for (int64_t head = 0; head < 4; ++head) {
+      for (int64_t token = 0; token < length; ++token) {
+        for (int64_t channel = 0; channel < 256; ++channel) {
+          const auto offset = (head * capacity + token) * 256 + channel;
+          keys[offset] = static_cast<float>(
+                             (head * 11 + token * 7 + channel * 5) % 41 - 20) /
+              32;
+          values[offset] = head +
+              static_cast<float>((token * 13 + channel * 3) % 67 - 33) / 64;
+        }
+      }
+    }
+    EXPECT_EQ(
+        cudaMemcpy(
+            query.data_ptr(),
+            queries.data(),
+            query.nbytes(),
+            cudaMemcpyHostToDevice),
+        cudaSuccess);
+    EXPECT_EQ(
+        cudaMemcpy(
+            key.data_ptr(), keys.data(), key.nbytes(), cudaMemcpyHostToDevice),
+        cudaSuccess);
+    EXPECT_EQ(
+        cudaMemcpy(
+            value.data_ptr(),
+            values.data(),
+            value.nbytes(),
+            cudaMemcpyHostToDevice),
+        cudaSuccess);
+    const auto index = length - 1;
+    EXPECT_EQ(
+        cudaMemcpy(
+            position.data_ptr(), &index, sizeof(index), cudaMemcpyHostToDevice),
+        cudaSuccess);
+    std::vector<uint8_t> masks(capacity);
+    for (int64_t token = 0; token < length; ++token) {
+      masks[token] = 1;
+    }
+    EXPECT_EQ(
+        cudaMemcpy(
+            mask.data_ptr(),
+            masks.data(),
+            masks.size(),
+            cudaMemcpyHostToDevice),
+        cudaSuccess);
+    std::vector<float> expected(4096);
+    for (int64_t head = 0; head < 16; ++head) {
+      std::vector<double> probabilities(length);
+      double total = 0;
+      for (int64_t token = 0; token < length; ++token) {
+        double score = 0;
+        for (int64_t channel = 0; channel < 256; ++channel) {
+          score += static_cast<double>(queries[head * 256 + channel]) *
+              keys[((head / 4) * capacity + token) * 256 + channel];
+        }
+        probabilities[token] = std::exp(score * 0.0625);
+        total += probabilities[token];
+      }
+      for (int64_t channel = 0; channel < 256; ++channel) {
+        double result = 0;
+        for (int64_t token = 0; token < length; ++token) {
+          result += probabilities[token] / total *
+              values[((head / 4) * capacity + token) * 256 + channel];
+        }
+        expected[head * 256 + channel] = result;
+      }
+    }
+    return expected;
+  }
+};
+
+TEST_F(MusaCausalAttentionTest, GroupedFp32PrefixHeadMappingAndOffsets) {
+  for (int64_t capacity : {1, 31, 256, 4096}) {
+    GroupedInputs inputs(capacity);
+    auto storage = tensor({4 * capacity * 256 + 3}, ScalarType::Float);
+    inputs.key = storage.as_strided(
+        {1, 4, capacity, 256}, {4 * capacity * 256, capacity * 256, 256, 1}, 3);
+    for (int64_t length : {int64_t{1}, (capacity + 1) / 2, capacity}) {
+      SCOPED_TRACE(capacity);
+      SCOPED_TRACE(length);
+      const auto expected = inputs.set_length(length);
+      const auto original_key = bytes(storage);
+      const auto original_value = bytes(inputs.value);
+      ASSERT_EQ(inputs.run(), Error::Ok);
+      auto raw = bytes(inputs.output);
+      std::vector<float> actual(4096);
+      std::memcpy(actual.data(), raw.data(), raw.size());
+      for (size_t index = 0; index < actual.size(); ++index) {
+        ASSERT_TRUE(std::isfinite(actual[index]));
+        ASSERT_NEAR(actual[index], expected[index], 0.00003) << index;
+      }
+      EXPECT_EQ(bytes(storage), original_key);
+      EXPECT_EQ(bytes(inputs.value), original_value);
+    }
+  }
+}
+
+TEST_F(MusaCausalAttentionTest, GroupedFp32RejectsInvalidControlsAndStorage) {
+  GroupedInputs inputs(4096);
+  inputs.set_length(31);
+  const auto original = bytes(inputs.output);
+  for (int64_t index :
+       {int64_t{-1}, int64_t{4096}, std::numeric_limits<int64_t>::max()}) {
+    ASSERT_EQ(
+        cudaMemcpy(
+            inputs.position.data_ptr(),
+            &index,
+            sizeof(index),
+            cudaMemcpyHostToDevice),
+        cudaSuccess);
+    EXPECT_EQ(inputs.run(), Error::InvalidArgument);
+    EXPECT_EQ(bytes(inputs.output), original);
+  }
+  inputs.set_length(31);
+  const uint8_t incorrect = 1;
+  ASSERT_EQ(
+      cudaMemcpy(
+          static_cast<uint8_t*>(inputs.mask.data_ptr()) + 4095,
+          &incorrect,
+          1,
+          cudaMemcpyHostToDevice),
+      cudaSuccess);
+  EXPECT_EQ(inputs.run(), Error::InvalidArgument);
+  EXPECT_EQ(bytes(inputs.output), original);
+  inputs.set_length(31);
+  EXPECT_EQ(inputs.run(&inputs.query), Error::InvalidArgument);
+  auto overlap = inputs.key.as_strided({1, 16, 1, 256}, {4096, 256, 256, 1}, 1);
+  EXPECT_EQ(inputs.run(&overlap), Error::InvalidArgument);
+  auto overflow =
+      inputs.output.as_strided({1, 16, 1, 256}, {4096, 256, 256, 1}, 1);
+  EXPECT_EQ(inputs.run(&overflow), Error::InvalidArgument);
+  auto wrong_heads = tensor({1, 8, 1, 256}, ScalarType::Float);
+  EXPECT_EQ(inputs.run(&wrong_heads), Error::NotSupported);
+  auto wrong_stride =
+      inputs.key.as_strided({1, 16, 1, 256}, {8192, 512, 512, 2}, 0);
+  EXPECT_EQ(inputs.run(&wrong_stride), Error::NotSupported);
+  EXPECT_EQ(inputs.run(), Error::Ok);
+}
+
 TEST_F(
     MusaCausalAttentionTest,
     ValidLengthsAndPoisonedFutureDoNotMutateInputs) {
@@ -187,7 +364,9 @@ TEST_F(
   }
 }
 
-TEST_F(MusaCausalAttentionTest, OffsetKVStoragePreservesPrefixAndBackingStorage) {
+TEST_F(
+    MusaCausalAttentionTest,
+    OffsetKVStoragePreservesPrefixAndBackingStorage) {
   for (int64_t capacity : {64, 128, 256}) {
     for (int64_t offset : {1, 3, 7}) {
       SCOPED_TRACE(capacity);

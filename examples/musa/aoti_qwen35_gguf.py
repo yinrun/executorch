@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn.functional as functional
 
+from executorch.backends.musa.causal_attention import CAUSAL_ATTENTION
 from executorch.backends.musa.gguf import BLOCK_BYTES
 from executorch.backends.musa.gguf_packed import GgufEmbedding, GgufLinear
 from executorch.examples.models.llama.attention import (
@@ -19,6 +20,14 @@ from executorch.examples.models.llama.attention import (
 from executorch.examples.models.llama.llama_transformer import construct_transformer
 from executorch.examples.models.llama.model_args import ModelArgs
 from examples.musa.aoti_qwen35_export import Qwen35MusaSDPA, STATE_SUFFIXES
+
+
+class GgufValidLengthSDPA(Qwen35MusaSDPA):
+    def forward(self, input_pos, query, key, value, batch_size, sequence_length, mask):
+        if batch_size != 1 or sequence_length != 1:
+            raise ValueError("GGUF valid-prefix attention requires one token")
+        output = CAUSAL_ATTENTION(query, key, value, input_pos, mask)
+        return output.transpose(1, 2).reshape(batch_size, sequence_length, self.dim)
 
 
 class GgufGatedDeltaNet(AttentionGatedDeltaNet):
@@ -149,7 +158,7 @@ def tensor_mapping(args):
     return mapping
 
 
-def load_gguf_text(path, context_length=4096):
+def load_gguf_text(path, context_length=4096, valid_length_attention=False):
     import gguf
 
     path = Path(path).resolve()
@@ -260,7 +269,10 @@ def load_gguf_text(path, context_length=4096):
     for layer in model.layers:
         if isinstance(layer.attention, AttentionMHA):
             previous = layer.attention.SDPA
-            layer.attention.SDPA = Qwen35MusaSDPA(
+            attention_type = (
+                GgufValidLengthSDPA if valid_length_attention else Qwen35MusaSDPA
+            )
+            layer.attention.SDPA = attention_type(
                 previous.dim,
                 previous.head_dim,
                 previous.n_rep,

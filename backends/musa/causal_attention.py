@@ -1,4 +1,4 @@
-"""Fixed-storage, valid-prefix Qwen BF16 attention for single-token decoding."""
+"""Fixed-storage, valid-prefix Qwen attention for single-token decoding."""
 
 import os
 
@@ -17,14 +17,21 @@ _library = torch.library.Library("executorch_musa", "FRAGMENT")
 
 def validate_metadata(query, key, value, position, mask):
     torch._check(query.ndim == key.ndim == value.ndim == 4)
-    torch._check(tuple(query.shape) == (1, 8, 1, 256))
-    torch._check(key.shape[0] == 1 and key.shape[1] == 8 and key.shape[3] == 256)
-    torch._check(key.shape[2] in (64, 128, 256))
+    grouped_fp32 = query.dtype == torch.float32
+    torch._check(tuple(query.shape) == (1, 16 if grouped_fp32 else 8, 1, 256))
+    torch._check(
+        key.shape[0] == 1 and key.shape[1] == (4 if grouped_fp32 else 8)
+        and key.shape[3] == 256
+    )
+    torch._check(
+        0 < key.shape[2] <= 4096 if grouped_fp32 else key.shape[2] in (64, 128, 256)
+    )
     torch._check(value.shape == key.shape)
     torch._check(tuple(position.shape) == (1,) and position.dtype == torch.int64)
     torch._check(tuple(mask.shape) == (1, key.shape[2]) and mask.dtype == torch.bool)
     for tensor in (query, key, value):
-        torch._check(tensor.dtype == torch.bfloat16)
+        torch._check(tensor.dtype == query.dtype)
+    torch._check(query.dtype in (torch.bfloat16, torch.float32))
     for tensor in (query, key, value, position, mask):
         torch._check(tensor.device == query.device)
     torch._check(query.device.type in ("musa", "meta"))
@@ -41,10 +48,15 @@ def causal_attention_impl(query, key, value, position, mask):
     length = index + 1
     key = key[..., :length, :].contiguous()
     value = value[..., :length, :].contiguous()
+    query_shape = query.shape
+    if query.dtype == torch.float32:
+        query = query.reshape(4, 4, 256)
+        key = key.reshape(4, length, 256)
+        value = value.reshape(4, length, 256)
     scores = torch.matmul(query.contiguous(), key.transpose(-2, -1))
     scaled = scores * 0.0625
     probabilities = torch.softmax(scaled.float(), dim=-1).to(query.dtype)
-    return torch.matmul(probabilities, value).contiguous()
+    return torch.matmul(probabilities, value).reshape(query_shape).contiguous()
 
 
 def causal_attention_meta(query, key, value, position, mask):
