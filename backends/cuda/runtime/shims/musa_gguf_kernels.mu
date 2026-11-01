@@ -107,6 +107,15 @@ __global__ void linear_decode_kernel(float* output, const float* input,
   }
 }
 
+template <int QuantType, typename Value>
+__device__ Value load_decode_value(const Value* address) {
+  if constexpr (QuantType == 12) {
+    return __ldg(address);
+  } else {
+    return *address;
+  }
+}
+
 template <int QuantType>
 __device__ uint32_t load_packed_four(const uint8_t* address) {
   if constexpr (QuantType == 14) {
@@ -114,7 +123,8 @@ __device__ uint32_t load_packed_four(const uint8_t* address) {
     return static_cast<uint32_t>(halves[0]) |
         (static_cast<uint32_t>(halves[1]) << 16);
   } else {
-    return *reinterpret_cast<const uint32_t*>(address);
+    return load_decode_value<QuantType>(
+        reinterpret_cast<const uint32_t*>(address));
   }
 }
 
@@ -147,10 +157,12 @@ __global__ void linear_vector_decode_kernel(
     float second_inputs[width];
 #pragma unroll
     for (int word = 0; word < width / 4; ++word) {
-      const float4 first_input = *reinterpret_cast<const float4*>(
-          input + block * 256 + element + word * 4);
-      const float4 second_input = *reinterpret_cast<const float4*>(
-          input + block * 256 + element + 128 + word * 4);
+      const float4 first_input =
+          load_decode_value<QuantType>(reinterpret_cast<const float4*>(
+              input + block * 256 + element + word * 4));
+      const float4 second_input =
+          load_decode_value<QuantType>(reinterpret_cast<const float4*>(
+              input + block * 256 + element + 128 + word * 4));
       first_inputs[word * 4] = first_input.x;
       first_inputs[word * 4 + 1] = first_input.y;
       first_inputs[word * 4 + 2] = first_input.z;
@@ -221,10 +233,10 @@ __global__ void linear_vector_decode_kernel(
           weight_block + offset + (group / 2) * 32 + channel;
       const auto* second_address = first_address + 64;
       if constexpr (width == 16) {
-        const uint4 first_words =
-            *reinterpret_cast<const uint4*>(first_address);
-        const uint4 second_words =
-            *reinterpret_cast<const uint4*>(second_address);
+        const uint4 first_words = load_decode_value<QuantType>(
+            reinterpret_cast<const uint4*>(first_address));
+        const uint4 second_words = load_decode_value<QuantType>(
+            reinterpret_cast<const uint4*>(second_address));
         first_low[0] = first_words.x;
         first_low[1] = first_words.y;
         first_low[2] = first_words.z;
@@ -239,8 +251,8 @@ __global__ void linear_vector_decode_kernel(
       }
       if constexpr (QuantType == 13) {
         if constexpr (width == 16) {
-          const uint4 words =
-              *reinterpret_cast<const uint4*>(weight_block + 16 + channel);
+          const uint4 words = load_decode_value<QuantType>(
+              reinterpret_cast<const uint4*>(weight_block + 16 + channel));
           high_words[0] = words.x;
           high_words[1] = words.y;
           high_words[2] = words.z;
@@ -293,6 +305,113 @@ __global__ void linear_vector_decode_kernel(
   }
 }
 
+__global__ void linear_q6_tiled_decode_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  constexpr int bytes = 210;
+  constexpr int width = 4;
+  constexpr int RowsPerThread = 2;
+  constexpr int lanes = 128 / width;
+  const int lane = threadIdx.x % lanes;
+  const int row = blockIdx.x * (width * RowsPerThread) + threadIdx.x / lanes;
+  if (row >= rows) {
+    return;
+  }
+  const int element = lane * width;
+  const int group = element / 32;
+  const int channel = element % 32;
+  float partial[RowsPerThread][width] = {};
+  for (int block = 0; block < columns / 256; ++block) {
+    float first_inputs[width];
+    float second_inputs[width];
+#pragma unroll
+    for (int word = 0; word < width / 4; ++word) {
+      const float4 first_input =
+          load_decode_value<14>(reinterpret_cast<const float4*>(
+              input + block * 256 + element + word * 4));
+      const float4 second_input =
+          load_decode_value<14>(reinterpret_cast<const float4*>(
+              input + block * 256 + element + 128 + word * 4));
+      first_inputs[word * 4] = first_input.x;
+      first_inputs[word * 4 + 1] = first_input.y;
+      first_inputs[word * 4 + 2] = first_input.z;
+      first_inputs[word * 4 + 3] = first_input.w;
+      second_inputs[word * 4] = second_input.x;
+      second_inputs[word * 4 + 1] = second_input.y;
+      second_inputs[word * 4 + 2] = second_input.z;
+      second_inputs[word * 4 + 3] = second_input.w;
+    }
+#pragma unroll
+    for (int tile = 0; tile < RowsPerThread; ++tile) {
+      if (row + tile * width < rows) {
+        const auto* weight_row = packed +
+            static_cast<int64_t>(row + tile * width) * (columns / 256) * bytes;
+        const auto* weight_block =
+            weight_row + static_cast<int64_t>(block) * bytes;
+
+        const float scale = scale_value(weight_block + 208);
+        const float first_scale = scale *
+            static_cast<float>(static_cast<int8_t>(
+                weight_block[192 + element / 16]));
+        const float second_scale = scale *
+            static_cast<float>(static_cast<int8_t>(
+                weight_block[200 + element / 16]));
+#pragma unroll
+        for (int component = 0; component < width; ++component) {
+          const uint32_t low_first = load_packed_four<14>(
+              weight_block + (group % 2) * 32 + channel + (component / 4) * 4);
+          const uint32_t low_second = load_packed_four<14>(
+              weight_block + 64 + (group % 2) * 32 + channel +
+              (component / 4) * 4);
+          const uint32_t high_first = load_packed_four<14>(
+              weight_block + 128 + channel + (component / 4) * 4);
+          const uint32_t high_second = load_packed_four<14>(
+              weight_block + 160 + channel + (component / 4) * 4);
+          const uint32_t first_levels = __vsub4(
+              ((low_first >> ((group / 2) * 4)) & 0x0f0f0f0fU) |
+                  (((high_first >> (group * 2)) & 0x03030303U) << 4),
+              0x20202020U);
+          const uint32_t second_levels = __vsub4(
+              ((low_second >> ((group / 2) * 4)) & 0x0f0f0f0fU) |
+                  (((high_second >> (group * 2)) & 0x03030303U) << 4),
+              0x20202020U);
+          const int first_value =
+              static_cast<int8_t>(first_levels >> ((component % 4) * 8));
+          const int second_value =
+              static_cast<int8_t>(second_levels >> ((component % 4) * 8));
+          partial[tile][component] = fmaf(
+              first_scale * static_cast<float>(first_value),
+              first_inputs[component],
+              partial[tile][component]);
+          partial[tile][component] = fmaf(
+              second_scale * static_cast<float>(second_value),
+              second_inputs[component],
+              partial[tile][component]);
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int tile = 0; tile < RowsPerThread; ++tile) {
+#pragma unroll
+    for (int component = 0; component < width; ++component) {
+      for (int stride = lanes / 2; stride > 0; stride /= 2) {
+        partial[tile][component] += __shfl_down_sync(
+            0xffffffff, partial[tile][component], stride, lanes);
+      }
+    }
+    if (lane == 0 && row + tile * width < rows) {
+      partial[tile][0] += partial[tile][2];
+      partial[tile][1] += partial[tile][3];
+      partial[tile][0] += partial[tile][1];
+      output[row + tile * width] = partial[tile][0];
+    }
+  }
+}
+
 template <int QuantType>
 musaError_t launch_linear_vector_decode(
     float* output,
@@ -302,6 +421,11 @@ musaError_t launch_linear_vector_decode(
     int columns,
     musaStream_t stream) {
   if constexpr (QuantType == 14) {
+    if (rows >= 4096 && columns == 2560) {
+      linear_q6_tiled_decode_kernel<<<(rows + 7) / 8, 128, 0, stream>>>(
+          output, input, packed, rows, columns);
+      return musaGetLastError();
+    }
     linear_vector_decode_kernel<QuantType, 4>
         <<<(rows + 3) / 4, 128, 0, stream>>>(
             output, input, packed, rows, columns);

@@ -274,6 +274,66 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
   }
 }
 
+TEST_F(MusaGgufTest, TiledQ6DecodeMatchesGenericAtDispatchAndRowBoundaries) {
+  for (int columns : {256, 2560}) {
+    for (int rows : {4095, 4096, 4097}) {
+      const int row_bytes = columns / 256 * 210;
+      std::vector<uint8_t> data(rows * row_bytes);
+      uint32_t random_state = 0x34591a7d;
+      for (auto& byte : data) {
+        random_state ^= random_state << 13;
+        random_state ^= random_state >> 17;
+        random_state ^= random_state << 5;
+        byte = static_cast<uint8_t>(random_state);
+      }
+      for (size_t block = 0; block < data.size(); block += 210) {
+        data[block + 209] = (data[block + 209] & 0x83) | 0x38;
+      }
+      auto reference_packed = tensor({rows, row_bytes}, ScalarType::Byte);
+      write(reference_packed, data);
+      std::vector<float> values(2 * columns);
+      for (int column = 0; column < columns; ++column) {
+        values[column] = std::sin(static_cast<float>(column * 17)) * 3;
+        values[columns + column] = values[column];
+      }
+      auto reference_input = tensor({2, columns});
+      auto reference_output = tensor({2, rows});
+      write(reference_input, values);
+      ASSERT_EQ(
+          aoti_torch_musa_gguf_linear_out(
+              &reference_output, &reference_input, &reference_packed, 14),
+          Error::Ok);
+      const auto expected = read(reference_output);
+      auto input = tensor({1, columns});
+      values.resize(columns);
+      write(input, values);
+      for (int offset : {0, 1, 2}) {
+        SCOPED_TRACE(columns);
+        SCOPED_TRACE(rows);
+        SCOPED_TRACE(offset);
+        auto packed_owner = tensor({rows * row_bytes + 2}, ScalarType::Byte);
+        auto packed = packed_owner.as_strided(
+            {rows, row_bytes}, {row_bytes, 1}, offset);
+        write(packed, data);
+        auto output_owner = tensor({rows + 2});
+        write(output_owner, std::vector<float>(rows + 2, 12345));
+        auto output = output_owner.as_strided({1, rows}, {rows, 1}, 1);
+        ASSERT_EQ(
+            aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 14),
+            Error::Ok);
+        const auto actual = read(output_owner);
+        ASSERT_EQ(actual.front(), 12345);
+        ASSERT_EQ(actual.back(), 12345);
+        for (int row = 0; row < rows; ++row) {
+          ASSERT_TRUE(std::isfinite(actual[row + 1]));
+          ASSERT_EQ(
+              std::memcmp(&actual[row + 1], &expected[row], sizeof(float)), 0);
+        }
+      }
+    }
+  }
+}
+
 TEST_F(MusaGgufTest, RejectsShapeTypeStridesAliasesAndStorageViolations) {
   auto packed = weight(12, 256);
   auto input = tensor({1, 256});
@@ -350,7 +410,19 @@ TEST_F(MusaGgufTest, VectorDecodeUsesCallingStreamWithPartialRowTile) {
     auto input = tensor({1, 256});
     write(input, std::vector<float>(256, 1));
     auto output = tensor({1, 129});
+    ASSERT_EQ(aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 12), Error::Ok);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    for (float value : read(output)) {
+      EXPECT_EQ(value, 256);
+    }
     ASSERT_EQ(cudaMemsetAsync(input.data_ptr(), 0, input.nbytes(), stream), cudaSuccess);
+    ASSERT_EQ(aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 12), Error::Ok);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    for (float value : read(output)) {
+      EXPECT_EQ(value, 0);
+    }
+    write(input, std::vector<float>(256, 1));
+    ASSERT_EQ(cudaMemsetAsync(packed.data_ptr(), 0, packed.nbytes(), stream), cudaSuccess);
     ASSERT_EQ(aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 12), Error::Ok);
     ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
     for (float value : read(output)) {
