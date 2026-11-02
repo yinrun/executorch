@@ -201,3 +201,59 @@ not overwritten. Local artifacts under `artifacts/gguf-20261029` include
 `build-decode-vector-v1`, `gemv-vector-v1`, `decode-vector-validation-v1`,
 `decode-vector-benchmark-v1`, `decode-vector-final-audit-v1.json` and
 `decode-vector-profile-blocking-v1`, with adjacent reproduction scripts.
+
+## Read-only Q4 loads and tiled Q6 heads (2026-11-01/02)
+
+Q4 vector loads now use the read-only cache hint. A separate Q6 kernel reuses
+each input group across two rows for aligned single-batch matrices with 2560
+columns and at least 4096 rows, including the full output head. Ordinary Q6
+and Q5 retain their original vector kernel, with existing alignment/batch
+fallbacks. FP32 FMA and reduction order, quantization, PTE/PTD, and weight
+storage are unchanged. No persistent weight cache or extra weight copy is
+introduced. Only the shim changes relative to the grouped-attention package.
+
+Nine GGUF native tests passed, retaining 1620 offset/bit-plane combinations
+and adding 18 Q6 dispatch/tail/sentinel cases. The calling-stream test also
+checks input and weight updates after an earlier invocation. Eleven attention
+tests passed; the two-device test remained skipped. MP21 compilation passed;
+runtime testing remains MP22/M1000 only. Eleven real matrix geometries produced
+863328 byte-identical output values. All 2298 full-logit outputs and 1149 reset
+pairs matched the preceding vector candidate byte for byte, with unchanged
+matched-HF-step tolerance, tokens and EOS. HF, vision, full 4096-step model
+execution and relocation were not rerun.
+
+An initial generic row-tile implementation regressed ordinary Q6 down kernels
+by approximately 7% and was superseded. The accepted implementation preserves
+that kernel and specializes only the large Q6 path. Larger blocks, wider
+vectors and unrolled loops were generally not beneficial. Q5's final isolated
+microbenchmark was 0.953x; not every geometry is claimed to improve.
+
+Normal A/B/B/A tests retain full output checking, with one warmup and two
+measured generations per process, no profiling/blocking/logits dumps:
+
+| Workload and runtime | Minimum tok/s | Median tok/s | Maximum tok/s |
+| --- | ---: | ---: | ---: |
+| 16 decode steps, previous vector | 6.002 | 6.651 | 7.341 |
+| 16 decode steps, cache/tile | 7.336 | 7.633 | 7.768 |
+| Original text to EOS, previous vector | 6.754 | 6.846 | 6.910 |
+| Original text to EOS, cache/tile | 7.155 | 7.206 | 7.224 |
+
+The full text uses the original 28-token prompt and generates 89 tokens to EOS,
+with 88 decode steps. All 12 trajectories match. Its paired median gain is
+1.053x, not the noisier short test's 1.148x. The continuous full-text series
+took 250.044 seconds and records realtime/monotonic/boottime boundaries.
+An earlier full-text series spanned more than 15 hours and was excluded from
+continuous performance acceptance; its slower candidate results and timestamp
+evidence are preserved separately, not overwritten. The desktop GPU remains
+shared and unlocked. The 10 tok/s target is **not achieved**.
+
+A separate blocking profile attributes 86.72% of kernel time to packed Linear,
+including 17.34% for the full Q6 head. These are not normal token latencies.
+Further work should evaluate lossless layout/metadata preprocessing with
+explicit lifetime and extra-memory accounting, and retain full-logit checks.
+
+Local artifacts include `gemv-schedule-v1`, `build-decode-cache-v2`,
+`decode-cache-validation-v2`, `decode-cache-benchmark-v2`,
+`decode-cache-fulltext-benchmark-v2`, `decode-cache-final-audit-v2.json`,
+`decode-cache-acceptance-v2.json` and `decode-cache-profile-blocking-v2`.
+The original package is unchanged; adjacent scripts retain reproduction commands.
