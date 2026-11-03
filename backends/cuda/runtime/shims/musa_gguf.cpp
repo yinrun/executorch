@@ -6,6 +6,19 @@
 
 #include <limits>
 
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+extern "C" musaError_t executorch_musa_gguf_split_k_launch(
+    float*,
+    const float*,
+    const uint8_t*,
+    float*,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    musaStream_t);
+#endif
+
 extern "C" musaError_t executorch_musa_gguf_linear_launch(float*, const float*,
                                                           const uint8_t*,
                                                           int64_t, int64_t,
@@ -108,11 +121,38 @@ aoti_torch_musa_gguf_linear_out(SlimTensor* output, SlimTensor* input,
   ET_CHECK_OK_OR_RETURN_ERROR(guard.error());
   auto stream = getCurrentCUDAStream(input->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(stream.error());
-  const auto status = executorch_musa_gguf_linear_launch(
-      static_cast<float*>(output->data_ptr()),
-      static_cast<const float*>(input->data_ptr()),
-      static_cast<const uint8_t*>(packed->data_ptr()), rows, columns, batches,
-      quant_type, stream.get());
+  musaError_t status;
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+  if (batches == 1 && rows >= 128 &&
+      rows <= std::numeric_limits<int>::max() / 4 && columns >= 4096 &&
+      columns <= std::numeric_limits<int>::max() &&
+      (quant_type == 12 || quant_type == 114) &&
+      reinterpret_cast<uintptr_t>(input->data_ptr()) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(packed->data_ptr()) % 16 == 0) {
+    auto workspace = slim::empty({4, rows}, ScalarType::Float, input->device());
+    status = executorch_musa_gguf_split_k_launch(
+        static_cast<float*>(output->data_ptr()),
+        static_cast<const float*>(input->data_ptr()),
+        static_cast<const uint8_t*>(packed->data_ptr()),
+        static_cast<float*>(workspace.data_ptr()),
+        rows,
+        columns,
+        batches,
+        quant_type,
+        stream.get());
+  } else
+#endif
+  {
+    status = executorch_musa_gguf_linear_launch(
+        static_cast<float*>(output->data_ptr()),
+        static_cast<const float*>(input->data_ptr()),
+        static_cast<const uint8_t*>(packed->data_ptr()),
+        rows,
+        columns,
+        batches,
+        quant_type,
+        stream.get());
+  }
   ET_CHECK_OR_RETURN_ERROR(status == musaSuccess, Internal,
                            "GGUF linear kernel launch failed: %s",
                            musaGetErrorString(status));

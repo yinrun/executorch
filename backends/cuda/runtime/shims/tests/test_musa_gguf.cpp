@@ -89,6 +89,54 @@ SlimTensor weight(int64_t quant_type, int64_t columns, int rows = 3) {
   return packed;
 }
 
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+std::vector<float> split_reference(
+    const std::vector<uint8_t>& data,
+    const std::vector<float>& values,
+    int quant_type,
+    int rows,
+    int columns) {
+  const int bytes = quant_type == 12 ? 144 : 210;
+  std::vector<float> result(rows, 0);
+  for (int part = 0; part < 4; ++part) {
+    const int first = (columns / 256) * part / 4;
+    const int last = (columns / 256) * (part + 1) / 4;
+    const int part_columns = (last - first) * 256;
+    auto packed = tensor({rows, (last - first) * bytes}, ScalarType::Byte);
+    std::vector<uint8_t> part_data(packed.numel());
+    for (int row = 0; row < rows; ++row) {
+      std::copy_n(
+          data.begin() + (row * (columns / 256) + first) * bytes,
+          (last - first) * bytes,
+          part_data.begin() + row * (last - first) * bytes);
+    }
+    write(packed, part_data);
+    auto input = tensor({2, part_columns});
+    std::vector<float> part_values(2 * part_columns);
+    for (int batch = 0; batch < 2; ++batch) {
+      std::copy_n(
+          values.begin() + first * 256,
+          part_columns,
+          part_values.begin() + batch * part_columns);
+    }
+    write(input, part_values);
+    auto output = tensor({2, rows});
+    EXPECT_EQ(
+        aoti_torch_musa_gguf_linear_out(&output, &input, &packed, quant_type),
+        Error::Ok);
+    const auto partial = read(output);
+    for (int row = 0; row < rows; ++row) {
+      if (part == 0) {
+        result[row] = partial[row];
+      } else {
+        result[row] += partial[row];
+      }
+    }
+  }
+  return result;
+}
+#endif
+
 class MusaGgufTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -240,6 +288,12 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
                 &reference_output, &batch_input, &reference_packed, quant_type),
             Error::Ok);
         const auto expected_values = read(reference_output);
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+        const auto split_values =
+            quant_type == 12 && rows >= 128 && columns >= 4096
+            ? split_reference(data, values, quant_type, rows, columns)
+            : std::vector<float>{};
+#endif
         values.resize(columns);
         for (int packed_offset : {0, 1, 2, 4, 16}) {
           auto owner = tensor({rows * row_bytes + 16}, ScalarType::Byte);
@@ -260,11 +314,18 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
                     &output, &input, &packed, quant_type),
                 Error::Ok);
             const auto actual = read(output);
+            const auto* expected_output = expected_values.data();
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+            if (!split_values.empty() && packed_offset % 16 == 0 &&
+                input_offset % 4 == 0) {
+              expected_output = split_values.data();
+            }
+#endif
             for (int row = 0; row < rows; ++row) {
               ASSERT_TRUE(std::isfinite(actual[row]));
               ASSERT_EQ(
                   std::memcmp(
-                      &actual[row], &expected_values[row], sizeof(float)),
+                      &actual[row], &expected_output[row], sizeof(float)),
                   0);
             }
           }
@@ -389,6 +450,11 @@ TEST_F(MusaGgufTest, PredecodedQ6MatchesOriginalBitsBatchesOffsetsAndRowTails) {
               &reference_output, &reference_input, &original_tensor, 14),
           Error::Ok);
       const auto expected_values = read(reference_output);
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+      const auto split_values = rows >= 128 && columns >= 4096
+          ? split_reference(original, values, 14, rows, columns)
+          : std::vector<float>{};
+#endif
       for (int packed_offset : {0, 1, 4, 16}) {
         auto owner = tensor({blocks * 320 + 16}, ScalarType::Byte);
         auto packed = owner.as_strided(
@@ -415,10 +481,17 @@ TEST_F(MusaGgufTest, PredecodedQ6MatchesOriginalBitsBatchesOffsetsAndRowTails) {
             const auto actual = read(output_owner);
             ASSERT_EQ(actual.front(), 12345);
             ASSERT_EQ(actual.back(), 12345);
+            const auto* expected_output = expected_values.data();
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+            if (!split_values.empty() && batches == 1 &&
+                packed_offset % 16 == 0 && input_offset == 0) {
+              expected_output = split_values.data();
+            }
+#endif
             ASSERT_EQ(
                 std::memcmp(
                     actual.data() + 1,
-                    expected_values.data(),
+                    expected_output,
                     batches * rows * sizeof(float)),
                 0);
           }
@@ -605,6 +678,165 @@ TEST_F(MusaGgufTest, RejectsShapeTypeStridesAliasesAndStorageViolations) {
   input.reset();
   EXPECT_EQ(aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 12),
             Error::InvalidArgument);
+}
+
+TEST_F(MusaGgufTest, LongKProjectionsCoverPartitionsTailsOffsetsAndFallbacks) {
+  struct Shape {
+    int rows;
+    int columns;
+    int batches;
+    int offset;
+  };
+  for (int quant_type : {12, 13, 114}) {
+    for (const Shape shape :
+         {Shape{129, 2560, 1, 0},
+          {129, 4096, 1, 0},
+          {257, 4352, 1, 0},
+          {129, 9216, 1, 0},
+          {127, 4096, 1, 0},
+          {129, 4096, 2, 0},
+          {129, 4096, 1, 1}}) {
+      SCOPED_TRACE(
+          ::testing::Message()
+          << quant_type << ":" << shape.rows << ":" << shape.columns << ":"
+          << shape.batches << ":" << shape.offset);
+      const int bytes = quant_type == 114 ? 320 : quant_type == 12 ? 144 : 176;
+      const int row_bytes = shape.columns / 256 * bytes;
+      auto owner =
+          tensor({shape.rows * row_bytes + shape.offset}, ScalarType::Byte);
+      auto packed = owner.as_strided(
+          {shape.rows, row_bytes}, {row_bytes, 1}, shape.offset);
+      auto input_owner = tensor({shape.batches * shape.columns + shape.offset});
+      auto input = input_owner.as_strided(
+          {shape.batches, shape.columns}, {shape.columns, 1}, shape.offset);
+      std::vector<float> values(input.numel());
+      for (size_t index = 0; index < values.size(); ++index) {
+        values[index] = std::sin(static_cast<float>(index) * 0.13f);
+      }
+      write(input, values);
+      std::vector<uint8_t> data(packed.numel(), 0);
+      std::vector<double> reference(shape.batches * shape.rows, 0);
+      for (int row = 0; row < shape.rows; ++row) {
+        for (int block_index = 0; block_index < shape.columns / 256;
+             ++block_index) {
+          auto* block = data.data() + row * row_bytes + block_index * bytes;
+          if (quant_type != 114) {
+            block[1] = 0x30;
+            block[3] = 0x2c;
+            std::fill(block + 4, block + 12, 1);
+            std::fill(block + 12, block + 16, 0x11);
+          }
+          for (int element = 0; element < 256; ++element) {
+            const int code = row * 7 + block_index * 3 + element;
+            float weight_value;
+            if (quant_type == 114) {
+              const int level = code % 64 - 32;
+              const float scale =
+                  static_cast<float>(
+                      (row + block_index + element / 16) % 7 - 3) /
+                  64;
+              block[element] = static_cast<uint8_t>(level);
+              std::memcpy(
+                  block + 256 + element / 16 * sizeof(float),
+                  &scale,
+                  sizeof(float));
+              weight_value = scale * level;
+            } else {
+              const int level = code % (quant_type == 12 ? 16 : 32);
+              const int group = element / 32;
+              const int lane = element % 32;
+              const int offset = quant_type == 12 ? 16 : 48;
+              block[offset + group / 2 * 32 + lane] |= (level & 15)
+                  << (group % 2 * 4);
+              if (quant_type == 13) {
+                block[16 + lane] |= (level >> 4) << group;
+              }
+              weight_value = 0.125f * level - 0.0625f;
+            }
+            for (int batch = 0; batch < shape.batches; ++batch) {
+              reference[batch * shape.rows + row] +=
+                  static_cast<double>(weight_value) *
+                  values[batch * shape.columns + block_index * 256 + element];
+            }
+          }
+        }
+      }
+      write(packed, data);
+      auto output = tensor({shape.batches, shape.rows});
+      ASSERT_EQ(
+          aoti_torch_musa_gguf_linear_out(&output, &input, &packed, quant_type),
+          Error::Ok);
+      const auto actual = read(output);
+      for (size_t index = 0; index < actual.size(); ++index) {
+        ASSERT_TRUE(std::isfinite(actual[index]));
+        ASSERT_NEAR(
+            actual[index],
+            reference[index],
+            0.001 + 0.001 * std::abs(reference[index]));
+      }
+    }
+  }
+}
+
+TEST_F(MusaGgufTest, LongKWorkspaceLifetimeAndCallingStream) {
+  cudaStream_t stream;
+  ASSERT_EQ(
+      musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  {
+    auto guard = executorch::backends::cuda::CUDAStreamGuard::create(stream, 0);
+    ASSERT_TRUE(guard.ok());
+    for (int quant_type : {12, 114}) {
+      const int bytes = quant_type == 12 ? 144 : 320;
+      auto packed = tensor({129, 16 * bytes}, ScalarType::Byte);
+      std::vector<uint8_t> data(packed.numel(), 0);
+      for (int index = 0; index < 129 * 16; ++index) {
+        auto* block = data.data() + index * bytes;
+        if (quant_type == 12) {
+          block[1] = 0x3c;
+          std::fill(block + 4, block + 12, 1);
+          std::fill(block + 12, block + 144, 0x11);
+        } else {
+          std::fill(block, block + 256, 1);
+          const float scale = 1;
+          for (int group = 0; group < 16; ++group) {
+            std::memcpy(
+                block + 256 + group * sizeof(float), &scale, sizeof(float));
+          }
+        }
+      }
+      write(packed, data);
+      auto positive = tensor({1, 4096});
+      auto zero = tensor({1, 4096});
+      write(positive, std::vector<float>(4096, 1));
+      ASSERT_EQ(
+          cudaMemsetAsync(zero.data_ptr(), 0, zero.nbytes(), stream),
+          cudaSuccess);
+      std::vector<SlimTensor> outputs;
+      for (int iteration = 0; iteration < 8; ++iteration) {
+        outputs.push_back(tensor({1, 129}));
+        auto& input = iteration % 2 == 0 ? positive : zero;
+        ASSERT_EQ(
+            aoti_torch_musa_gguf_linear_out(
+                &outputs.back(), &input, &packed, quant_type),
+            Error::Ok);
+      }
+      ASSERT_EQ(
+          cudaMemsetAsync(packed.data_ptr(), 0, packed.nbytes(), stream),
+          cudaSuccess);
+      outputs.push_back(tensor({1, 129}));
+      ASSERT_EQ(
+          aoti_torch_musa_gguf_linear_out(
+              &outputs.back(), &positive, &packed, quant_type),
+          Error::Ok);
+      ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+      for (size_t iteration = 0; iteration < outputs.size(); ++iteration) {
+        for (float value : read(outputs[iteration])) {
+          EXPECT_EQ(value, iteration < 8 && iteration % 2 == 0 ? 4096 : 0);
+        }
+      }
+    }
+  }
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
 
 TEST_F(MusaGgufTest, UsesCallingStreamOnDeviceZero) {

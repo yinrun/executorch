@@ -317,6 +317,12 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_conversion_flags
          -DEXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD=1)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_SPLIT_K
+         "Use experimental four-way FP32 reduction for long-K Q4/Q6 GEMV" OFF)
+  if(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_SPLIT_K=1)
+  endif()
   set(_musa_gguf_arch_flags "")
   foreach(_arch IN LISTS EXECUTORCH_MUSA_ARCHITECTURES)
     if(NOT _arch MATCHES "^[0-9]+$")
@@ -426,6 +432,9 @@ if(EXECUTORCH_BUILD_MUSA)
   target_link_libraries(aoti_cuda_shims PUBLIC MUSA::mublas
                                               ${MUSA_MUDNN_LIBRARY}
                                               ${MUSA_MUDNN_CXX_LIBRARY})
+  if(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+    target_compile_definitions(aoti_cuda_shims PRIVATE EXECUTORCH_MUSA_GGUF_SPLIT_K=1)
+  endif()
 endif()
 
 if(NOT _cuda_is_msvc_toolchain)
@@ -606,6 +615,9 @@ if(BUILD_TESTING)
       )
       set_tests_properties(test_musa_${_musa_test} PROPERTIES LABELS musa)
     endforeach()
+    if(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+      target_compile_definitions(test_musa_gguf PRIVATE EXECUTORCH_MUSA_GGUF_SPLIT_K=1)
+    endif()
     target_link_libraries(test_musa_device c10)
     target_link_libraries(test_musa_storage ${CMAKE_DL_LIBS})
     find_package(Threads REQUIRED)

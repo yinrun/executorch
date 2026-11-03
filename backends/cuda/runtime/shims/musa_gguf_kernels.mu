@@ -214,7 +214,7 @@ __device__ uint32_t load_packed_four(const uint8_t* address) {
   }
 }
 
-template <int QuantType, int Width>
+template <int QuantType, int Width, int Parts = 1>
 __global__ void linear_vector_decode_kernel(
     float* output,
     const float* input,
@@ -226,6 +226,7 @@ __global__ void linear_vector_decode_kernel(
   static_assert(QuantType != 14 || Width == 4);
   constexpr int width = Width;
   constexpr int lanes = 128 / width;
+  const int part = Parts == 1 ? 0 : blockIdx.y;
   const int lane = threadIdx.x % lanes;
   const int row = blockIdx.x * width + threadIdx.x / lanes;
   if (row >= rows) {
@@ -237,7 +238,9 @@ __global__ void linear_vector_decode_kernel(
   const auto* weight_row =
       packed + static_cast<int64_t>(row) * (columns / 256) * bytes;
   float partial[width] = {};
-  for (int block = 0; block < columns / 256; ++block) {
+  for (int block = (columns / 256) * part / Parts;
+       block < (columns / 256) * (part + 1) / Parts;
+       ++block) {
     const auto* weight_block = weight_row + static_cast<int64_t>(block) * bytes;
     float first_inputs[width];
     float second_inputs[width];
@@ -463,7 +466,7 @@ __global__ void linear_vector_decode_kernel(
         partial[component] += partial[component + stride];
       }
     }
-    output[row] = partial[0];
+    output[part * rows + row] = partial[0];
   }
 }
 
@@ -574,7 +577,7 @@ __global__ void linear_q6_tiled_decode_kernel(
   }
 }
 
-template <int Tile>
+template <int Tile, int Parts = 1>
 __global__ void linear_predecoded_q6_decode_kernel(
     float* output,
     const float* input,
@@ -584,6 +587,7 @@ __global__ void linear_predecoded_q6_decode_kernel(
   constexpr int Width = 4;
   constexpr int bytes = 320;
   constexpr int lanes = 128 / Width;
+  const int part = Parts == 1 ? 0 : blockIdx.y;
   const int lane = threadIdx.x % lanes;
   const int row = blockIdx.x * Width * Tile + threadIdx.x / lanes;
   if (row >= rows) {
@@ -591,7 +595,9 @@ __global__ void linear_predecoded_q6_decode_kernel(
   }
   const int element = lane * Width;
   float partial[Tile][Width] = {};
-  for (int block = 0; block < columns / 256; ++block) {
+  for (int block = (columns / 256) * part / Parts;
+       block < (columns / 256) * (part + 1) / Parts;
+       ++block) {
     float first_inputs[Width];
     float second_inputs[Width];
 #pragma unroll
@@ -694,10 +700,25 @@ __global__ void linear_predecoded_q6_decode_kernel(
           partial[tile][component] += partial[tile][component + stride];
         }
       }
-      output[row + tile * Width] = partial[tile][0];
+      output[part * rows + row + tile * Width] = partial[tile][0];
     }
   }
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+__global__ void
+reduce_split_k_kernel(float* output, const float* workspace, int rows) {
+  const int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < rows) {
+    float result = workspace[row];
+#pragma unroll
+    for (int part = 1; part < 4; ++part) {
+      result += workspace[part * rows + row];
+    }
+    output[row] = result;
+  }
+}
+#endif
 
 template <int QuantType>
 musaError_t launch_linear_vector_decode(
@@ -755,6 +776,44 @@ __global__ void embedding_kernel(float* output, const int64_t* indices,
 }
 
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+extern "C" musaError_t executorch_musa_gguf_split_k_launch(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    float* workspace,
+    int64_t rows,
+    int64_t columns,
+    int64_t batches,
+    int64_t quant_type,
+    musaStream_t stream) {
+  if (batches != 1 || rows < 128 ||
+      rows > std::numeric_limits<int>::max() / 4 || columns < 4096 ||
+      columns > std::numeric_limits<int>::max() || columns % 256 != 0 ||
+      (quant_type != 12 && quant_type != 114) ||
+      reinterpret_cast<uintptr_t>(input) % 16 != 0 ||
+      reinterpret_cast<uintptr_t>(packed) % 16 != 0) {
+    return musaErrorInvalidValue;
+  }
+  if (quant_type == 12) {
+    linear_vector_decode_kernel<12, 16, 4>
+        <<<dim3((rows + 15) / 16, 4), 128, 0, stream>>>(
+            workspace, input, packed, rows, columns);
+  } else {
+    linear_predecoded_q6_decode_kernel<2, 4>
+        <<<dim3((rows + 7) / 8, 4), 128, 0, stream>>>(
+            workspace, input, packed, rows, columns);
+  }
+  const auto status = musaGetLastError();
+  if (status != musaSuccess) {
+    return status;
+  }
+  reduce_split_k_kernel<<<(rows + 127) / 128, 128, 0, stream>>>(
+      output, workspace, rows);
+  return musaGetLastError();
+}
+#endif
 
 extern "C" musaError_t executorch_musa_gguf_linear_launch(
     float* output,
