@@ -121,11 +121,64 @@ their durations must not be summed or used as reliable individual-kernel
 costs. Profiled throughput is not ordinary throughput, and historical
 cross-session trace timings do not establish a speedup.
 
-The next targeted experiment is to avoid the extra reduction/scratch cost,
-for example by consuming partition outputs in a following residual epilogue.
-That requires export, ownership and complete accuracy validation; it is not
-an implemented or measured improvement. More partitioning alone has not
-established a route to 10 tokens/s.
+## Caller-owned partials and fused epilogue PoC
+
+A subsequent artifact-only PoC removes that extra reduction/scratch cost.
+An experimental `gguf_parts` export operation returns `[4, ..., rows]`.
+Its native shim writes the same four partitions directly into the caller's
+output, owned by AOTI's combined memory pool. Explicit ordered additions
+`((part0 + part1) + part2) + part3` remain in the exported graph, allowing
+Inductor to fuse them with the following residual/RMSNorm work. There is no
+per-call native scratch tensor or native reduction launch. This new export
+operation and native entry point are **not integrated into the production
+backend or public loader**; they live only in the local probe artifacts.
+
+The re-export replaces 64 projections while retaining one delegate, the same
+64 mutated state buffers, 32 merged-FFN calls and eight valid-prefix-attention
+calls. Source GGUF hashes and loading metadata match the original export,
+apart from two later-added GDN options explicitly recorded as false. Neither
+GDN experiment is enabled. The first export fails because the temporary
+header's repository-relative include is absent from the AOTI wrapper include
+path; export v2 uses an explicit local header path and succeeds.
+
+The new PTE/PTD and isolated native runtime pass all **2298 complete logit
+comparisons**, original IDs/EOS, **1149 reset pairs** and **18 negative
+controls**. Every logit also matches the preceding Split-K source runtime
+**byte for byte**. HF tolerances and exact per-step argmax remain unchanged.
+An independent audit rehashes outputs, sources, runtime and protected files;
+it does not infer acceptance merely from the successful six-step eager probe.
+
+Ordinary ABBA+BAAB timing uses the same workload and rules as above. Here the
+baseline is the **previous qualified opt-in Split-K source runtime**, not
+the original accepted grouped-head deployment:
+
+| Runtime | Decode minimum | Decode median | Serial prefill median |
+| --- | ---: | ---: | ---: |
+| Previous Split-K | 7.3150 | 7.4241 | 7.4126 |
+| Fused-epilogue PoC | 7.5337 | 7.5555 | 7.6150 |
+
+All speeds are tokens/s. Combined decode improvement is **1.77%**, with
+separate order gains **1.87%** and **1.90%**. Eight measured samples per
+variant are collected on the shared desktop. The ordinary timing series
+finishes before profiling starts. Do not multiply gains from separate
+sessions and present them as a fresh comparison against the original
+accepted deployment.
+
+The new full-model trace records **812 kernels and three `musaEventRecord`
+calls per measured decode step**, compared with 876 and 67 in the earlier
+isolated Split-K prototype trace. It contains 48 Q4 and 16 Q6 partial
+projection launches and no separate partial-reduction kernel. Stream
+synchronizations remain 12 and `musaMallocAsync` calls remain eight per step.
+This confirms the intended launch/lifetime change, not a per-kernel timing
+attribution from overlapping async labels.
+
+The PoC runtime SHA-256 is
+`b1f7ff396d314c28f596080aad2e3592f7d793f3cef1b03702b2a0e1a484806f`.
+The accepted deployment and default flags remain unchanged. Next is a
+production-quality opt-in implementation with boundary/ownership tests and
+fresh source-runtime qualification; the artifact's benchmark must not be
+attributed to an unbuilt production implementation. Further large-matrix
+optimization is still needed to reach 10 tokens/s.
 
 ## Local evidence
 
@@ -145,3 +198,13 @@ ETSupport evidence under `artifacts/gguf-20261029`:
   integrated-source numerical and ordinary throughput evidence.
 - `audit_split_k_source_v2.py`, `split-k-source-decision-v2.json`: source,
   build, original artifact hashes, numerical and timing audit.
+- `split-k-epilogue-probe-v1`, `build_split_k_epilogue_v1.py`,
+  `build-split-k-epilogue-v1`: temporary export operator, native partial-output
+  shim/kernel, isolated build and protected-artifact checks.
+- `export_split_k_epilogue_v2.py`, `split-k-epilogue-export-v2`:
+  successful re-export after the retained v1 header-path failure.
+- `split-k-epilogue-validation-v1`, `split-k-epilogue-benchmark-v1/v2`,
+  `global-split-k-epilogue-profile-v1`: complete accuracy, ordinary timing
+  and the separate global trace.
+- `audit_split_k_epilogue_v1.py`, `split-k-epilogue-decision-v1.json`:
+  independent rehashing and model/export/accuracy/performance/profile audit.
