@@ -304,6 +304,12 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_conversion_flags
          -DEXECUTORCH_MUSA_GGUF_BYTE_CONVERT=1)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC
+         "Use experimental four-component arithmetic for native GGUF GEMV" OFF)
+  if(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC=1)
+  endif()
   set(_musa_gguf_arch_flags "")
   foreach(_arch IN LISTS EXECUTORCH_MUSA_ARCHITECTURES)
     if(NOT _arch MATCHES "^[0-9]+$")

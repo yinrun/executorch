@@ -6,6 +6,10 @@ new operator, change the packed weights, alter scale arithmetic or reorder
 the explicit FP32 FMA/reduction tree. Q6 and its predecoded output head are
 unchanged. The option defaults to **OFF**; CUDA/ROCm are unaffected.
 
+The subsequent optional
+[four-component arithmetic experiment](QWEN35_GGUF_QUAD_ARITHMETIC.md)
+also optimizes predecoded Q6 and preserves this implementation as a fallback.
+
 The tested combination uses MUSA SDK 5.1, MP22 and
 `EXECUTORCH_MUSA_GGUF_MAX_ILP=ON`. Other SDKs, architectures and scheduling
 combinations are not performance-qualified. The compiler builtins are inside

@@ -6,9 +6,23 @@
 
 namespace {
 
-#if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT)
+#if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT) || \
+    defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC)
 using UnsignedByteQuad = unsigned char __attribute__((ext_vector_type(4)));
 using FloatQuad = float __attribute__((ext_vector_type(4)));
+#endif
+
+#if defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC)
+using SignedByteQuad = signed char __attribute__((ext_vector_type(4)));
+
+__device__ __forceinline__ FloatQuad
+fma_decode_quad(FloatQuad first, FloatQuad second, FloatQuad accum) {
+  return {
+      fmaf(first[0], second[0], accum[0]),
+      fmaf(first[1], second[1], accum[1]),
+      fmaf(first[2], second[2], accum[2]),
+      fmaf(first[3], second[3], accum[3])};
+}
 #endif
 
 __device__ float scale_value(const uint8_t* bytes) {
@@ -298,6 +312,51 @@ __global__ void linear_vector_decode_kernel(
           high_words[0] = load_packed_four<13>(weight_block + 16 + channel);
         }
       }
+#if defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC)
+#pragma unroll
+      for (int word = 0; word < width / 4; ++word) {
+        const uint32_t low_first = first_low[word];
+        const uint32_t low_second = second_low[word];
+        const uint32_t high = high_words[word];
+        uint32_t first_levels = (low_first >> ((group % 2) * 4)) & 0x0f0f0f0fU;
+        uint32_t second_levels =
+            (low_second >> ((group % 2) * 4)) & 0x0f0f0f0fU;
+        if constexpr (QuantType == 13) {
+          first_levels |= ((high >> group) & 0x01010101U) << 4;
+          second_levels |= ((high >> (group + 4)) & 0x01010101U) << 4;
+        }
+        const FloatQuad first_values = __builtin_convertvector(
+            __builtin_bit_cast(UnsignedByteQuad, first_levels), FloatQuad);
+        const FloatQuad second_values = __builtin_convertvector(
+            __builtin_bit_cast(UnsignedByteQuad, second_levels), FloatQuad);
+        const FloatQuad first_weights =
+            first_scale * first_values - first_minimum;
+        const FloatQuad second_weights =
+            second_scale * second_values - second_minimum;
+        const int component = word * 4;
+        const FloatQuad first_input = {
+            first_inputs[component],
+            first_inputs[component + 1],
+            first_inputs[component + 2],
+            first_inputs[component + 3]};
+        const FloatQuad second_input = {
+            second_inputs[component],
+            second_inputs[component + 1],
+            second_inputs[component + 2],
+            second_inputs[component + 3]};
+        FloatQuad accum = {
+            partial[component],
+            partial[component + 1],
+            partial[component + 2],
+            partial[component + 3]};
+        accum = fma_decode_quad(first_weights, first_input, accum);
+        accum = fma_decode_quad(second_weights, second_input, accum);
+#pragma unroll
+        for (int byte = 0; byte < 4; ++byte) {
+          partial[component + byte] = accum[byte];
+        }
+      }
+#else
 #pragma unroll
       for (int component = 0; component < width; ++component) {
         const uint32_t low_first = first_low[component / 4];
@@ -330,6 +389,7 @@ __global__ void linear_vector_decode_kernel(
         partial[component] =
             fmaf(second_weight, second_inputs[component], partial[component]);
       }
+#endif
     }
   }
 #pragma unroll
@@ -508,6 +568,36 @@ __global__ void linear_predecoded_q6_decode_kernel(
               reinterpret_cast<const uint32_t*>(weight + element + word * 4));
           const uint32_t second = __ldg(reinterpret_cast<const uint32_t*>(
               weight + element + 128 + word * 4));
+#if defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC)
+          const FloatQuad first_values = __builtin_convertvector(
+              __builtin_bit_cast(SignedByteQuad, first), FloatQuad);
+          const FloatQuad second_values = __builtin_convertvector(
+              __builtin_bit_cast(SignedByteQuad, second), FloatQuad);
+          const int component = word * 4;
+          const FloatQuad first_input = {
+              first_inputs[component],
+              first_inputs[component + 1],
+              first_inputs[component + 2],
+              first_inputs[component + 3]};
+          const FloatQuad second_input = {
+              second_inputs[component],
+              second_inputs[component + 1],
+              second_inputs[component + 2],
+              second_inputs[component + 3]};
+          FloatQuad accum = {
+              partial[tile][component],
+              partial[tile][component + 1],
+              partial[tile][component + 2],
+              partial[tile][component + 3]};
+          accum =
+              fma_decode_quad(first_scale * first_values, first_input, accum);
+          accum = fma_decode_quad(
+              second_scale * second_values, second_input, accum);
+#pragma unroll
+          for (int byte = 0; byte < 4; ++byte) {
+            partial[tile][component + byte] = accum[byte];
+          }
+#else
 #pragma unroll
           for (int byte = 0; byte < 4; ++byte) {
             const int component = word * 4 + byte;
@@ -526,6 +616,7 @@ __global__ void linear_predecoded_q6_decode_kernel(
                 second_inputs[component],
                 partial[tile][component]);
           }
+#endif
         }
       }
     }
