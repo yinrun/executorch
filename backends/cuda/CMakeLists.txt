@@ -290,6 +290,13 @@ if(EXECUTORCH_BUILD_MUSA)
   set(EXECUTORCH_MUSA_ARCHITECTURES "22" CACHE STRING
       "MUSA architectures for native GGUF kernels"
   )
+  option(EXECUTORCH_MUSA_GGUF_MAX_ILP
+         "Use experimental MUSA compiler ILP scheduling for native GGUF kernels" OFF)
+  set(_musa_gguf_schedule_flags "")
+  if(EXECUTORCH_MUSA_GGUF_MAX_ILP)
+    list(APPEND _musa_gguf_schedule_flags
+         -mllvm -mtgpu-enable-max-ilp-scheduling-strategy=true)
+  endif()
   set(_musa_gguf_arch_flags "")
   foreach(_arch IN LISTS EXECUTORCH_MUSA_ARCHITECTURES)
     if(NOT _arch MATCHES "^[0-9]+$")
@@ -304,7 +311,7 @@ if(EXECUTORCH_BUILD_MUSA)
   add_custom_command(
     OUTPUT "${_musa_gguf_object}"
     COMMAND "${EXECUTORCH_MUSA_MCC}" -x musa -std=c++17 -O3 -fPIC
-            -ffp-contract=off ${_musa_gguf_arch_flags}
+            -ffp-contract=off ${_musa_gguf_arch_flags} ${_musa_gguf_schedule_flags}
             -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime/shims/musa_gguf_kernels.mu"
             -o "${_musa_gguf_object}"
     DEPENDS runtime/shims/musa_gguf_kernels.mu
