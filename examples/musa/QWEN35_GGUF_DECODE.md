@@ -260,3 +260,12 @@ Local artifacts include `gemv-schedule-v1`, `build-decode-cache-v2`,
 `decode-cache-fulltext-benchmark-v2`, `decode-cache-final-audit-v2.json`,
 `decode-cache-acceptance-v2.json` and `decode-cache-profile-blocking-v2`.
 The original package is unchanged; adjacent scripts retain reproduction commands.
+
+## Metadata and prepared-Q6 tiling follow-up
+
+The subsequent same-export native-shim comparison reaches 8.473 tok/s median
+versus its paired Q6-predecoded baseline's 8.093 tok/s, across two reversed-order
+series. Complete three-case logits remain byte exact. See
+[the metadata/tile report](QWEN35_GGUF_METADATA_TILE.md) for all samples,
+regressions and scope limits. This is a separate measurement from the older
+tables; the 10 tok/s target is still unmet.
