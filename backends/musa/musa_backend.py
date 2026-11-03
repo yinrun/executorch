@@ -25,6 +25,7 @@ from executorch.backends.musa.reduction import (
 )
 from executorch.backends.musa.gguf import GGUF_DECODE, dequantize_gguf_impl
 from executorch.backends.musa.gguf_packed import HEADER as _MUSA_GGUF_HEADER
+from executorch.backends.musa.gdn_recurrence import HEADER as _MUSA_GDN_HEADER
 from executorch.backends.musa.vision_layer_norm import (
     HEADER as _MUSA_VISION_LAYER_NORM_HEADER,
 )
@@ -656,6 +657,7 @@ def _musa_aoti_compile_context():
             self.header.splice(f'#include "{_MUSA_CAUSAL_ATTENTION_HEADER}"')
             self.header.splice(f'#include "{_MUSA_REDUCTION_HEADER}"')
             self.header.splice(f'#include "{_MUSA_GGUF_HEADER}"')
+            self.header.splice(f'#include "{_MUSA_GDN_HEADER}"')
             self.header.splice(f'#include "{_MUSA_VISION_LAYER_NORM_HEADER}"')
             self.header.splice(f'#include "{_MUSA_VISION_SOFTMAX_HEADER}"')
             self.header.splice(f'#include "{_MUSA_VISION_GELU_HEADER}"')
@@ -838,6 +840,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_bf16_sum_out": None,
             "aoti_torch_musa_gguf_linear_out": None,
             "aoti_torch_musa_gguf_embedding_out": None,
+            "aoti_torch_musa_gdn_recurrence_out": None,
             "aoti_torch_musa_vision_layer_norm_out": None,
             "aoti_torch_musa_vision_softmax_out": None,
             "aoti_torch_musa_vision_gelu_out": None,

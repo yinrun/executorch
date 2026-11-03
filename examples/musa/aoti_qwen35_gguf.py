@@ -16,6 +16,7 @@ from executorch.backends.musa.causal_prefix_attention import (
     PREFIX_ATTENTION,
 )
 from executorch.backends.musa.gguf import BLOCK_BYTES
+from executorch.backends.musa.gdn_recurrence import GDN_RECURRENCE
 from executorch.backends.musa.gguf_packed import GgufEmbedding, GgufLinear, QUANT_NAMES
 from executorch.backends.musa.q6_predecoded import Q6_PREDECODED, predecode_q6
 from executorch.examples.models.llama.attention import (
@@ -133,6 +134,21 @@ class GgufGatedDeltaNet(AttentionGatedDeltaNet):
         del self.A_log
         self.register_buffer("negative_a", torch.empty(self.num_v_heads))
         self.in_proj_zba = None
+        self.native_recurrence = False
+
+    def _naive_gated_delta_rule(self, query, key, value, decay, beta, initial_state):
+        if not self.native_recurrence:
+            return super()._naive_gated_delta_rule(
+                query, key, value, decay, beta, initial_state
+            )
+        packed = GDN_RECURRENCE(query, key, value, decay, beta, initial_state)
+        state_elements = self.num_v_heads * self.head_k_dim * self.head_v_dim
+        return (
+            packed[state_elements:].reshape(1, self.num_v_heads, 1, self.head_v_dim),
+            packed[:state_elements].reshape(
+                1, self.num_v_heads, self.head_k_dim, self.head_v_dim
+            ),
+        )
 
     def merge_gate_projections(self):
         if self.in_proj_zba is not None:
@@ -289,6 +305,7 @@ def load_gguf_text(
     share_attention_prefix=False,
     merge_ffn_gate_up=False,
     merge_gdn_gate_projections=False,
+    native_gdn_recurrence=False,
 ):
     import gguf
 
@@ -402,6 +419,10 @@ def load_gguf_text(
         for layer in model.layers:
             if isinstance(layer.attention, GgufGatedDeltaNet):
                 layer.attention.merge_gate_projections()
+    if native_gdn_recurrence:
+        for layer in model.layers:
+            if isinstance(layer.attention, GgufGatedDeltaNet):
+                layer.attention.native_recurrence = True
     for name, value in list(model.named_buffers()):
         if value.is_meta:
             if not name.endswith(STATE_SUFFIXES):
@@ -454,6 +475,7 @@ def load_gguf_text(
         shared_attention_prefix=share_attention_prefix,
         merged_ffn_gate_up=merge_ffn_gate_up,
         merged_gdn_gate_projections=merge_gdn_gate_projections,
+        native_gdn_recurrence=native_gdn_recurrence,
         text_layers=args.n_layers,
         gdn_head_order="tiled",
         negative_a_preserved=True,

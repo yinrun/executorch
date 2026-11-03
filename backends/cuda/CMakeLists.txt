@@ -278,6 +278,7 @@ if(EXECUTORCH_BUILD_MUSA)
        runtime/shims/musa_convolution.cpp runtime/shims/musa_batch_norm.cpp
        runtime/shims/musa_activation.cpp runtime/shims/musa_causal_attention.cpp
        runtime/shims/musa_reduce.cpp runtime/shims/musa_gguf.cpp
+       runtime/shims/musa_gdn.cpp
        runtime/shims/musa_vision_layer_norm.cpp
        runtime/shims/musa_vision_softmax.cpp
        runtime/shims/musa_vision_gelu.cpp
@@ -288,7 +289,7 @@ if(EXECUTORCH_BUILD_MUSA)
   find_program(EXECUTORCH_MUSA_MCC mcc
                HINTS "${MUSAToolkit_ROOT}/bin" /usr/local/musa/bin REQUIRED)
   set(EXECUTORCH_MUSA_ARCHITECTURES "22" CACHE STRING
-      "MUSA architectures for native GGUF kernels"
+      "MUSA architectures for native GGUF and GDN kernels"
   )
   option(EXECUTORCH_MUSA_GGUF_MAX_ILP
          "Use experimental MUSA compiler ILP scheduling for native GGUF kernels" OFF)
@@ -341,6 +342,20 @@ if(EXECUTORCH_BUILD_MUSA)
     "${_musa_gguf_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE
   )
   list(APPEND _aoti_cuda_shim_sources "${_musa_gguf_object}")
+  set(_musa_gdn_object "${CMAKE_CURRENT_BINARY_DIR}/musa_gdn_kernels.o")
+  add_custom_command(
+    OUTPUT "${_musa_gdn_object}"
+    COMMAND "${EXECUTORCH_MUSA_MCC}" -x musa -std=c++17 -O3 -fPIC
+            -ffp-contract=off ${_musa_gguf_arch_flags}
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime/shims/musa_gdn_kernels.mu"
+            -o "${_musa_gdn_object}"
+    DEPENDS runtime/shims/musa_gdn_kernels.mu
+    VERBATIM
+  )
+  set_source_files_properties(
+    "${_musa_gdn_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE
+  )
+  list(APPEND _aoti_cuda_shim_sources "${_musa_gdn_object}")
 endif()
 
 add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
@@ -578,7 +593,7 @@ if(BUILD_TESTING)
       runtime/shims/tests/test_musa_qwen35_fixture.cpp
     )
     foreach(
-      _musa_test addmm convolution batch_norm activation causal_attention reduce gguf device
+      _musa_test addmm convolution batch_norm activation causal_attention reduce gguf gdn device
       storage allocator vision_layer_norm vision_softmax vision_gelu
     )
       et_cxx_test(
