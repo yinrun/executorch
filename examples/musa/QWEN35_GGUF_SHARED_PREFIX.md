@@ -1,8 +1,10 @@
 # Global profiling and shared attention prefix candidate
 
 This work targets the original Qwen3.5-4B Q4_K_M workload on M1000/MP22.
-The goal remains 10 decode tokens/s. The last accepted unprofiled result is
-8.473 tok/s median; this candidate does not yet establish a new model result.
+The goal remains 10 decode tokens/s. The earlier accepted unprofiled result is
+8.473 tok/s median. The shared-prefix candidate passes full numerical acceptance
+but does not improve the fresh same-session unprofiled baseline. It remains an
+off-by-default experiment; the accepted deployment is unchanged.
 
 ## Global baseline trace
 
@@ -58,8 +60,12 @@ no relaxation of numerical tolerances.
 Inductor did **not** automatically merge repeated custom prefix calls in the
 small export probe. The opt-in multimodal step therefore creates exactly one
 prefix tensor and passes it explicitly through the layer options to all eight
-full-attention consumers. The expected change is eight attention-control
-readback barriers to one; a complete-model runtime trace must verify it.
+full-attention consumers. A complete-model nonblocking runtime trace confirms
+eight attention-control readback barriers become one. Total per-step stream
+synchronizations drop from twelve to five, async copies from twenty-one to seven,
+and kernel labels from 844 to 837. Compute-track union median is 143.261 ms;
+the host execution window is 165.613 ms and output-validation gap 1.217 ms.
+The profiled 6.035 tok/s is not evidence of an unprofiled deployment gain.
 
 ```python
 model, report = load_gguf_text(
@@ -92,12 +98,53 @@ new-attention output bytes against the legacy operator in the same export.
 The first full-model eager probe caught an incorrect output reshape: attention
 width is 4096 while embedding width is 2560. Its failed artifacts are retained;
 the fix uses the head count and head dimension, with a projection/gating/cache
-regression test. Full-model export and numerical/performance acceptance remain
-required before claiming a deployment gain or achievement of 10 tok/s.
+regression test. The second full export succeeds with one prefix producer and
+eight consumers, one delegate, 64 mutated buffers and five user inputs. Six
+full-model eager outputs match the previous predecoded export byte for byte.
+
+Three original native trajectories (text, single image, multiple images), each
+executed twice with reset, pass 2298 complete 248320-float output comparisons
+against the accepted predecoded baseline: 1149 reset pairs, all bytes identical.
+The frozen matched Hugging Face step references also pass the unchanged
+`0.001 + 0.001 * abs(reference)` gate with no outliers or argmax mismatches.
+Maximum absolute errors are 0.0000228882, 0.000739098 and 0.000905991 respectively.
+Corruption and tolerance negative controls pass. An independent artifact audit
+rehashes every output and reference, the runtime and protected original artifacts.
+This does not rerun Hugging Face or the raw-image frontend and does not establish
+a full 4096-token trajectory, concurrency, or historical-export bit equality.
+
+## Same-session performance decision
+
+The four-process ABBA experiment uses one complete warmup and two measured
+generations per process, the original 28-token prompt and 88 decode steps to EOS,
+no profiler, no launch blocking and no logit dumping. Full output validation is
+retained. Runtime maps verify the intended native shim and no libtorch/libpython.
+
+| Variant | Decode minimum | Decode median | Decode maximum | Serial prefill median |
+| --- | ---: | ---: | ---: | ---: |
+| Accepted metadata/tile, fresh baseline | 6.371 | 6.466 | 6.504 | 6.422 |
+| Shared-prefix candidate | 6.403 | 6.413 | 6.430 | 6.421 |
+
+All units are tokens/s; four measured runs per variant. The median ratio is
+0.99169, or -0.83%. Fewer host synchronization calls do not guarantee a shorter
+critical path; the GPU compute interval barely changes in these traces.
+The desktop GPU already had roughly 50% utilization before inference. These
+results must not be compared directly to the earlier 8.473 tok/s measurement as
+a code regression. Neither this experiment nor its profile reaches 10 tok/s.
+
+Six further microbench variants expand Q4/Q5 levels losslessly to uint8 and
+store FP32 group scale/minimum, keeping dequantization and reduction order.
+All six pass three byte-exact activations on eight real matrix geometries, but
+the large GEMVs regress. The 320-byte format would expand Q4 blocks by 122% and
+Q5 blocks by 82%. This experiment is rejected: it adds no production format,
+weight conversion, or deployment memory cost.
 
 Local ETSupport evidence under `artifacts/gguf-20261029`:
 `global-metadata-tile-profile-v1`, `row-interleave-probe-v1`,
 `build-decode-shared-prefix-v1`, `test-shared-prefix-native-v1.log`,
 `test-shared-prefix-python-v2.log`, `test-shared-prefix-python-v3.log`,
-and the failed `decode-shared-prefix-export-v1` probe. The next export uses
-`decode-shared-prefix-export-v2`; original accepted artifacts are unchanged.
+and the failed `decode-shared-prefix-export-v1` probe. Successful export and
+acceptance evidence: `decode-shared-prefix-export-v2`,
+`decode-shared-prefix-validation-v1`, `decode-shared-prefix-benchmark-v1`,
+`global-shared-prefix-profile-v1`, `decode-shared-prefix-acceptance-v1.json`,
+and `level-predecode-probe-v1`. Original accepted artifacts are unchanged.
