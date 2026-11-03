@@ -6,10 +6,17 @@ import torch
 from torch._inductor import ir, lowering
 
 from executorch.backends.musa.gguf import dequantize_gguf, gguf_shape
+from executorch.backends.musa.q6_predecoded import (
+    Q6_PREDECODED,
+    Q6_PREDECODED_BYTES,
+    Q6_PREDECODED_ID,
+    dequantize_predecoded_q6,
+    predecoded_shape,
+)
 
 
 HEADER = str(Path(__file__).resolve().parents[1] / "cuda/runtime/shims/musa_gguf.h")
-QUANT_IDS = {"q4_k": 12, "q5_k": 13, "q6_k": 14}
+QUANT_IDS = {"q4_k": 12, "q5_k": 13, "q6_k": 14, Q6_PREDECODED: Q6_PREDECODED_ID}
 QUANT_NAMES = {value: name for name, value in QUANT_IDS.items()}
 _library = torch.library.Library("executorch_musa", "FRAGMENT")
 
@@ -17,7 +24,11 @@ _library = torch.library.Library("executorch_musa", "FRAGMENT")
 def packed_shape(value, packed, quant_type, embedding):
     if quant_type not in QUANT_NAMES:
         raise ValueError(f"Unsupported GGUF quantization ID: {quant_type}")
-    rows, columns = gguf_shape(packed, QUANT_NAMES[quant_type], torch.float32)
+    rows, columns = (
+        predecoded_shape(packed)
+        if quant_type == Q6_PREDECODED_ID
+        else gguf_shape(packed, QUANT_NAMES[quant_type], torch.float32)
+    )
     torch._check(value.device == packed.device)
     torch._check(value.dtype == (torch.int64 if embedding else torch.float32))
     torch._check(1 <= value.ndim <= 4 and value.is_contiguous())
@@ -49,7 +60,12 @@ def linear_eager(value, packed, quant_type):
     packed_shape(value, packed, quant_type, False)
     outputs = []
     for start in range(0, packed.shape[0], 4096):
-        dense = dequantize_gguf(packed[start : start + 4096], QUANT_NAMES[quant_type])
+        tile = packed[start : start + 4096]
+        dense = (
+            dequantize_predecoded_q6(tile)
+            if quant_type == Q6_PREDECODED_ID
+            else dequantize_gguf(tile, QUANT_NAMES[quant_type])
+        )
         outputs.append(torch.nn.functional.linear(value, dense))
     return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
 
@@ -59,7 +75,12 @@ def embedding_eager(value, packed, quant_type):
     if ((value < 0) | (value >= packed.shape[0])).any().item():
         raise IndexError("GGUF embedding index is outside the vocabulary")
     selected = torch.index_select(packed, 0, value.reshape(-1))
-    return dequantize_gguf(selected, QUANT_NAMES[quant_type]).reshape(shape)
+    decoded = (
+        dequantize_predecoded_q6(selected)
+        if quant_type == Q6_PREDECODED_ID
+        else dequantize_gguf(selected, QUANT_NAMES[quant_type])
+    )
+    return decoded.reshape(shape)
 
 
 def check_out(value, packed, quant_type, out, embedding):
@@ -133,7 +154,12 @@ def lower_packed(value, packed, quant_type, embedding):
     packed.realize()
     shape = list(value.get_size())
     if embedding:
-        block_bytes = {12: 144, 13: 176, 14: 210}[quant_type]
+        block_bytes = {
+            12: 144,
+            13: 176,
+            14: 210,
+            Q6_PREDECODED_ID: Q6_PREDECODED_BYTES,
+        }[quant_type]
         shape.append(packed.get_size()[1] // block_bytes * 256)
     else:
         shape[-1] = packed.get_size()[0]

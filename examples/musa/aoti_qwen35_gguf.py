@@ -13,6 +13,7 @@ import torch.nn.functional as functional
 from executorch.backends.musa.causal_attention import CAUSAL_ATTENTION
 from executorch.backends.musa.gguf import BLOCK_BYTES
 from executorch.backends.musa.gguf_packed import GgufEmbedding, GgufLinear
+from executorch.backends.musa.q6_predecoded import Q6_PREDECODED, predecode_q6
 from executorch.examples.models.llama.attention import (
     AttentionGatedDeltaNet,
     AttentionMHA,
@@ -158,7 +159,9 @@ def tensor_mapping(args):
     return mapping
 
 
-def load_gguf_text(path, context_length=4096, valid_length_attention=False):
+def load_gguf_text(
+    path, context_length=4096, valid_length_attention=False, predecode_q6_weights=False
+):
     import gguf
 
     path = Path(path).resolve()
@@ -214,7 +217,12 @@ def load_gguf_text(path, context_length=4096, valid_length_attention=False):
                 sha256=hashlib.sha256(data.tobytes()).hexdigest(),
             )
         )
-        return torch.from_numpy(data).to("musa"), encoding
+        value = torch.from_numpy(data).to("musa")
+        if predecode_q6_weights and encoding == "q6_k":
+            value = predecode_q6(value)
+            encoding = Q6_PREDECODED
+        records[-1].update(runtime_encoding=encoding, runtime_nbytes=value.nbytes)
+        return value, encoding
 
     embedding, encoding = read_tensor(
         "token_embd.weight", (args.vocab_size, args.dim), True
@@ -298,6 +306,12 @@ def load_gguf_text(path, context_length=4096, valid_length_attention=False):
         packed_bytes=sum(
             record["nbytes"] for record in records if record["encoding"] in BLOCK_BYTES
         ),
+        runtime_packed_bytes=sum(
+            record["runtime_nbytes"]
+            for record in records
+            if record["encoding"] in BLOCK_BYTES
+        ),
+        q6_predecoded=predecode_q6_weights,
         text_layers=args.n_layers,
         gdn_head_order="tiled",
         negative_a_preserved=True,

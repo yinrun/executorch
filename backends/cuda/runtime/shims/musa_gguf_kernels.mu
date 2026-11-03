@@ -13,7 +13,15 @@ __device__ float scale_value(const uint8_t* bytes) {
 
 template <int QuantType>
 __device__ float decode_weight(const uint8_t* block, int element) {
-  if constexpr (QuantType == 14) {
+  if constexpr (QuantType == 114) {
+    const auto* scale = block + 256 + (element / 16) * 4;
+    const uint32_t bits = static_cast<uint32_t>(scale[0]) |
+        (static_cast<uint32_t>(scale[1]) << 8) |
+        (static_cast<uint32_t>(scale[2]) << 16) |
+        (static_cast<uint32_t>(scale[3]) << 24);
+    return __uint_as_float(bits) *
+        static_cast<float>(static_cast<int8_t>(block[element]));
+  } else if constexpr (QuantType == 14) {
     const int half = element / 128;
     const int quarter = (element % 128) / 32;
     const int lane = element % 32;
@@ -51,7 +59,10 @@ template <int QuantType>
 __global__ void linear_kernel(float* output, const float* input,
                               const uint8_t* packed, int64_t rows,
                               int64_t columns) {
-  constexpr int bytes = QuantType == 12 ? 144 : QuantType == 13 ? 176 : 210;
+  constexpr int bytes = QuantType == 114 ? 320
+      : QuantType == 12                  ? 144
+      : QuantType == 13                  ? 176
+                                         : 210;
   const int64_t output_row = blockIdx.x % rows;
   const int64_t batch = blockIdx.x / rows;
   const auto* weight_row = packed + output_row * (columns / 256) * bytes;
@@ -412,6 +423,100 @@ __global__ void linear_q6_tiled_decode_kernel(
   }
 }
 
+__global__ void linear_predecoded_q6_decode_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  constexpr int Width = 4;
+  constexpr int Tile = 2;
+  constexpr int bytes = 320;
+  constexpr int lanes = 128 / Width;
+  const int lane = threadIdx.x % lanes;
+  const int row = blockIdx.x * Width * Tile + threadIdx.x / lanes;
+  if (row >= rows) {
+    return;
+  }
+  const int element = lane * Width;
+  float partial[Tile][Width] = {};
+  for (int block = 0; block < columns / 256; ++block) {
+    float first_inputs[Width];
+    float second_inputs[Width];
+#pragma unroll
+    for (int word = 0; word < Width / 4; ++word) {
+      const float4 first = __ldg(reinterpret_cast<const float4*>(
+          input + block * 256 + element + word * 4));
+      const float4 second = __ldg(reinterpret_cast<const float4*>(
+          input + block * 256 + element + 128 + word * 4));
+      first_inputs[word * 4] = first.x;
+      first_inputs[word * 4 + 1] = first.y;
+      first_inputs[word * 4 + 2] = first.z;
+      first_inputs[word * 4 + 3] = first.w;
+      second_inputs[word * 4] = second.x;
+      second_inputs[word * 4 + 1] = second.y;
+      second_inputs[word * 4 + 2] = second.z;
+      second_inputs[word * 4 + 3] = second.w;
+    }
+#pragma unroll
+    for (int tile = 0; tile < Tile; ++tile) {
+      if (row + tile * Width < rows) {
+        const auto* weight = packed +
+            (int64_t(row + tile * Width) * (columns / 256) + block) * bytes;
+        const float first_scale =
+            __ldg(reinterpret_cast<const float*>(weight + 256) + element / 16);
+        const float second_scale = __ldg(
+            reinterpret_cast<const float*>(weight + 256) + element / 16 + 8);
+#pragma unroll
+        for (int word = 0; word < Width / 4; ++word) {
+          const uint32_t first = __ldg(
+              reinterpret_cast<const uint32_t*>(weight + element + word * 4));
+          const uint32_t second = __ldg(reinterpret_cast<const uint32_t*>(
+              weight + element + 128 + word * 4));
+#pragma unroll
+          for (int byte = 0; byte < 4; ++byte) {
+            const int component = word * 4 + byte;
+            const int first_value = static_cast<int8_t>(first >> (byte * 8));
+            const int second_value = static_cast<int8_t>(second >> (byte * 8));
+            const float first_weight =
+                first_scale * static_cast<float>(first_value);
+            const float second_weight =
+                second_scale * static_cast<float>(second_value);
+            partial[tile][component] = fmaf(
+                first_weight,
+                first_inputs[component],
+                partial[tile][component]);
+            partial[tile][component] = fmaf(
+                second_weight,
+                second_inputs[component],
+                partial[tile][component]);
+          }
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int tile = 0; tile < Tile; ++tile) {
+#pragma unroll
+    for (int component = 0; component < Width; ++component) {
+      for (int stride = lanes / 2; stride > 0; stride /= 2) {
+        partial[tile][component] += __shfl_down_sync(
+            0xffffffff, partial[tile][component], stride, lanes);
+      }
+    }
+    if (lane == 0 && row + tile * Width < rows) {
+#pragma unroll
+      for (int stride = Width / 2; stride > 0; stride /= 2) {
+#pragma unroll
+        for (int component = 0; component < stride; ++component) {
+          partial[tile][component] += partial[tile][component + stride];
+        }
+      }
+      output[row + tile * Width] = partial[tile][0];
+    }
+  }
+}
+
 template <int QuantType>
 musaError_t launch_linear_vector_decode(
     float* output,
@@ -445,7 +550,10 @@ template <int QuantType>
 __global__ void embedding_kernel(float* output, const int64_t* indices,
                                  const uint8_t* packed, int* invalid,
                                  int64_t rows, int64_t columns, int64_t count) {
-  constexpr int bytes = QuantType == 12 ? 144 : QuantType == 13 ? 176 : 210;
+  constexpr int bytes = QuantType == 114 ? 320
+      : QuantType == 12                  ? 144
+      : QuantType == 13                  ? 176
+                                         : 210;
   const int64_t position =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (position >= count * columns) {
@@ -476,6 +584,22 @@ extern "C" musaError_t executorch_musa_gguf_linear_launch(
     int64_t quant_type,
     musaStream_t stream) {
   const auto grid = static_cast<unsigned int>(rows * batches);
+  if (quant_type == 114) {
+    if (batches == 1 && columns <= std::numeric_limits<int>::max() &&
+        reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(packed) % 16 == 0) {
+      linear_predecoded_q6_decode_kernel<<<(rows + 7) / 8, 128, 0, stream>>>(
+          output,
+          input,
+          packed,
+          static_cast<int>(rows),
+          static_cast<int>(columns));
+    } else {
+      linear_kernel<114>
+          <<<grid, 128, 0, stream>>>(output, input, packed, rows, columns);
+    }
+    return musaGetLastError();
+  }
   if (batches == 1 && columns <= std::numeric_limits<int>::max()) {
     if (reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
         reinterpret_cast<uintptr_t>(packed) % (quant_type == 14 ? 2 : 4) == 0) {
@@ -552,7 +676,10 @@ extern "C" musaError_t executorch_musa_gguf_embedding_launch(
     int64_t rows, int64_t columns, int64_t count, int64_t quant_type,
     musaStream_t stream) {
   const auto grid = static_cast<unsigned int>((count * columns + 255) / 256);
-  if (quant_type == 12) {
+  if (quant_type == 114) {
+    embedding_kernel<114><<<grid, 256, 0, stream>>>(
+        output, indices, packed, invalid, rows, columns, count);
+  } else if (quant_type == 12) {
     embedding_kernel<12><<<grid, 256, 0, stream>>>(
         output, indices, packed, invalid, rows, columns, count);
   } else if (quant_type == 13) {

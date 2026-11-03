@@ -29,6 +29,7 @@ Error validate(SlimTensor* output, SlimTensor* input, SlimTensor* packed,
   const int64_t bytes = quant_type == 12   ? 144
                         : quant_type == 13 ? 176
                         : quant_type == 14 ? 210
+                        : quant_type == 114 ? 320
                                            : 0;
   ET_CHECK_OR_RETURN_ERROR(bytes != 0, InvalidArgument,
                            "Unknown GGUF K-quant format");
