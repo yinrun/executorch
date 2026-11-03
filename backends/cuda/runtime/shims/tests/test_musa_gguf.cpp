@@ -448,6 +448,80 @@ TEST_F(MusaGgufTest, PredecodedQ6MatchesOriginalBitsBatchesOffsetsAndRowTails) {
   }
 }
 
+TEST_F(MusaGgufTest, PredecodedQ6FullHeadAccuracyAndCallingStream) {
+  constexpr int rows = 248320;
+  constexpr int columns = 2560;
+  constexpr int patterns = 17;
+  constexpr int row_bytes = columns / 256 * 320;
+  std::vector<uint8_t> templates(patterns * row_bytes);
+  std::vector<float> values(columns);
+  for (int column = 0; column < columns; ++column) {
+    values[column] = std::sin(static_cast<float>(column * 13)) * 3;
+  }
+  std::vector<double> expected_values(patterns, 0);
+  for (int pattern = 0; pattern < patterns; ++pattern) {
+    for (int block = 0; block < columns / 256; ++block) {
+      auto* target = templates.data() + pattern * row_bytes + block * 320;
+      for (int group = 0; group < 16; ++group) {
+        const float scale = (pattern + group + block) % 2 == 0
+            ? (group + 1) / 256.0f
+            : -(group + 1) / 256.0f;
+        std::memcpy(target + 256 + group * 4, &scale, sizeof(float));
+        for (int lane = 0; lane < 16; ++lane) {
+          const int level = (pattern * 11 + group * 7 + lane + block) % 64 - 32;
+          target[group * 16 + lane] = static_cast<uint8_t>(level);
+          expected_values[pattern] += static_cast<double>(scale) * level *
+              values[block * 256 + group * 16 + lane];
+        }
+      }
+    }
+  }
+  std::vector<uint8_t> data(static_cast<size_t>(rows) * row_bytes);
+  for (int row = 0; row < rows; ++row) {
+    std::memcpy(
+        data.data() + static_cast<size_t>(row) * row_bytes,
+        templates.data() + (row % patterns) * row_bytes,
+        row_bytes);
+  }
+  auto packed = tensor({rows, row_bytes}, ScalarType::Byte);
+  auto input = tensor({1, columns});
+  auto owner = tensor({rows + 2});
+  auto output = owner.as_strided({1, rows}, {rows, 1}, 1);
+  write(packed, data);
+  write(input, values);
+  write(owner, std::vector<float>(rows + 2, 12345));
+  cudaStream_t stream;
+  ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+  {
+    auto guard = executorch::backends::cuda::CUDAStreamGuard::create(stream, 0);
+    ASSERT_TRUE(guard.ok());
+    ASSERT_EQ(
+        aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 114),
+        Error::Ok);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    const auto actual = read(owner);
+    ASSERT_EQ(actual.front(), 12345);
+    ASSERT_EQ(actual.back(), 12345);
+    for (int row = 0; row < rows; ++row) {
+      ASSERT_TRUE(std::isfinite(actual[row + 1]));
+      const double reference = expected_values[row % patterns];
+      ASSERT_NEAR(
+          actual[row + 1], reference, 0.001 + 0.001 * std::abs(reference));
+    }
+    ASSERT_EQ(
+        cudaMemsetAsync(input.data_ptr(), 0, input.nbytes(), stream),
+        cudaSuccess);
+    ASSERT_EQ(
+        aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 114),
+        Error::Ok);
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    for (float value : read(output)) {
+      ASSERT_EQ(value, 0);
+    }
+  }
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
 TEST_F(MusaGgufTest, PredecodedQ6UsesCallingStreamAndObservesUpdates) {
   cudaStream_t stream;
   ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);

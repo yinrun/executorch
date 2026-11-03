@@ -6,13 +6,15 @@
 
 namespace {
 
-#if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT) || \
-    defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC)
+#if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT) ||    \
+    defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC) || \
+    defined(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
 using UnsignedByteQuad = unsigned char __attribute__((ext_vector_type(4)));
 using FloatQuad = float __attribute__((ext_vector_type(4)));
 #endif
 
-#if defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC)
+#if defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC) || \
+    defined(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
 using SignedByteQuad = signed char __attribute__((ext_vector_type(4)));
 
 __device__ __forceinline__ FloatQuad
@@ -29,6 +31,60 @@ __device__ float scale_value(const uint8_t* bytes) {
   const auto bits = static_cast<unsigned short>(bytes[0] | (bytes[1] << 8));
   return __half2float(__ushort_as_half(bits));
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
+__global__ void grouped_predecoded_q6_head_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed) {
+  constexpr int columns = 2560;
+  constexpr int rows_per_block = 8;
+  constexpr int row_tiles = 4;
+  const int group = threadIdx.x % 16;
+  const int row = blockIdx.x * rows_per_block * row_tiles + threadIdx.x / 16;
+  float accumulators[row_tiles] = {};
+  for (int block = 0; block < columns / 256; ++block) {
+    FloatQuad inputs[4];
+#pragma unroll
+    for (int word = 0; word < 4; ++word) {
+      const float4 values = __ldg(reinterpret_cast<const float4*>(
+          input + block * 256 + group * 16 + word * 4));
+      inputs[word] = FloatQuad{values.x, values.y, values.z, values.w};
+    }
+#pragma unroll
+    for (int tile = 0; tile < row_tiles; ++tile) {
+      const auto* weight = packed +
+          (int64_t(row + tile * rows_per_block) * (columns / 256) + block) *
+              320;
+      const uint4 packed_values =
+          __ldg(reinterpret_cast<const uint4*>(weight + group * 16));
+      const uint32_t words[4] = {
+          packed_values.x, packed_values.y, packed_values.z, packed_values.w};
+      const float scale =
+          __ldg(reinterpret_cast<const float*>(weight + 256) + group);
+      FloatQuad partial = {};
+#pragma unroll
+      for (int word = 0; word < 4; ++word) {
+        const FloatQuad values = __builtin_convertvector(
+            __builtin_bit_cast(SignedByteQuad, words[word]), FloatQuad);
+        partial = fma_decode_quad(values, inputs[word], partial);
+      }
+      const float sum = (partial[0] + partial[2]) + (partial[1] + partial[3]);
+      accumulators[tile] = fmaf(scale, sum, accumulators[tile]);
+    }
+  }
+#pragma unroll
+  for (int tile = 0; tile < row_tiles; ++tile) {
+    for (int distance = 8; distance > 0; distance /= 2) {
+      accumulators[tile] +=
+          __shfl_down_sync(0xffffffff, accumulators[tile], distance, 16);
+    }
+    if (group == 0) {
+      output[row + tile * rows_per_block] = accumulators[tile];
+    }
+  }
+}
+#endif
 
 template <int QuantType>
 __device__ float decode_weight(const uint8_t* block, int element) {
@@ -711,6 +767,15 @@ extern "C" musaError_t executorch_musa_gguf_linear_launch(
     musaStream_t stream) {
   const auto grid = static_cast<unsigned int>(rows * batches);
   if (quant_type == 114) {
+#if defined(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
+    if (batches == 1 && rows == 248320 && columns == 2560 &&
+        reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(packed) % 16 == 0) {
+      grouped_predecoded_q6_head_kernel<<<rows / 32, 128, 0, stream>>>(
+          output, input, packed);
+      return musaGetLastError();
+    }
+#endif
     if (batches == 1 && columns <= std::numeric_limits<int>::max() &&
         reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
         reinterpret_cast<uintptr_t>(packed) % 16 == 0) {

@@ -310,6 +310,12 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_conversion_flags
          -DEXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC=1)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD
+         "Use experimental regrouped FP32 dot products for the Qwen3.5-4B Q6 head" OFF)
+  if(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD=1)
+  endif()
   set(_musa_gguf_arch_flags "")
   foreach(_arch IN LISTS EXECUTORCH_MUSA_ARCHITECTURES)
     if(NOT _arch MATCHES "^[0-9]+$")
