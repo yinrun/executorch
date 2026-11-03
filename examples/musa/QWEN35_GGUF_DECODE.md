@@ -1,5 +1,8 @@
 # Qwen3.5 GGUF decode optimization
 
+The opt-in lossless Q6 preprocessing path, its memory tradeoff and fresh-export
+accuracy controls are documented in [QWEN35_GGUF_Q6_PREDECODED.md](QWEN35_GGUF_Q6_PREDECODED.md).
+
 The 2026-10-31 grouped-attention milestone is described below. Earlier measurements
 remain scoped to their original model packages and test runs.
 

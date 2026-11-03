@@ -97,11 +97,52 @@ the image requests reuse the original prepared vision features.
 Eleven native GGUF tests pass, including 240 new offset/batch/row-tail comparisons,
 60 embedding comparisons and a prepared-weight stream-update test. Eleven native
 attention tests pass; the second-device test skips on this single-device machine.
-Three focused Python tests pass. Three actual Q6 matrix geometries, with three
+Three focused Python tests pass; nine pass when including adjacent packed-op
+and model-metadata regressions. Three actual Q6 matrix geometries, with three
 activation vectors each, are byte exact against the original native kernels.
 MP21 compilation succeeds; hardware execution is only checked on MP22.
 
-Continuous three-way throughput results are pending. Microbenchmarks are not
-model throughput. An experimental Q4 metadata-predecoded layout was slower and
-was not integrated. Full 4096-step trajectory, migration and batched prefill
-acceptance are not added by this change.
+## Continuous three-way benchmark
+
+On 2026-11-03, a continuous A/B/C/C/B/A series compared the previous deployed
+export/shim, a freshly exported unpreprocessed control, and the Q6-preprocessed
+candidate. The control and candidate use the same new shim. All variants use
+the original runner, extension and 28-token text prompt, generating 89 tokens to
+EOS (88 decode steps). Each process has one warmup and two measured generations;
+all 18 trajectories match. Profiling, launch blocking and logits dumps are off;
+complete output readback, finite checks and argmax remain enabled.
+
+| Variant | Minimum decode tok/s | Median decode tok/s | Maximum decode tok/s |
+| --- | ---: | ---: | ---: |
+| Previous deployed export/shim | 6.491739 | 6.935159 | 7.605488 |
+| Fresh unpreprocessed control | 7.457675 | 7.471915 | 7.582305 |
+| Q6-preprocessed candidate | 7.559308 | 8.259904 | 8.478574 |
+
+Q6 preprocessing improves the median by **10.5% relative to its fresh control**.
+The combined candidate is 19.1% faster than the previous deployment in this
+series; that entire gain must not be attributed to the Q6 kernel. The serial
+token-prefill medians are 6.390, 7.476 and 8.366 tok/s, respectively. This is not
+batched prefill. The **10 tok/s decode target is not met**, including by the
+candidate's fastest measured run.
+
+The series lasts 379.365 seconds, including final artifact checks, with
+realtime/monotonic/boottime continuity checks. This is a shared, unlocked desktop
+M1000 rather than an exclusive, fixed-clock benchmark. Slow samples are retained.
+Live process maps verify the requested shim and original extension without
+libtorch/libpython. The frozen deployment and baseline binaries remain unchanged.
+
+## Evidence and remaining work
+
+Local artifacts under the ETSupport workspace's `artifacts/gguf-20261029` include
+`repack-probe-v1`, `build-decode-predecoded-v1`, `decode-predecoded-export-v1`,
+`decode-predecoded-control-export-v1`, `predecoded-isolation-v1`,
+`decode-predecoded-controlled-validation-v1`, and
+`decode-predecoded-fulltext-benchmark-v1`. Their adjacent scripts preserve build,
+export, validation and benchmark commands. `decode-predecoded-validation-v1`
+retains the initial failed historical-package byte-exact gate, not a passing gate.
+The final audit is `decode-predecoded-acceptance-v1.json`.
+
+An experimental Q4 metadata-predecoded layout was slower and was not integrated.
+Further Q4 access-layout work should be measured before changing the deployment
+format again. Full 4096-step trajectory, migration, raw-image performance and
+batched prefill acceptance are not added by this change.
