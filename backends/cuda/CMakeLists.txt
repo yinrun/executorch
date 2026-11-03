@@ -297,6 +297,13 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_schedule_flags
          -mllvm -mtgpu-enable-max-ilp-scheduling-strategy=true)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT
+         "Use experimental byte-vector conversion for native Q4/Q5 GEMV" OFF)
+  set(_musa_gguf_conversion_flags "")
+  if(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_BYTE_CONVERT=1)
+  endif()
   set(_musa_gguf_arch_flags "")
   foreach(_arch IN LISTS EXECUTORCH_MUSA_ARCHITECTURES)
     if(NOT _arch MATCHES "^[0-9]+$")
@@ -312,6 +319,7 @@ if(EXECUTORCH_BUILD_MUSA)
     OUTPUT "${_musa_gguf_object}"
     COMMAND "${EXECUTORCH_MUSA_MCC}" -x musa -std=c++17 -O3 -fPIC
             -ffp-contract=off ${_musa_gguf_arch_flags} ${_musa_gguf_schedule_flags}
+            ${_musa_gguf_conversion_flags}
             -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime/shims/musa_gguf_kernels.mu"
             -o "${_musa_gguf_object}"
     DEPENDS runtime/shims/musa_gguf_kernels.mu

@@ -79,8 +79,10 @@ count remains 32.
 Four conversion variants, including an unchanged control, pass **132 complete
 byte-exact micro-output comparisons** across eleven real Q4/Q5/Q6 matrices.
 The unchanged control's device fatbin matches the accepted ILP runtime.
-Q4/Q5-only conversion is selected for isolated full-model evaluation; Q6
-conversion is not selected. Microbenchmark ratios alone are not promotion.
+Q4/Q5-only conversion subsequently passes isolated full-model evaluation,
+with a small reproducible gain described in
+[QWEN35_GGUF_BYTE_CONVERT.md](QWEN35_GGUF_BYTE_CONVERT.md). Q6 conversion is not
+selected. Microbenchmark ratios alone are not promotion.
 
 ## Local evidence
 
@@ -95,5 +97,6 @@ The local evidence root is ETSupport `artifacts/gguf-20261029`:
 - `ilp-machine-ir-v1/comparison.json` retains per-basic-block opcode counts;
   `ilp-vector-convert-probe-v1` retains source, compilation and microbenchmarks.
 
-The previously accepted ILP result remains 7.030 median tokens/s in its
-recorded normal shared-desktop series. **The 10 tokens/s target is not met.**
+The previously accepted ILP result is 7.030 median tokens/s in its recorded
+normal shared-desktop series. The separately paired byte-conversion comparison
+measures 7.014 versus 7.093 median tokens/s. **The 10 tokens/s target is not met.**

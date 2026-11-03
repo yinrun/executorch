@@ -6,6 +6,11 @@
 
 namespace {
 
+#if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT)
+using UnsignedByteQuad = unsigned char __attribute__((ext_vector_type(4)));
+using FloatQuad = float __attribute__((ext_vector_type(4)));
+#endif
+
 __device__ float scale_value(const uint8_t* bytes) {
   const auto bits = static_cast<unsigned short>(bytes[0] | (bytes[1] << 8));
   return __half2float(__ushort_as_half(bits));
@@ -305,8 +310,17 @@ __global__ void linear_vector_decode_kernel(
           first_levels |= ((high >> group) & 0x01010101U) << 4;
           second_levels |= ((high >> (group + 4)) & 0x01010101U) << 4;
         }
+#if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT)
+        const FloatQuad first_values = __builtin_convertvector(
+            __builtin_bit_cast(UnsignedByteQuad, first_levels), FloatQuad);
+        const FloatQuad second_values = __builtin_convertvector(
+            __builtin_bit_cast(UnsignedByteQuad, second_levels), FloatQuad);
+        const float first_value = first_values[component % 4];
+        const float second_value = second_values[component % 4];
+#else
         const int first_value = (first_levels >> ((component % 4) * 8)) & 255;
         const int second_value = (second_levels >> ((component % 4) * 8)) & 255;
+#endif
         const float first_weight =
             first_scale * static_cast<float>(first_value) - first_minimum;
         const float second_weight =
