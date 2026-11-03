@@ -55,6 +55,36 @@ class GgufMergedFeedForward(torch.nn.Module):
         return self.w2(self.act_fn(gate) * up)
 
 
+class GgufMergedGdnProjection(torch.nn.Module):
+    def __init__(self, gate, beta, decay):
+        super().__init__()
+        projections = (gate, beta, decay)
+        if not all(
+            isinstance(layer, GgufLinear) and layer.bias is None
+            for layer in projections
+        ):
+            raise ValueError("Merged GDN requires bias-free packed projections")
+        if (
+            not all(
+                layer.quant_type == gate.quant_type
+                and layer.packed_weight.ndim == 2
+                and layer.packed_weight.shape[1] == gate.packed_weight.shape[1]
+                and layer.packed_weight.device == gate.packed_weight.device
+                for layer in projections
+            )
+            or beta.packed_weight.shape != decay.packed_weight.shape
+        ):
+            raise ValueError("Merged GDN projections must have matching packed inputs")
+        self.sizes = tuple(layer.packed_weight.shape[0] for layer in projections)
+        self.projection = GgufLinear(
+            torch.cat(tuple(layer.packed_weight for layer in projections), dim=0),
+            QUANT_NAMES[gate.quant_type],
+        )
+
+    def forward(self, value):
+        return self.projection(value).split(self.sizes, dim=-1)
+
+
 class GgufValidLengthSDPA(Qwen35MusaSDPA):
     def forward(self, input_pos, query, key, value, batch_size, sequence_length, mask):
         if batch_size != 1 or sequence_length != 1:
@@ -102,6 +132,32 @@ class GgufGatedDeltaNet(AttentionGatedDeltaNet):
         super().__init__(args, layer_id, rope)
         del self.A_log
         self.register_buffer("negative_a", torch.empty(self.num_v_heads))
+        self.in_proj_zba = None
+
+    def merge_gate_projections(self):
+        if self.in_proj_zba is not None:
+            raise ValueError("GDN gate projections are already merged")
+        merged = GgufMergedGdnProjection(self.in_proj_z, self.in_proj_b, self.in_proj_a)
+        if merged.sizes != (self.value_dim, self.num_v_heads, self.num_v_heads):
+            raise ValueError("Merged GDN outputs do not match the configured heads")
+        self.in_proj_zba = merged
+        del self.in_proj_z, self.in_proj_b, self.in_proj_a
+
+    def forward(self, hidden, cosine, sine, **options):
+        if self.in_proj_zba is None:
+            return super().forward(hidden, cosine, sine, **options)
+        batch, sequence, _ = hidden.shape
+        if not 1 <= batch <= self.max_batch_size:
+            raise ValueError("Merged GDN batch exceeds the configured state capacity")
+        self._maybe_reset_state(options.get("input_pos"), batch)
+        mixed_qkv = self.in_proj_qkv(hidden)
+        gate, beta, decay = self.in_proj_zba(hidden)
+        return self._forward_projected(
+            mixed_qkv,
+            gate.reshape(batch, sequence, -1, self.head_v_dim),
+            beta,
+            decay,
+        )
 
     def _forward_projected(self, mixed_qkv, gate, beta_input, decay_input):
         batch_size, sequence_length, _ = mixed_qkv.shape
@@ -232,6 +288,7 @@ def load_gguf_text(
     predecode_q6_weights=False,
     share_attention_prefix=False,
     merge_ffn_gate_up=False,
+    merge_gdn_gate_projections=False,
 ):
     import gguf
 
@@ -341,6 +398,10 @@ def load_gguf_text(
     if merge_ffn_gate_up:
         for layer in model.layers:
             layer.feed_forward = GgufMergedFeedForward(layer.feed_forward)
+    if merge_gdn_gate_projections:
+        for layer in model.layers:
+            if isinstance(layer.attention, GgufGatedDeltaNet):
+                layer.attention.merge_gate_projections()
     for name, value in list(model.named_buffers()):
         if value.is_meta:
             if not name.endswith(STATE_SUFFIXES):
@@ -392,6 +453,7 @@ def load_gguf_text(
         q6_predecoded=predecode_q6_weights,
         shared_attention_prefix=share_attention_prefix,
         merged_ffn_gate_up=merge_ffn_gate_up,
+        merged_gdn_gate_projections=merge_gdn_gate_projections,
         text_layers=args.n_layers,
         gdn_head_order="tiled",
         negative_a_preserved=True,
