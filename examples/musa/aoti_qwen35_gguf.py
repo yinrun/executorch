@@ -16,15 +16,43 @@ from executorch.backends.musa.causal_prefix_attention import (
     PREFIX_ATTENTION,
 )
 from executorch.backends.musa.gguf import BLOCK_BYTES
-from executorch.backends.musa.gguf_packed import GgufEmbedding, GgufLinear
+from executorch.backends.musa.gguf_packed import GgufEmbedding, GgufLinear, QUANT_NAMES
 from executorch.backends.musa.q6_predecoded import Q6_PREDECODED, predecode_q6
 from executorch.examples.models.llama.attention import (
     AttentionGatedDeltaNet,
     AttentionMHA,
 )
+from executorch.examples.models.llama.feed_forward import FeedForward
 from executorch.examples.models.llama.llama_transformer import construct_transformer
 from executorch.examples.models.llama.model_args import ModelArgs
 from examples.musa.aoti_qwen35_export import Qwen35MusaSDPA, STATE_SUFFIXES
+
+
+class GgufMergedFeedForward(torch.nn.Module):
+    def __init__(self, previous):
+        super().__init__()
+        if not isinstance(previous, FeedForward) or not all(
+            isinstance(layer, GgufLinear) and layer.bias is None
+            for layer in (previous.w1, previous.w2, previous.w3)
+        ):
+            raise ValueError("Merged GGUF FFN requires bias-free packed projections")
+        gate, up = previous.w1, previous.w3
+        if (
+            gate.quant_type != up.quant_type
+            or gate.packed_weight.shape != up.packed_weight.shape
+            or gate.packed_weight.device != up.packed_weight.device
+        ):
+            raise ValueError("Merged GGUF gate/up must have matching packed geometry")
+        self.gate_up = GgufLinear(
+            torch.cat((gate.packed_weight, up.packed_weight), dim=0),
+            QUANT_NAMES[gate.quant_type],
+        )
+        self.w2 = previous.w2
+        self.act_fn = previous.act_fn
+
+    def forward(self, value):
+        gate, up = self.gate_up(value).chunk(2, dim=-1)
+        return self.w2(self.act_fn(gate) * up)
 
 
 class GgufValidLengthSDPA(Qwen35MusaSDPA):
@@ -203,6 +231,7 @@ def load_gguf_text(
     valid_length_attention=False,
     predecode_q6_weights=False,
     share_attention_prefix=False,
+    merge_ffn_gate_up=False,
 ):
     import gguf
 
@@ -309,6 +338,9 @@ def load_gguf_text(
                 raise ValueError(f"Expected bias-free projection: {destination}")
             value, encoding = read_tensor(source, layer.weight.shape, True)
             model.set_submodule(destination, GgufLinear(value, encoding))
+    if merge_ffn_gate_up:
+        for layer in model.layers:
+            layer.feed_forward = GgufMergedFeedForward(layer.feed_forward)
     for name, value in list(model.named_buffers()):
         if value.is_meta:
             if not name.endswith(STATE_SUFFIXES):
@@ -359,6 +391,7 @@ def load_gguf_text(
         ),
         q6_predecoded=predecode_q6_weights,
         shared_attention_prefix=share_attention_prefix,
+        merged_ffn_gate_up=merge_ffn_gate_up,
         text_layers=args.n_layers,
         gdn_head_order="tiled",
         negative_a_preserved=True,

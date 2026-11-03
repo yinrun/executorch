@@ -1,16 +1,22 @@
 """GGUF model mapping and tiled GDN semantics, separate from model acceptance."""
 
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 import torch
 
 from executorch.backends.musa.gguf import dequantize_gguf
-from executorch.backends.musa.gguf_packed import GgufLinear
+from executorch.backends.musa.gguf_packed import GGUF_LINEAR, GgufLinear
 from executorch.backends.musa.tests.test_musa_gguf import sample_blocks
 from executorch.examples.models.llama.attention import AttentionGatedDeltaNet
+from executorch.examples.models.llama.feed_forward import FeedForward
 from executorch.examples.models.llama.model_args import ModelArgs
 from examples.musa.aoti_qwen35_gguf import (
     GgufGatedDeltaNet,
+    GgufMergedFeedForward,
     model_parameters,
     tensor_mapping,
 )
@@ -41,6 +47,34 @@ def metadata():
 
 
 class TestMusaQwen35GgufMetadata(unittest.TestCase):
+    def test_merged_ffn_export_and_invalid_projections(self):
+        with torch.device("meta"):
+            previous = FeedForward(256, 512)
+            previous.w1 = GgufLinear(torch.empty((512, 144), dtype=torch.uint8), "q4_k")
+            previous.w3 = GgufLinear(torch.empty((512, 144), dtype=torch.uint8), "q4_k")
+            previous.w2 = GgufLinear(torch.empty((256, 288), dtype=torch.uint8), "q4_k")
+            merged = GgufMergedFeedForward(previous)
+            exported = torch.export.export(merged, (torch.empty((1, 1, 256)),))
+            calls = [
+                node for node in exported.graph.nodes if node.target == GGUF_LINEAR
+            ]
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(merged.gate_up.packed_weight.shape, (1024, 144))
+            self.assertIs(merged.w2, previous.w2)
+            self.assertIs(merged.act_fn, previous.act_fn)
+            with self.assertRaises(ValueError):
+                GgufMergedFeedForward(FeedForward(256, 512))
+            previous.w3 = GgufLinear(torch.empty((512, 176), dtype=torch.uint8), "q5_k")
+            with self.assertRaises(ValueError):
+                GgufMergedFeedForward(previous)
+            previous.w3 = GgufLinear(torch.empty((511, 144), dtype=torch.uint8), "q4_k")
+            with self.assertRaises(ValueError):
+                GgufMergedFeedForward(previous)
+            previous.w3 = previous.w1
+            previous.w1.bias = torch.empty(512)
+            with self.assertRaises(ValueError):
+                GgufMergedFeedForward(previous)
+
     def test_full_mapping_and_no_double_norm_offset(self):
         args = model_parameters(metadata(), 4096)
         self.assertFalse(args.rms_norm_add_unit_offset)
@@ -75,6 +109,35 @@ class TestMusaQwen35GgufMetadata(unittest.TestCase):
     hasattr(torch, "musa") and torch.musa.is_available(), "requires MUSA"
 )
 class TestMusaQwen35GgufGpu(unittest.TestCase):
+    def test_merged_ffn_preserves_packed_bytes_and_outputs(self):
+        with torch.device("meta"):
+            previous = FeedForward(256, 4608)
+        gate = sample_blocks("q4_k", rows=4608, blocks_per_row=1)
+        up = gate[::-1].copy()
+        down = sample_blocks("q4_k", rows=256, blocks_per_row=18)
+        previous.w1 = GgufLinear(torch.from_numpy(gate).to("musa"), "q4_k")
+        previous.w3 = GgufLinear(torch.from_numpy(up).to("musa"), "q4_k")
+        previous.w2 = GgufLinear(torch.from_numpy(down).to("musa"), "q4_k")
+        merged = GgufMergedFeedForward(previous).eval()
+        self.assertTrue(
+            torch.equal(merged.gate_up.packed_weight[:4608], previous.w1.packed_weight)
+        )
+        self.assertTrue(
+            torch.equal(merged.gate_up.packed_weight[4608:], previous.w3.packed_weight)
+        )
+        self.assertNotIn("w1.packed_weight", dict(merged.named_buffers()))
+        self.assertNotIn("w3.packed_weight", dict(merged.named_buffers()))
+        with torch.no_grad(), torch.backends.mudnn.flags(allow_tf32=False):
+            for shape in ((1, 1, 256), (2, 256)):
+                value = (
+                    torch.linspace(-0.01, 0.01, 256, device="musa")
+                    .expand(shape)
+                    .contiguous()
+                )
+                actual, expected = merged(value), previous(value)
+                self.assertTrue(torch.isfinite(actual).all().item())
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     def test_tiled_gdn_matches_grouped_reference(self):
         torch.manual_seed(1729)
         args = ModelArgs(
@@ -143,6 +206,92 @@ class TestMusaQwen35GgufGpu(unittest.TestCase):
             expected = torch.nn.functional.linear(value, dense)
         self.assertEqual(actual.shape, (2, 4097))
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@unittest.skipUnless(
+    hasattr(torch, "musa")
+    and torch.musa.is_available()
+    and os.environ.get("EXECUTORCH_MUSA_GGUF_RUNNER"),
+    "requires a native packed GGUF runner",
+)
+class TestMusaQwen35MergedFfnRunner(unittest.TestCase):
+    def test_merged_ffn_matches_separate_native_outputs(self):
+        from executorch.backends.musa import MusaBackend, MusaPartitioner
+        from executorch.exir import to_edge_transform_and_lower
+        from executorch.extension.export_util.utils import save_pte_program
+        from examples.musa.aoti_model_acceptance import (
+            _serialization_schema,
+            _write_tensor,
+        )
+
+        class Comparison(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with torch.device("meta"):
+                    previous = FeedForward(256, 512)
+                gate = sample_blocks("q4_k", rows=512, blocks_per_row=1)
+                previous.w1 = GgufLinear(torch.from_numpy(gate).to("musa"), "q4_k")
+                previous.w3 = GgufLinear(
+                    torch.from_numpy(gate[::-1].copy()).to("musa"), "q4_k"
+                )
+                previous.w2 = GgufLinear(
+                    torch.from_numpy(
+                        sample_blocks("q4_k", rows=256, blocks_per_row=2)
+                    ).to("musa"),
+                    "q4_k",
+                )
+                self.previous = previous
+                self.merged = GgufMergedFeedForward(previous)
+
+            def forward(self, value):
+                return self.previous(value), self.merged(value)
+
+        model = Comparison().eval()
+        inputs = (torch.linspace(-0.01, 0.01, 256, device="musa").reshape(1, 1, 256),)
+        runner = Path(os.environ["EXECUTORCH_MUSA_GGUF_RUNNER"]).resolve()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with torch.no_grad(), _serialization_schema(), torch._inductor.config.patch(
+                memory_planning=True, memory_pool="combined"
+            ):
+                exported = torch.export.export(model, inputs)
+                specs = [MusaBackend.generate_method_name_compile_spec("forward")]
+                program = to_edge_transform_and_lower(
+                    exported, partitioner=[MusaPartitioner(specs)]
+                ).to_executorch()
+                self.assertEqual(
+                    len(program.executorch_program.execution_plan[0].delegates), 1
+                )
+                pte = Path(save_pte_program(program, "merged_ffn", directory))
+            _write_tensor(inputs[0], output / "input.bin")
+            process = subprocess.run(
+                [
+                    str(runner),
+                    f"--model_path={pte}",
+                    f"--data_path={output}/aoti_musa_blob.ptd",
+                    f"--inputs={output}/input.bin",
+                    f"--output_file={output}/output",
+                    "--print_output=none",
+                    "--num_executions=3",
+                ],
+                env=dict(
+                    PATH="/usr/bin:/bin",
+                    LD_LIBRARY_PATH=os.environ.get("LD_LIBRARY_PATH", ""),
+                ),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            previous = (output / "output-0.bin").read_bytes()
+            merged = (output / "output-1.bin").read_bytes()
+            self.assertEqual(len(merged), 256 * 4)
+            self.assertEqual(previous, merged)
+            self.assertTrue(
+                torch.isfinite(torch.frombuffer(bytearray(merged), dtype=torch.float32))
+                .all()
+                .item()
+            )
 
 
 if __name__ == "__main__":
