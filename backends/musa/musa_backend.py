@@ -832,6 +832,8 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_exp_out": None,
             "aoti_torch_musa_softplus_out": None,
             "aoti_torch_musa_causal_attention_out": None,
+            "aoti_torch_musa_causal_prefix_out": None,
+            "aoti_torch_musa_prefix_attention_out": None,
             "aoti_torch_musa_reduce_out": None,
             "aoti_torch_musa_bf16_sum_out": None,
             "aoti_torch_musa_gguf_linear_out": None,

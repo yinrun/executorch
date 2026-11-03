@@ -3,6 +3,8 @@
 import torch
 from torch import nn
 
+from executorch.backends.musa.causal_prefix_attention import CAUSAL_PREFIX
+
 
 def image_token_positions(token_ids, grids, image_token_id=248056):
     """Prepare host-side still-image position metadata, not model computations."""
@@ -96,7 +98,7 @@ class InterleavedMRope(nn.Module):
 class GgufMultimodalStep(nn.Module):
     """Single-token text/image step with separate cache and three-axis positions."""
 
-    def __init__(self, model):
+    def __init__(self, model, share_attention_prefix=False):
         super().__init__()
         params = model.params
         if (
@@ -108,6 +110,25 @@ class GgufMultimodalStep(nn.Module):
         ):
             raise ValueError("Multimodal step requires Qwen3.5 partial HF RoPE")
         self.model = model
+        self.share_attention_prefix = share_attention_prefix
+        if share_attention_prefix:
+            from examples.musa.aoti_qwen35_gguf import GgufSharedPrefixAttention
+
+            consumers = [
+                layer.attention
+                for layer in model.layers
+                if isinstance(layer.attention, GgufSharedPrefixAttention)
+            ]
+            if len(consumers) != 8:
+                raise ValueError(
+                    "Shared-prefix wrapper requires eight shared-prefix attention layers"
+                )
+            self.register_buffer(
+                "prefix_columns",
+                torch.arange(
+                    params.max_context_len, device=next(model.parameters()).device
+                ).reshape(1, -1),
+            )
         self.mrope = InterleavedMRope(next(model.parameters()).device)
 
     def forward(self, tokens, input_pos, positions, image_embedding, use_image):
@@ -124,6 +145,11 @@ class GgufMultimodalStep(nn.Module):
             or use_image.dtype != torch.bool
         ):
             raise ValueError("Invalid single-token multimodal input shape or dtype")
+        options = {"input_pos": input_pos}
+        if self.share_attention_prefix:
+            options["causal_prefix"] = CAUSAL_PREFIX(
+                input_pos, self.prefix_columns <= input_pos.reshape(1, 1)
+            )
         hidden_states = torch.where(
             use_image.reshape(1, 1, 1),
             image_embedding,
@@ -131,9 +157,7 @@ class GgufMultimodalStep(nn.Module):
         )
         cosine, sine = self.mrope(positions)
         for layer in self.model.layers:
-            hidden_states, update = layer(
-                hidden_states, cosine, sine, {"input_pos": input_pos}
-            )
+            hidden_states, update = layer(hidden_states, cosine, sine, options)
             if update is not None:
                 raise ValueError("Unexpected attention option update in Qwen3.5")
         logits = self.model.output(self.model.norm(hidden_states[:, -1, :]))

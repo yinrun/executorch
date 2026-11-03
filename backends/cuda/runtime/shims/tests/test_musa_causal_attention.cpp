@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -18,6 +19,8 @@ namespace {
 
 namespace slim = executorch::backends::aoti::slim;
 using executorch::backends::cuda::aoti_torch_musa_causal_attention_out;
+using executorch::backends::cuda::aoti_torch_musa_causal_prefix_out;
+using executorch::backends::cuda::aoti_torch_musa_prefix_attention_out;
 using executorch::backends::cuda::CUDAStreamGuard;
 using executorch::runtime::Error;
 using executorch::runtime::etensor::BFloat16;
@@ -639,4 +642,198 @@ TEST_F(MusaCausalAttentionTest, RestoresCallingDevice) {
   inputs.expect_result(64);
 }
 
+TEST_F(
+    MusaCausalAttentionTest,
+    SharedHostPrefixPreservesExactOutputsAndSnapshots) {
+  auto owner =
+      slim::empty({4}, ScalarType::Long, slim::c10::Device(slim::c10::kCPU));
+  auto control = owner.as_strided({2}, {1}, 1);
+  auto* values = static_cast<int64_t*>(owner.data_ptr());
+  values[0] = -17;
+  values[3] = -19;
+  for (int64_t capacity : {64, 128, 256}) {
+    Inputs inputs(capacity);
+    for (int64_t length : {int64_t{1}, int64_t{31}, capacity}) {
+      inputs.set_length(length);
+      ASSERT_EQ(inputs.run(), Error::Ok);
+      const auto expected = bytes(inputs.output);
+      ASSERT_EQ(
+          aoti_torch_musa_causal_prefix_out(
+              &control, &inputs.position, &inputs.mask),
+          Error::Ok);
+      EXPECT_EQ(values[1], length);
+      EXPECT_EQ(values[2], capacity);
+      for (int repeat = 0; repeat < 3; ++repeat) {
+        ASSERT_EQ(
+            aoti_torch_musa_prefix_attention_out(
+                &inputs.output,
+                &inputs.query,
+                &inputs.key,
+                &inputs.value,
+                &control),
+            Error::Ok);
+        EXPECT_EQ(bytes(inputs.output), expected);
+      }
+      const int64_t invalid = -1;
+      ASSERT_EQ(
+          cudaMemcpy(
+              inputs.position.data_ptr(),
+              &invalid,
+              sizeof(invalid),
+              cudaMemcpyHostToDevice),
+          cudaSuccess);
+      ASSERT_EQ(
+          aoti_torch_musa_prefix_attention_out(
+              &inputs.output,
+              &inputs.query,
+              &inputs.key,
+              &inputs.value,
+              &control),
+          Error::Ok);
+      EXPECT_EQ(bytes(inputs.output), expected);
+      EXPECT_EQ(
+          aoti_torch_musa_causal_prefix_out(
+              &control, &inputs.position, &inputs.mask),
+          Error::InvalidArgument);
+      EXPECT_EQ(values[1], length);
+      EXPECT_EQ(values[2], capacity);
+    }
+  }
+  for (int64_t capacity : {65, 4096}) {
+    GroupedInputs inputs(capacity);
+    for (int64_t length : {int64_t{1}, int64_t{33}, capacity}) {
+      inputs.set_length(length);
+      ASSERT_EQ(inputs.run(), Error::Ok);
+      const auto expected = bytes(inputs.output);
+      ASSERT_EQ(
+          aoti_torch_musa_causal_prefix_out(
+              &control, &inputs.position, &inputs.mask),
+          Error::Ok);
+      ASSERT_EQ(
+          aoti_torch_musa_prefix_attention_out(
+              &inputs.output,
+              &inputs.query,
+              &inputs.key,
+              &inputs.value,
+              &control),
+          Error::Ok);
+      EXPECT_EQ(bytes(inputs.output), expected);
+    }
+  }
+  EXPECT_EQ(values[0], -17);
+  EXPECT_EQ(values[3], -19);
+}
+
+TEST_F(
+    MusaCausalAttentionTest,
+    HostPrefixRejectsBadLengthsAndStorageWithoutWrites) {
+  Inputs inputs;
+  ASSERT_EQ(inputs.run(), Error::Ok);
+  const auto expected = bytes(inputs.output);
+  auto control =
+      slim::empty({2}, ScalarType::Long, slim::c10::Device(slim::c10::kCPU));
+  auto* values = static_cast<int64_t*>(control.data_ptr());
+  for (const auto& invalid : std::vector<std::array<int64_t, 2>>{
+           {0, 64},
+           {-1, 64},
+           {65, 64},
+           {1, 65},
+           {1, -1},
+           {std::numeric_limits<int64_t>::max(), 64}}) {
+    std::memcpy(values, invalid.data(), sizeof(invalid));
+    EXPECT_EQ(
+        aoti_torch_musa_prefix_attention_out(
+            &inputs.output,
+            &inputs.query,
+            &inputs.key,
+            &inputs.value,
+            &control),
+        Error::InvalidArgument);
+    EXPECT_EQ(bytes(inputs.output), expected);
+  }
+  auto overflow = control.as_strided({2}, {1}, 1);
+  auto wrong_type =
+      slim::empty({2}, ScalarType::Float, slim::c10::Device(slim::c10::kCPU));
+  auto device_control = tensor({2}, ScalarType::Long);
+  for (auto* invalid :
+       {&overflow,
+        &wrong_type,
+        &device_control,
+        static_cast<SlimTensor*>(nullptr)}) {
+    EXPECT_EQ(
+        aoti_torch_musa_causal_prefix_out(
+            invalid, &inputs.position, &inputs.mask),
+        Error::InvalidArgument);
+    EXPECT_EQ(
+        aoti_torch_musa_prefix_attention_out(
+            &inputs.output, &inputs.query, &inputs.key, &inputs.value, invalid),
+        Error::InvalidArgument);
+    EXPECT_EQ(bytes(inputs.output), expected);
+  }
+  ASSERT_EQ(
+      aoti_torch_musa_causal_prefix_out(
+          &control, &inputs.position, &inputs.mask),
+      Error::Ok);
+  EXPECT_EQ(
+      aoti_torch_musa_prefix_attention_out(
+          &inputs.query, &inputs.query, &inputs.key, &inputs.value, &control),
+      Error::InvalidArgument);
+}
+
+TEST_F(MusaCausalAttentionTest, SharedPrefixReadsUpdatesOnCallingStream) {
+  Inputs inputs;
+  auto control =
+      slim::empty({2}, ScalarType::Long, slim::c10::Device(slim::c10::kCPU));
+  auto* values = static_cast<int64_t*>(control.data_ptr());
+  cudaStream_t stream = nullptr;
+  ASSERT_EQ(
+      musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  {
+    auto guard = CUDAStreamGuard::create(stream, 0);
+    ASSERT_TRUE(guard.ok());
+    for (int64_t length : {1, 17, 64, 3}) {
+      const int64_t index = length - 1;
+      std::array<uint8_t, 64> mask{};
+      std::fill(mask.begin(), mask.begin() + length, 1);
+      ASSERT_EQ(
+          cudaMemcpyAsync(
+              inputs.position.data_ptr(),
+              &index,
+              sizeof(index),
+              cudaMemcpyHostToDevice,
+              stream),
+          cudaSuccess);
+      ASSERT_EQ(
+          cudaMemcpyAsync(
+              inputs.mask.data_ptr(),
+              mask.data(),
+              mask.size(),
+              cudaMemcpyHostToDevice,
+              stream),
+          cudaSuccess);
+      ASSERT_EQ(
+          aoti_torch_musa_causal_prefix_out(
+              &control, &inputs.position, &inputs.mask),
+          Error::Ok);
+      EXPECT_EQ(values[0], length);
+      EXPECT_EQ(values[1], 64);
+      mask[length - 1] = 0;
+      ASSERT_EQ(
+          cudaMemcpyAsync(
+              inputs.mask.data_ptr(),
+              mask.data(),
+              mask.size(),
+              cudaMemcpyHostToDevice,
+              stream),
+          cudaSuccess);
+      EXPECT_EQ(
+          aoti_torch_musa_causal_prefix_out(
+              &control, &inputs.position, &inputs.mask),
+          Error::InvalidArgument);
+      EXPECT_EQ(values[0], length);
+    }
+  }
+  EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
 }

@@ -65,16 +65,12 @@ Error run_unary(
   return check_mudnn(operation.Run(handle, output, input));
 }
 
-}
-
-extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
+Error validate_attention(
     SlimTensor* output,
     SlimTensor* query,
     SlimTensor* key,
-    SlimTensor* value,
-    SlimTensor* position,
-    SlimTensor* mask) {
-  for (auto* tensor : {output, query, key, value, position, mask}) {
+    SlimTensor* value) {
+  for (auto* tensor : {output, query, key, value}) {
     ET_CHECK_OR_RETURN_ERROR(
         tensor != nullptr && tensor->storage() != nullptr && tensor->is_gpu(),
         InvalidArgument,
@@ -83,7 +79,6 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   const bool grouped_fp32 = query->dtype() == ScalarType::Float;
   const int64_t query_heads = grouped_fp32 ? 16 : 8;
   const int64_t kv_heads = grouped_fp32 ? 4 : 8;
-  const int64_t group_size = query_heads / kv_heads;
   for (auto* tensor : {output, query, key, value}) {
     ET_CHECK_OR_RETURN_ERROR(
         tensor->dtype() == query->dtype() && tensor->dim() == 4 &&
@@ -103,16 +98,9 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
           value->sizes() == key->sizes(),
       NotSupported,
       "MUSA causal attention supports Qwen single-token geometry only");
-  ET_CHECK_OR_RETURN_ERROR(
-      position->dtype() == ScalarType::Long && position->dim() == 1 &&
-          position->size(0) == 1 && mask->dtype() == ScalarType::Bool &&
-          mask->dim() == 2 && mask->size(0) == 1 && mask->size(1) == capacity,
-      InvalidArgument,
-      "MUSA causal attention requires int64 position[1] and bool "
-      "mask[1,capacity]");
   const auto output_span = checked_musa_tensor_span(*output);
   ET_CHECK_OK_OR_RETURN_ERROR(output_span.error());
-  for (auto* tensor : {output, query, key, value, position, mask}) {
+  for (auto* tensor : {output, query, key, value}) {
     ET_CHECK_OR_RETURN_ERROR(
         tensor->device_index() == query->device_index(),
         InvalidArgument,
@@ -130,16 +118,53 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
         "MUSA causal attention output must not overlap its inputs");
   }
   ET_CHECK_OR_RETURN_ERROR(
-      output != query && output != key && output != value &&
-          output != position && output != mask,
+      output != query && output != key && output != value,
       InvalidArgument,
       "MUSA causal attention does not support in-place output");
-  auto device_guard = CUDAGuard::create(query->device_index());
+  return Error::Ok;
+}
+
+Error validate_prefix_inputs(SlimTensor* position, SlimTensor* mask) {
+  ET_CHECK_OR_RETURN_ERROR(
+      position != nullptr && mask != nullptr &&
+          position->storage() != nullptr && mask->storage() != nullptr &&
+          position->is_gpu() && mask->is_gpu() &&
+          position->device_index() == mask->device_index() &&
+          position->dtype() == ScalarType::Long && position->dim() == 1 &&
+          position->size(0) == 1 && mask->dtype() == ScalarType::Bool &&
+          mask->dim() == 2 && mask->size(0) == 1 && mask->size(1) > 0 &&
+          mask->size(1) <= 4096,
+      InvalidArgument,
+      "Causal prefix requires matching-device int64 position[1] and bool mask[1,capacity]");
+  ET_CHECK_OR_RETURN_ERROR(
+      position->is_contiguous() && mask->is_contiguous(),
+      NotSupported,
+      "Causal prefix requires contiguous controls");
+  ET_CHECK_OK_OR_RETURN_ERROR(checked_musa_tensor_span(*position).error());
+  ET_CHECK_OK_OR_RETURN_ERROR(checked_musa_tensor_span(*mask).error());
+  return Error::Ok;
+}
+
+Error validate_host_prefix(SlimTensor* control) {
+  ET_CHECK_OR_RETURN_ERROR(
+      control != nullptr && control->storage() != nullptr &&
+          control->is_cpu() && control->dtype() == ScalarType::Long &&
+          control->dim() == 1 && control->size(0) == 2 &&
+          control->is_contiguous(),
+      InvalidArgument,
+      "Causal prefix control requires a backed contiguous CPU int64[2] tensor");
+  return checked_musa_tensor_span(*control).error();
+}
+
+Error read_prefix(SlimTensor* position, SlimTensor* mask, int64_t& index) {
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_prefix_inputs(position, mask));
+  auto device_guard = CUDAGuard::create(position->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
-  auto stream_result = getCurrentCUDAStream(query->device_index());
+  auto stream_result = getCurrentCUDAStream(position->device_index());
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   const auto stream = stream_result.get();
-  alignas(16) int64_t index = -1;
+  const int64_t capacity = mask->size(1);
+  index = -1;
   alignas(16) std::array<uint8_t, 4096> host_mask{};
   {
     struct ControlScratch {
@@ -188,6 +213,25 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
         "MUSA causal attention mask must describe the valid causal prefix");
   }
 
+  return Error::Ok;
+}
+
+Error run_attention(
+    SlimTensor* output,
+    SlimTensor* query,
+    SlimTensor* key,
+    SlimTensor* value,
+    int64_t length) {
+  const bool grouped_fp32 = query->dtype() == ScalarType::Float;
+  const int64_t query_heads = grouped_fp32 ? 16 : 8;
+  const int64_t kv_heads = grouped_fp32 ? 4 : 8;
+  const int64_t group_size = query_heads / kv_heads;
+  const int64_t capacity = key->size(2);
+  auto device_guard = CUDAGuard::create(query->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(device_guard.error());
+  auto stream_result = getCurrentCUDAStream(query->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
+  const auto stream = stream_result.get();
   const size_t score_bytes = query_heads * length * query->itemsize();
   const std::array<size_t, 5> sizes = {
       score_bytes,
@@ -296,5 +340,72 @@ extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
   return check_mudnn(
       product.Run(handle, output_tensor, probabilities, value_tensor));
 }
-
 }
+
+extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_attention_out(
+    SlimTensor* output,
+    SlimTensor* query,
+    SlimTensor* key,
+    SlimTensor* value,
+    SlimTensor* position,
+    SlimTensor* mask) {
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_attention(output, query, key, value));
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_prefix_inputs(position, mask));
+  ET_CHECK_OR_RETURN_ERROR(
+      position->device_index() == query->device_index() &&
+          mask->size(1) == key->size(2),
+      InvalidArgument,
+      "Causal prefix device and capacity must match the KV cache");
+  const auto output_span = checked_musa_tensor_span(*output);
+  for (auto* input : {position, mask}) {
+    ET_CHECK_OR_RETURN_ERROR(
+        output != input &&
+            !musa_tensor_spans_overlap(
+                output_span.get(), checked_musa_tensor_span(*input).get()),
+        InvalidArgument,
+        "Causal attention output must not overlap controls");
+  }
+  int64_t index = -1;
+  ET_CHECK_OK_OR_RETURN_ERROR(read_prefix(position, mask, index));
+  return run_attention(output, query, key, value, index + 1);
+}
+
+extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_causal_prefix_out(
+    SlimTensor* output,
+    SlimTensor* position,
+    SlimTensor* mask) {
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_host_prefix(output));
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_prefix_inputs(position, mask));
+  const auto output_span = checked_musa_tensor_span(*output);
+  for (auto* input : {position, mask}) {
+    ET_CHECK_OR_RETURN_ERROR(
+        !musa_tensor_spans_overlap(
+            output_span.get(), checked_musa_tensor_span(*input).get()),
+        InvalidArgument,
+        "Causal prefix output must not overlap inputs");
+  }
+  int64_t index = -1;
+  ET_CHECK_OK_OR_RETURN_ERROR(read_prefix(position, mask, index));
+  auto* control = static_cast<int64_t*>(output->data_ptr());
+  control[0] = index + 1;
+  control[1] = mask->size(1);
+  return Error::Ok;
+}
+
+extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_prefix_attention_out(
+    SlimTensor* output,
+    SlimTensor* query,
+    SlimTensor* key,
+    SlimTensor* value,
+    SlimTensor* control) {
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_attention(output, query, key, value));
+  ET_CHECK_OK_OR_RETURN_ERROR(validate_host_prefix(control));
+  const auto* prefix = static_cast<const int64_t*>(control->data_ptr());
+  ET_CHECK_OR_RETURN_ERROR(
+      prefix[1] == key->size(2) && prefix[0] > 0 && prefix[0] <= prefix[1],
+      InvalidArgument,
+      "Causal prefix length and capacity must match the KV cache");
+  return run_attention(output, query, key, value, prefix[0]);
+}
+
+} // namespace executorch::backends::cuda

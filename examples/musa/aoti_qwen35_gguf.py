@@ -11,6 +11,10 @@ import torch
 import torch.nn.functional as functional
 
 from executorch.backends.musa.causal_attention import CAUSAL_ATTENTION
+from executorch.backends.musa.causal_prefix_attention import (
+    CAUSAL_PREFIX,
+    PREFIX_ATTENTION,
+)
 from executorch.backends.musa.gguf import BLOCK_BYTES
 from executorch.backends.musa.gguf_packed import GgufEmbedding, GgufLinear
 from executorch.backends.musa.q6_predecoded import Q6_PREDECODED, predecode_q6
@@ -29,6 +33,40 @@ class GgufValidLengthSDPA(Qwen35MusaSDPA):
             raise ValueError("GGUF valid-prefix attention requires one token")
         output = CAUSAL_ATTENTION(query, key, value, input_pos, mask)
         return output.transpose(1, 2).reshape(batch_size, sequence_length, self.dim)
+
+
+class GgufSharedPrefixAttention(AttentionMHA):
+    def forward(self, hidden, cosine, sine, **options):
+        batch, sequence, _ = hidden.shape
+        if (
+            batch != 1
+            or sequence != 1
+            or not self.use_kv_cache
+            or not self.use_q_gate
+            or options.get("shared_kv") is not None
+        ):
+            raise ValueError(
+                "Shared-prefix attention requires Qwen single-token cached geometry"
+            )
+        position = options["input_pos"]
+        control = options.get("causal_prefix")
+        if control is None:
+            control = CAUSAL_PREFIX(position, self.mask[position])
+        projected = self.wq(hidden).view(
+            batch, sequence, self.n_local_heads, self.head_dim * 2
+        )
+        query, gate = torch.chunk(projected, 2, dim=-1)
+        gate = gate.reshape(batch, sequence, -1)
+        query, key, value = self._prepare_qkv(
+            query, hidden, batch, sequence, cosine, sine
+        )
+        key, value = self.kv_cache.update(position, key, value)
+        output = PREFIX_ATTENTION(query, key, value, control)
+        output = output.transpose(1, 2).reshape(
+            batch, sequence, self.n_local_heads * self.head_dim
+        )
+        output = self._apply_output_transforms(output, hidden, gate, batch, sequence)
+        return self.wo(output), None
 
 
 class GgufGatedDeltaNet(AttentionGatedDeltaNet):
@@ -160,10 +198,16 @@ def tensor_mapping(args):
 
 
 def load_gguf_text(
-    path, context_length=4096, valid_length_attention=False, predecode_q6_weights=False
+    path,
+    context_length=4096,
+    valid_length_attention=False,
+    predecode_q6_weights=False,
+    share_attention_prefix=False,
 ):
     import gguf
 
+    if share_attention_prefix and not valid_length_attention:
+        raise ValueError("Shared attention prefix requires valid-length attention")
     path = Path(path).resolve()
     before = path.stat()
     reader = gguf.GGUFReader(path)
@@ -186,6 +230,8 @@ def load_gguf_text(
         for index, layer in enumerate(model.layers):
             if isinstance(layer.attention, AttentionGatedDeltaNet):
                 layer.attention = GgufGatedDeltaNet(args, index, model.rope)
+            elif share_attention_prefix and isinstance(layer.attention, AttentionMHA):
+                layer.attention = GgufSharedPrefixAttention(args, index, model.rope)
     records = []
 
     def read_tensor(name, shape, quantized):
@@ -312,6 +358,7 @@ def load_gguf_text(
             if record["encoding"] in BLOCK_BYTES
         ),
         q6_predecoded=predecode_q6_weights,
+        shared_attention_prefix=share_attention_prefix,
         text_layers=args.n_layers,
         gdn_head_order="tiled",
         negative_a_preserved=True,

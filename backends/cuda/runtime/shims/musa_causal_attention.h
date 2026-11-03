@@ -25,6 +25,20 @@ aoti_torch_musa_causal_attention_out(
     MusaCausalAttentionTensor position,
     MusaCausalAttentionTensor mask);
 
+extern "C" MUSA_CAUSAL_ATTENTION_EXPORT MusaCausalAttentionError
+aoti_torch_musa_causal_prefix_out(
+    MusaCausalAttentionTensor output,
+    MusaCausalAttentionTensor position,
+    MusaCausalAttentionTensor mask);
+
+extern "C" MUSA_CAUSAL_ATTENTION_EXPORT MusaCausalAttentionError
+aoti_torch_musa_prefix_attention_out(
+    MusaCausalAttentionTensor output,
+    MusaCausalAttentionTensor query,
+    MusaCausalAttentionTensor key,
+    MusaCausalAttentionTensor value,
+    MusaCausalAttentionTensor control);
+
 #ifndef TORCH_INDUCTOR_CPP_WRAPPER
 }
 #endif
