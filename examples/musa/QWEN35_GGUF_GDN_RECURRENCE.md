@@ -155,6 +155,10 @@ handling, then check actual launch counts before a whole-model performance
 claim. Removing checks, relaxing argmax or a position-specific fallback is
 not part of the plan. The 10 tokens/s goal remains unmet.
 
+The subsequent [wider Triton GDN experiment](QWEN35_GGUF_FUSED_GDN.md)
+passes full accuracy and reduces launches to 692, but its ordinary ABBA/BAAB
+timing does not establish a reliable gain. It also remains unpromoted.
+
 ## Reproduction and evidence
 
 For an already configured MUSA build, `aoti_cuda_shims` includes the new
