@@ -115,6 +115,82 @@ TEST_F(MusaGdnTest, ExactRepresentableUpdatesOffsetsAndCallingStream) {
   }
 }
 
+TEST_F(MusaGdnTest, PreservesDistinctExportedFp32ReductionOrders) {
+  for (int heads : {16, 32}) {
+    auto query = tensor({1, heads, 1, 128});
+    auto key = tensor({1, heads, 1, 128});
+    auto value = tensor({1, heads, 1, 128});
+    auto decay = tensor({1, heads, 1});
+    auto beta = tensor({1, heads, 1});
+    auto state = tensor({1, heads, 128, 128});
+    const int state_size = heads * 128 * 128;
+    auto output = tensor({state_size + heads * 128});
+    std::vector<float> initial(state_size, 0);
+    for (int head = 0; head < heads; ++head) {
+      for (int column = 0; column < 128; ++column) {
+        const int base = head * 128 * 128 + column;
+        initial[base] = 100000000.0f;
+        if (column % 3 == 0) {
+          initial[base + 32 * 128] = 1;
+          initial[base + 64 * 128] = -100000000.0f;
+          initial[base + 96 * 128] = 1;
+        } else if (column % 3 == 1) {
+          initial[base + 128] = -100000000.0f;
+          initial[base + 2 * 128] = 1;
+          initial[base + 3 * 128] = 1;
+        } else {
+          initial[base + 4 * 128] = -100000000.0f;
+          initial[base + 2 * 128] = 1;
+          initial[base + 6 * 128] = 1;
+        }
+      }
+    }
+    ASSERT_EQ(
+        cudaMemcpy(
+            state.data_ptr(),
+            initial.data(),
+            state.nbytes(),
+            cudaMemcpyHostToDevice),
+        cudaSuccess);
+    fill(query, 0);
+    fill(key, 1);
+    fill(value, 0);
+    fill(decay, 1);
+    fill(beta, 1);
+    ASSERT_EQ(
+        aoti_torch_musa_gdn_recurrence_out(
+            &output, &query, &key, &value, &decay, &beta, &state),
+        Error::Ok);
+    const auto updated = read(output);
+    for (int index = 0; index < state_size; ++index) {
+      const float memory = (index % 128) % 3 == 0 ? 1.0f : 0.0f;
+      ASSERT_EQ(updated[index], initial[index] - memory);
+    }
+    for (int index = state_size; index < output.numel(); ++index) {
+      ASSERT_EQ(updated[index], 0);
+    }
+    fill(query, 1);
+    fill(beta, 0);
+    ASSERT_EQ(
+        aoti_torch_musa_gdn_recurrence_out(
+            &output, &query, &key, &value, &decay, &beta, &state),
+        Error::Ok);
+    const auto projected = read(output);
+    for (int index = 0; index < state_size; ++index) {
+      ASSERT_EQ(projected[index], initial[index]);
+    }
+    for (int index = 0; index < heads * 128; ++index) {
+      const int pattern = (index % 128) % 3;
+      ASSERT_EQ(
+          projected[state_size + index],
+          pattern == 0       ? 1
+              : pattern == 1 ? 0
+                             : 2);
+    }
+    ASSERT_EQ(read(state), initial);
+  }
+}
+
 TEST_F(MusaGdnTest, RejectsBadShapesStorageAndAliasing) {
   auto query = tensor({1, 32, 1, 128});
   auto decay = tensor({1, 32, 1});
