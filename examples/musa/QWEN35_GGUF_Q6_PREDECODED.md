@@ -51,8 +51,10 @@ model, loading = load_gguf_text(
 
 Export this model using the existing MUSA export pipeline, then run with a shim
 built from this revision. The old shim does not understand format 114. Aligned
-single-token inference uses a two-row-per-thread Q6 kernel; unaligned and
-batched cases retain a checked, order-preserving generic implementation.
+single-token inference uses a two-row-per-thread Q6 kernel, or a four-row tile
+for matrices with at least 4096 rows and 2560 columns. Unaligned and batched
+cases retain a checked, order-preserving generic implementation. This tiling
+change does not change layout 114 or require another model export.
 
 Run focused Python and native tests in the configured MUSA environment:
 

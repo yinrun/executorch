@@ -225,18 +225,39 @@ __global__ void linear_vector_decode_kernel(
       }
     } else {
       constexpr int offset = QuantType == 12 ? 16 : 48;
-      const auto* scales = weight_block + 4;
-      const float scale = scale_value(weight_block);
-      const float minimum = scale_value(weight_block + 2);
-      const float first_scale = scale * static_cast<float>(scales[group] & 63);
-      const float first_minimum =
-          minimum * static_cast<float>(scales[group + 4] & 63);
-      const float second_scale = scale *
-          static_cast<float>((scales[group + 8] & 15) |
-                             ((scales[group] >> 6) << 4));
-      const float second_minimum = minimum *
-          static_cast<float>((scales[group + 8] >> 4) |
-                             ((scales[group + 4] >> 6) << 4));
+      float first_scale;
+      float first_minimum;
+      float second_scale;
+      float second_minimum;
+      if constexpr (width == 16) {
+        const uint4 metadata = load_decode_value<QuantType>(
+            reinterpret_cast<const uint4*>(weight_block));
+        const float scale = __half2float(__ushort_as_half(metadata.x & 65535));
+        const float minimum = __half2float(__ushort_as_half(metadata.x >> 16));
+        const uint32_t low_scale = (metadata.y >> (group * 8)) & 255;
+        const uint32_t low_minimum = (metadata.z >> (group * 8)) & 255;
+        const uint32_t high = (metadata.w >> (group * 8)) & 255;
+        first_scale = scale * static_cast<float>(low_scale & 63);
+        first_minimum = minimum * static_cast<float>(low_minimum & 63);
+        second_scale =
+            scale * static_cast<float>((high & 15) | ((low_scale >> 6) << 4));
+        second_minimum = minimum *
+            static_cast<float>((high >> 4) | ((low_minimum >> 6) << 4));
+      } else {
+        const auto* scales = weight_block + 4;
+        const float scale = scale_value(weight_block);
+        const float minimum = scale_value(weight_block + 2);
+        first_scale = scale * static_cast<float>(scales[group] & 63);
+        first_minimum = minimum * static_cast<float>(scales[group + 4] & 63);
+        second_scale =
+            scale *
+            static_cast<float>(
+                (scales[group + 8] & 15) | ((scales[group] >> 6) << 4));
+        second_minimum =
+            minimum *
+            static_cast<float>(
+                (scales[group + 8] >> 4) | ((scales[group + 4] >> 6) << 4));
+      }
       uint32_t first_low[width / 4];
       uint32_t second_low[width / 4];
       uint32_t high_words[width / 4] = {};
@@ -423,6 +444,7 @@ __global__ void linear_q6_tiled_decode_kernel(
   }
 }
 
+template <int Tile>
 __global__ void linear_predecoded_q6_decode_kernel(
     float* output,
     const float* input,
@@ -430,7 +452,6 @@ __global__ void linear_predecoded_q6_decode_kernel(
     int rows,
     int columns) {
   constexpr int Width = 4;
-  constexpr int Tile = 2;
   constexpr int bytes = 320;
   constexpr int lanes = 128 / Width;
   const int lane = threadIdx.x % lanes;
@@ -588,12 +609,23 @@ extern "C" musaError_t executorch_musa_gguf_linear_launch(
     if (batches == 1 && columns <= std::numeric_limits<int>::max() &&
         reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
         reinterpret_cast<uintptr_t>(packed) % 16 == 0) {
-      linear_predecoded_q6_decode_kernel<<<(rows + 7) / 8, 128, 0, stream>>>(
-          output,
-          input,
-          packed,
-          static_cast<int>(rows),
-          static_cast<int>(columns));
+      if (rows >= 4096 && columns == 2560) {
+        linear_predecoded_q6_decode_kernel<4>
+            <<<(rows + 15) / 16, 128, 0, stream>>>(
+                output,
+                input,
+                packed,
+                static_cast<int>(rows),
+                static_cast<int>(columns));
+      } else {
+        linear_predecoded_q6_decode_kernel<2>
+            <<<(rows + 7) / 8, 128, 0, stream>>>(
+                output,
+                input,
+                packed,
+                static_cast<int>(rows),
+                static_cast<int>(columns));
+      }
     } else {
       linear_kernel<114>
           <<<grid, 128, 0, stream>>>(output, input, packed, rows, columns);

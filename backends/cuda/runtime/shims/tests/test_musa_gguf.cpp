@@ -336,7 +336,10 @@ TEST_F(MusaGgufTest, TiledQ6DecodeMatchesGenericAtDispatchAndRowBoundaries) {
 
 TEST_F(MusaGgufTest, PredecodedQ6MatchesOriginalBitsBatchesOffsetsAndRowTails) {
   for (int columns : {256, 2560, 9216}) {
-    for (int rows : {1, 7, 8, 9, 129}) {
+    const auto row_counts = columns == 2560
+        ? std::vector<int>{1, 7, 8, 9, 15, 16, 17, 129, 4095, 4096, 4097}
+        : std::vector<int>{1, 7, 8, 9, 15, 16, 17, 129};
+    for (int rows : row_counts) {
       SCOPED_TRACE(columns);
       SCOPED_TRACE(rows);
       const int blocks = rows * (columns / 256);
