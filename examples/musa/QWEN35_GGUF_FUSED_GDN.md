@@ -120,6 +120,10 @@ baseline/candidate speed ratios range from 0.7180 to 0.9043. Only the tiny
 whole-model opportunity; no model is reexported with this representation.
 Do not generalize that rejection to all possible compressed predecode layouts.
 
+The [layout and graph replay follow-up](QWEN35_GGUF_LAYOUT_FOLLOWUP.md)
+tests lower-growth metadata formats, unchanged-size interleaving, paired-row
+input reuse and SDK graph replay. None establishes a new deployment gain.
+
 ## Reproduction and evidence
 
 Local ETSupport evidence under `artifacts/gguf-20261029`:
