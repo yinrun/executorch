@@ -423,6 +423,76 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
   }
 }
 
+#if defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+TEST_F(MusaGgufTest, PackedDecodePreservesFiniteHalfScaleExtremes) {
+  constexpr int rows = 129;
+  constexpr std::array<uint16_t, 20> half_patterns = {
+      0x0000, 0x8000, 0x0001, 0x8001, 0x03ff, 0x83ff, 0x0400,
+      0x8400, 0x3555, 0xb555, 0x3bff, 0xbbff, 0x3c00, 0xbc00,
+      0x3c01, 0xbc01, 0x7bfe, 0xfbfe, 0x7bff, 0xfbff};
+  for (int quant_type : {12, 13}) {
+    const int block_bytes = quant_type == 12 ? 144 : 176;
+    for (int columns : {256, 2560, 4096, 4352, 9216, 16384, 16640}) {
+      SCOPED_TRACE(quant_type);
+      SCOPED_TRACE(columns);
+      const int row_bytes = columns / 256 * block_bytes;
+      std::vector<uint8_t> data(rows * row_bytes);
+      uint32_t random_state = 0x57c19a83;
+      for (auto& byte : data) {
+        random_state ^= random_state << 13;
+        random_state ^= random_state >> 17;
+        random_state ^= random_state << 5;
+        byte = static_cast<uint8_t>(random_state);
+      }
+      for (int row = 0; row < rows; ++row) {
+        for (int block = 0; block < columns / 256; ++block) {
+          auto* target = data.data() + row * row_bytes + block * block_bytes;
+          const uint16_t scale =
+              half_patterns[(row + block * 3) % half_patterns.size()];
+          const uint16_t minimum =
+              half_patterns[(row * 7 + block * 5 + 11) % half_patterns.size()];
+          target[0] = scale & 255;
+          target[1] = scale >> 8;
+          target[2] = minimum & 255;
+          target[3] = minimum >> 8;
+        }
+      }
+      auto packed = tensor({rows, row_bytes}, ScalarType::Byte);
+      write(packed, data);
+      std::vector<float> values(columns);
+      for (int column = 0; column < columns; ++column) {
+        values[column] = std::sin(static_cast<float>(column * 13)) * 3;
+      }
+      int parts = 1;
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+      if (quant_type == 12 && columns >= 4096) {
+        parts = 4;
+      }
+#endif
+      const auto reference = local_reduction_reference(
+          packed, values, quant_type, rows, columns, parts);
+      auto input = tensor({1, columns});
+      write(input, values);
+      auto owner = tensor({rows + 2});
+      write(owner, std::vector<float>(rows + 2, 12345));
+      auto output = owner.as_strided({1, rows}, {rows, 1}, 1);
+      ASSERT_EQ(
+          aoti_torch_musa_gguf_linear_out(&output, &input, &packed, quant_type),
+          Error::Ok);
+      const auto actual = read(owner);
+      ASSERT_EQ(actual.front(), 12345);
+      ASSERT_EQ(actual.back(), 12345);
+      for (int row = 0; row < rows; ++row) {
+        ASSERT_TRUE(std::isfinite(actual[row + 1]));
+        ASSERT_TRUE(std::isfinite(reference[row]));
+        ASSERT_EQ(
+            std::memcmp(&actual[row + 1], &reference[row], sizeof(float)), 0);
+      }
+    }
+  }
+}
+#endif
+
 TEST_F(MusaGgufTest, TiledQ6DecodeMatchesGenericAtDispatchAndRowBoundaries) {
   for (int columns : {256, 2560}) {
     for (int rows : {4095, 4096, 4097}) {

@@ -222,6 +222,14 @@ __device__ uint32_t load_packed_four(const uint8_t* address) {
 
 #if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE) || \
     defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+#if defined(EXECUTORCH_MUSA_GGUF_VECTOR_DEQUANT)
+__device__ __forceinline__ FloatQuad dequantize_packed_quad(
+    FloatQuad levels, float scale, float minimum) {
+#pragma clang fp contract(fast)
+  return scale * levels - minimum;
+}
+#endif
+
 struct PackedQuadBlock {
   uint4 metadata;
   uint4 first;
@@ -307,12 +315,28 @@ __global__ void linear_packed_quad_decode_kernel(
     const uint32_t low_scale = (current.metadata.y >> (group * 8)) & 255;
     const uint32_t low_minimum = (current.metadata.z >> (group * 8)) & 255;
     const uint32_t high = (current.metadata.w >> (group * 8)) & 255;
+#if defined(EXECUTORCH_MUSA_GGUF_VECTOR_DEQUANT)
+    using IntegerQuad = unsigned int __attribute__((ext_vector_type(4)));
+    const IntegerQuad levels = {
+        low_scale & 63,
+        low_minimum & 63,
+        (high & 15) | ((low_scale >> 6) << 4),
+        (high >> 4) | ((low_minimum >> 6) << 4)};
+    const FloatQuad factors = __builtin_convertvector(levels, FloatQuad);
+    const FloatQuad bases = {scale, minimum, scale, minimum};
+    const FloatQuad products = bases * factors;
+    const float first_scale = products[0];
+    const float first_minimum = products[1];
+    const float second_scale = products[2];
+    const float second_minimum = products[3];
+#else
     const float first_scale = scale * static_cast<float>(low_scale & 63);
     const float first_minimum = minimum * static_cast<float>(low_minimum & 63);
     const float second_scale =
         scale * static_cast<float>((high & 15) | ((low_scale >> 6) << 4));
     const float second_minimum =
         minimum * static_cast<float>((high >> 4) | ((low_minimum >> 6) << 4));
+#endif
     const uint32_t first_words[4] = {
         current.first.x, current.first.y, current.first.z, current.first.w};
     const uint32_t second_words[4] = {
@@ -338,9 +362,16 @@ __global__ void linear_packed_quad_decode_kernel(
           __builtin_bit_cast(UnsignedByteQuad, first_levels), FloatQuad);
       const FloatQuad second_values = __builtin_convertvector(
           __builtin_bit_cast(UnsignedByteQuad, second_levels), FloatQuad);
+#if defined(EXECUTORCH_MUSA_GGUF_VECTOR_DEQUANT)
+      const FloatQuad first_weight =
+          dequantize_packed_quad(first_values, first_scale, first_minimum);
+      const FloatQuad second_weight =
+          dequantize_packed_quad(second_values, second_scale, second_minimum);
+#else
       const FloatQuad first_weight = first_scale * first_values - first_minimum;
       const FloatQuad second_weight =
           second_scale * second_values - second_minimum;
+#endif
 #if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
       const float4 first = SharedInput
           ? shared_input[(block - block_begin) * 64 + word * 8 + lane]

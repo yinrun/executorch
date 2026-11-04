@@ -8,8 +8,9 @@ accumulation order or shared-memory capacity. Q6 kernels are unchanged.
 
 The workload remains Qwen3.5-4B Q4_K_M on M1000 MP22 with FP32 activation,
 state and accumulation. No TF32, requantization, MTP, vocabulary pruning,
-tolerance relaxation or output-check removal is used. These are isolated
-artifacts, not a new production option or default.
+tolerance relaxation or output-check removal is used. The initial isolated
+experiments are followed by the default-off source option documented below;
+deployment defaults do not change.
 
 ## Variants
 
@@ -154,15 +155,109 @@ this observed slow generation averages about 110.859 ms per decode step and
 would need roughly another 9.8% time reduction to reach 100 ms. This arithmetic
 does not predict performance across other workloads or GPU conditions.
 
+## Same-process generation pairing
+
+A separate switching runner compares shared input with the combined variant
+inside one process, switching only between complete generations. The device
+audit verifies all 50 baseline function bodies and 44 executed candidate
+function bodies against their qualified images, plus 49 kernel metadata records
+after entrypoint-name normalization. Six candidate fallback functions are
+explicitly excluded: the switching probe retains the original fallback for
+out-of-capacity shapes. All 147 intended GEMV calls per model step are checked
+to use the requested shared-input variant, so this exception is not exercised
+by the measured workload. This is not complete-image or host-library identity.
+
+Both modes first pass 464 full text-output comparisons, including 232 reset
+pairs, against their independently qualified ordinary runtimes. Two opposite
+sequences then retain one full warmup per mode per process and eight measured
+generations per mode, forming eight neighboring pairs:
+
+| Instrumented mode | Minimum | Median | Maximum decode tokens/s |
+| --- | ---: | ---: | ---: |
+| Shared-input source | 10.9699 | 11.3636 | 12.1311 |
+| Shared input plus vector metadata/contraction | 10.5191 | 11.5864 | 12.1933 |
+
+Seven of eight pairs improve. The paired median ratio is 1.01920, but the
+geometric mean is only 1.00223 because one pair measures 0.86816. That candidate
+generation has 25 decode steps with both frequency endpoints at 730 MHz and
+13 with transitioning endpoints. The baseline's 704 measured steps all have
+both endpoints at 1400 MHz; the candidate has 666 such steps. Every low and
+transition sample is retained. Endpoint association does not establish the
+frequency throughout a step or prove causation.
+
+Frequency reads are excluded from step timers and cost a median 0.1577% of loop
+time; cadence effects are not excluded. This instrumented batch has no
+generation below ten, but it cannot override the ordinary 9.0205 minimum or
+establish stable deployment throughput. No clocks or other applications are
+changed. The modest paired result supports only a default-off source
+experiment, not a default change or a claimed 4.3% causal gain.
+
+## Default-off source integration
+
+`EXECUTORCH_MUSA_GGUF_VECTOR_DEQUANT` is a default-OFF CMake option passed only
+to the GGUF device compilation. It enables vector scale/minimum processing and
+the locally scoped contraction helper. The global `-ffp-contract=off` remains
+unchanged, and accumulation/reduction expressions, weights, runtime stream and
+shape/alignment/capacity guards are untouched. It operates in the packed body
+selected by `PACKED_SCHEDULE` or `LOCAL_REDUCTION`; without either, there is no
+affected path. Shared staging is an independent option. Timings here use both
+options, with the existing qualified reduction and compiler settings.
+
+A fresh CMake build tests six configurations: default OFF, ON, OFF again, ON
+again, ON with shared staging disabled, and restored ON with staging. Every
+configuration passes all 18 GGUF and 15 attention tests; the single unavailable
+second-device test skips. The new finite-half-scale test covers signed zeros,
+minimum/maximum subnormals, minimum normals, values adjacent to one, and maximum
+finite positive/negative scales and minima. Random packed groups and levels
+exercise Q4/Q5 at 129 rows and K values 256, 2560, 4096, 4352, 9216, 16384 and
+16640, including single/four-part and shared-capacity boundaries. Complete
+results match the existing embedding-decode/local-FMA reference byte for byte,
+with finite-output and guard checks. This is boundary coverage, not exhaustive
+testing of every half-scale/minimum combination.
+
+With shared input enabled, the complete OFF device image is byte-identical to
+the previous qualified shared-input source; the complete ON image matches the
+measured combined prototype. Repeated settings reproduce object, runtime and
+device-image hashes exactly. The no-shared configuration passes correctness
+tests but has no new performance claim.
+
+The ON object is linked into an isolated source runtime, again replacing only
+the GGUF device object. A fresh three-case run and independent audit verify
+another 2,298 complete byte-exact vectors, 1,149 reset pairs, 18 negative
+controls and all original IDs/EOS with unchanged frozen-HF bounds. The source
+option is numerically qualified on these cases, not enabled in deployment.
+
+## Source ordinary timing
+
+A separate original-runner ABBA/BAAB series uses the same warmup, full-generation
+checks and eight measured generations per mode as the prototype series:
+
+| Source runtime | Minimum | Median | Maximum decode tokens/s | Serial-prefill median |
+| --- | ---: | ---: | ---: | ---: |
+| Qualified shared input | 9.1207 | 11.4150 | 12.1088 | 11.5816 |
+| Shared input plus vector dequantization | 9.2093 | 9.4969 | 10.3759 | 9.1463 |
+
+The pooled median ratio is 0.83197; ABBA and BAAB ratios are 0.82445 and 0.91811.
+All eight candidate measurements are retained: 9.5177, 9.5149, 9.2478, 9.4789,
+9.4621, 10.3759, 9.6454 and 9.2093. No profiler, frequency instrumentation,
+launch blocking or competing agent work is active during ordinary timing.
+
+This unfavorable source series is not replaced by the better prototype or
+instrumented results. Device-image equality excludes an observed change in GPU
+instructions, but does not establish host-library identity or a clock-related
+cause. The 12.3928 historical ordinary prototype peak remains a peak, not a
+source deployment guarantee. The source option has not demonstrated a robust
+ordinary end-to-end gain and must remain default OFF.
+
 ## Decision
 
-Combined mode warrants source-based same-process pairing and binary-equivalence
-checks before introducing another opt-in production flag. The microbenchmarks,
-full precision checks and blocking attribution support further investigation,
-but do not justify default enablement or a stable-throughput claim. Keep the
-inconsistent attention-gate matrix and all ordinary low samples. Further work
-must reduce the packed Linear cost rather than remove checks or select only
-high-frequency runs.
+Combined mode now has same-process pairing, binary equivalence and a tested
+default-off source option. The microbenchmarks, full precision checks and
+blocking attribution support continued experiments, but the mixed ordinary
+timings do not justify default enablement or a stable-throughput claim. Keep
+the inconsistent attention-gate matrix and all ordinary low samples. Further
+work must reduce the packed Linear cost rather than remove checks or select
+only high-frequency runs.
 
 ## Evidence
 
@@ -188,5 +283,24 @@ Under ETSupport `artifacts/gguf-20261029`:
   `audit_shared_input_dequant_ordinary_v1.py`,
   `shared-input-dequant-ordinary-decision-v1.json`: original-runner ABBA/BAAB,
   all original IDs, retained lows and protected artifacts.
+- `alternating-shared-dequant-probe-v1`,
+  `build_alternating_shared_dequant_v1.py`,
+  `alternating-shared-dequant-device-audit-v1`,
+  `audit_alternating_shared_dequant_devices_v1.py`: generation-switching
+  source and independently verified device-function/metadata identity.
+- `alternating-shared-dequant-validation-v1`,
+  `alternating-shared-dequant-benchmark-v1`,
+  `audit_alternating_shared_dequant_v1.py`,
+  `alternating-shared-dequant-decision-v1.json`: exact text outputs, dispatch
+  counters, all eight pairs and read-only frequency endpoints.
+- `build_shared_dequant_source_v1.py`, `build-shared-dequant-source-cmake-v1`,
+  `build-shared-dequant-source-v1`, `validate_shared_dequant_source_v1.py`,
+  `shared-dequant-source-validation-v1`, `audit_shared_dequant_source_v1.py`,
+  `shared-dequant-source-decision-v1.json`: six source configurations, exact
+  images, finite-half boundary tests and full three-case model qualification.
+- `benchmark_shared_dequant_source_v1.py`, `shared-dequant-source-benchmark-v1`,
+  `audit_shared_dequant_source_ordinary_v1.py`,
+  `shared-dequant-source-ordinary-decision-v1.json`: retained ordinary source
+  timing, including the unfavorable series and all low samples.
 
 Stable minimum decode throughput of ten tokens/s remains unproven.
