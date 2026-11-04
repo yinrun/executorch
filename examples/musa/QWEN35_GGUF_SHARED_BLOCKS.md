@@ -264,10 +264,14 @@ All rates are tokens/s. The 512-thread source exceeds ten in every measured
 generation of this batch, with a 1.04605 unpaired median ratio to its control.
 This is not a causal speedup estimate or proof of stable deployment throughput:
 the earlier byte-identical 512-thread device prototype still has a 9.7423 low,
-and the historical ordinary peak remains 13.0393. Do not discard that batch.
+and the ordinary peak at this stage is 13.0393. Do not discard that batch.
 The added head staging does not establish a model benefit; its microbenchmark,
 precision qualification and blocking trace are recorded in
 [Q6 output-head input reuse](QWEN35_GGUF_Q6_HEAD_INPUT.md).
+
+The subsequent [Q6 projection input-reuse experiment](QWEN35_GGUF_Q6_PARTS_INPUT.md)
+raises the ordinary peak to 13.4882, with full precision and global trace
+qualification, but still retains lows below ten tokens/s.
 
 ## Decision
 
