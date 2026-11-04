@@ -249,8 +249,15 @@ load_packed_quad_block(const uint8_t* weight, int element) {
   return result;
 }
 
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
+constexpr int kSharedInputMaxElements = 4096;
+
+template <int QuantType, int Parts, bool SharedInput>
+__device__ __forceinline__ void packed_quad_decode_body(
+#else
 template <int QuantType, int Parts = 1>
 __global__ void linear_packed_quad_decode_kernel(
+#endif
     float* output,
     const float* input,
     const uint8_t* packed,
@@ -258,6 +265,24 @@ __global__ void linear_packed_quad_decode_kernel(
     int columns) {
   static_assert(QuantType == 12 || QuantType == 13);
   static_assert(Parts == 1 || Parts == 4);
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
+  extern __shared__ float4 shared_input[];
+  const int block_begin = (columns / 256) * (Parts == 1 ? 0 : blockIdx.y) / Parts;
+  if constexpr (SharedInput) {
+    const int block_end =
+        (columns / 256) * (Parts == 1 ? 1 : blockIdx.y + 1) / Parts;
+    for (int quad = threadIdx.x; quad < (block_end - block_begin) * 64;
+         quad += blockDim.x) {
+      const float4 value = load_decode_value<QuantType>(
+          reinterpret_cast<const float4*>(input) + block_begin * 64 + quad);
+      const int element_quad = quad % 64;
+      const int destination = quad / 64 * 64 + element_quad / 32 * 32 +
+          element_quad % 4 * 8 + element_quad % 32 / 4;
+      shared_input[destination] = value;
+    }
+    __syncthreads();
+  }
+#endif
   constexpr int bytes = QuantType == 12 ? 144 : 176;
   const int lane = threadIdx.x % 8;
   const int row = blockIdx.x * 16 + threadIdx.x / 8;
@@ -316,12 +341,23 @@ __global__ void linear_packed_quad_decode_kernel(
       const FloatQuad first_weight = first_scale * first_values - first_minimum;
       const FloatQuad second_weight =
           second_scale * second_values - second_minimum;
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
+      const float4 first = SharedInput
+          ? shared_input[(block - block_begin) * 64 + word * 8 + lane]
+          : load_decode_value<QuantType>(reinterpret_cast<const float4*>(
+                input + block * 256 + element + word * 4));
+      const float4 second = SharedInput
+          ? shared_input[(block - block_begin) * 64 + word * 8 + lane + 32]
+          : load_decode_value<QuantType>(reinterpret_cast<const float4*>(
+                input + block * 256 + element + word * 4 + 128));
+#else
       const float4 first =
           load_decode_value<QuantType>(reinterpret_cast<const float4*>(
               input + block * 256 + element + word * 4));
       const float4 second =
           load_decode_value<QuantType>(reinterpret_cast<const float4*>(
               input + block * 256 + element + word * 4 + 128));
+#endif
       const FloatQuad first_input = {first.x, first.y, first.z, first.w};
       const FloatQuad second_input = {second.x, second.y, second.z, second.w};
 #pragma unroll
@@ -359,6 +395,30 @@ __global__ void linear_packed_quad_decode_kernel(
   }
 #endif
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
+template <int QuantType, int Parts = 1>
+__global__ void linear_packed_quad_decode_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  packed_quad_decode_body<QuantType, Parts, false>(
+      output, input, packed, rows, columns);
+}
+
+template <int QuantType, int Parts = 1>
+__global__ void linear_shared_input_quad_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  packed_quad_decode_body<QuantType, Parts, true>(
+      output, input, packed, rows, columns);
+}
+#endif
 #endif
 
 template <int QuantType, int Width, int Parts = 1>
@@ -887,6 +947,14 @@ musaError_t launch_linear_vector_decode(
   } else if (rows >= 128 && reinterpret_cast<uintptr_t>(packed) % 16 == 0) {
 #if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE) || \
     defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
+    if (columns <= kSharedInputMaxElements) {
+      linear_shared_input_quad_kernel<QuantType>
+          <<<(rows + 15) / 16, 128, columns * sizeof(float), stream>>>(
+              output, input, packed, rows, columns);
+      return musaGetLastError();
+    }
+#endif
     linear_packed_quad_decode_kernel<QuantType>
 #else
     linear_vector_decode_kernel<QuantType, 16>
@@ -950,6 +1018,16 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
   if (quant_type == 12) {
 #if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE) || \
     defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
+    const int64_t part_columns = ((columns / 256 + 3) / 4) * 256;
+    if (part_columns <= kSharedInputMaxElements) {
+      linear_shared_input_quad_kernel<12, 4>
+          <<<dim3((rows + 15) / 16, 4), 128,
+             part_columns * sizeof(float), stream>>>(
+              output, input, packed, rows, columns);
+      return musaGetLastError();
+    }
+#endif
     linear_packed_quad_decode_kernel<12, 4>
 #else
     linear_vector_decode_kernel<12, 16, 4>

@@ -329,6 +329,12 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_conversion_flags
          -DEXECUTORCH_MUSA_GGUF_Q5_CACHED_LOADS=1)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_SHARED_INPUT
+         "Enable experimental shared activation staging for packed MUSA Q4/Q5 GEMV" OFF)
+  if(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_SHARED_INPUT=1)
+  endif()
   option(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD
          "Use experimental regrouped FP32 dot products for the Qwen3.5-4B Q6 head" OFF)
   if(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)

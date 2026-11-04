@@ -9,8 +9,9 @@ runtime. The separate Q5 cached-load and Q6 head-unroll candidates are not added
 
 The model remains Qwen3.5-4B Q4_K_M, with FP32 activations, state and
 accumulation. No TF32, requantization, MTP, vocabulary pruning, tolerance change,
-model re-export or output-check removal is used. These are isolated prototypes;
-there is not yet an integrated input-reuse CMake option or deployment change.
+model re-export or output-check removal is used. The initial measurements are
+isolated prototypes. The subsequent default-off source option has separate
+build, precision and timing evidence below; deployment defaults do not change.
 
 ## Mechanism and controls
 
@@ -130,8 +131,106 @@ both are kept. The BAAB candidate samples all exceed 11, but the complete
 series does not meet a minimum-based ten-token/s criterion. The pooled ratio
 is not claimed as a causal 10.8% speedup on this shared GPU. The 12.1618 peak
 is an ordinary full-generation observation, not a guaranteed deployment rate.
-Serial prefill is not batched prefill. Same-process full-generation pairing
-remains a useful next check before attributing a robust model-level gain.
+Serial prefill is not batched prefill. Subsequent same-process full-generation
+pairing measures this prototype separately, as described next.
+
+## Prototype same-process pairing
+
+A benchmark-only runner switches between original and transposed-input kernels
+only between synchronized complete generations. Each mode records exactly 147
+selected packet calls per step and zero calls to the other mode. The other
+kernels and output checks stay unchanged. Sequence `0110` validates 464 complete
+text outputs byte for byte against the independently qualified runtimes, with
+232 reset pairs and original IDs/EOS. The switching harness itself does not
+qualify image trajectories.
+
+Two processes use sequences `0101101001` and `1010010110`. The first two full
+generations warm each mode once; eight generations per process are measured,
+giving eight adjacent baseline/candidate pairs and eight samples per mode.
+Timing is quiet and unprofiled, with no compilation or heavy audit alongside it.
+
+| Instrumented mode | Minimum | Median | Maximum decode tokens/s |
+| --- | ---: | ---: | ---: |
+| Original input loads | 8.6997 | 10.1410 | 10.2477 |
+| Transposed shared input | 9.9738 | 11.3268 | 12.1867 |
+
+All eight pairs improve. The paired median ratio is **1.12423**, and paired
+geometric mean is **1.13279**. Ratios range from 1.10968 to 1.18922; no pair or
+low value is discarded. The minimum 9.9737555 is below ten and must not be
+rounded into a pass. The 12.1867 instrumented peak is not an ordinary-runner
+record. Independent auditing rechecks both modes' complete text outputs,
+trajectories, counts, resets, maps, protected hashes and every measured pair.
+This pairing supports further source qualification; it is not a throughput
+measurement of the subsequently integrated binary.
+
+## Guarded default-off source option
+
+For an existing MUSA build using the packed GGUF path:
+
+```sh
+cmake -S . -B <build> -DEXECUTORCH_MUSA_GGUF_SHARED_INPUT=ON
+cmake --build <build> --target aoti_cuda_shims test_musa_gguf test_musa_causal_attention -j8
+```
+
+The option defaults to **OFF** and only affects the existing packed dispatch
+enabled by `EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE` or
+`EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION`. It does not enable those options or
+change their reduction order. The measured configuration retains LOCAL_REDUCTION,
+PACKED_SCHEDULE, QUAD_ARITHMETIC, GROUPED_Q6_HEAD, SPLIT_K, MAX_ILP and fused-prefix
+attention. Q5 cached loads and the Q6 head-unroll experiment remain disabled.
+
+A common inline math body has original-input and shared-input instantiations.
+The shared path retains the original shape/type/alignment guards and limits
+dynamic activation staging to **16 KiB per block**: at most 4096 FP32 elements
+for a single part, or 4096 elements in the largest of four K partitions.
+Larger inputs use the original packet kernel rather than requesting more shared
+memory. The four-part check uses the ceiling partition size, so a 65-block K
+dimension does not slip through a 64-block budget. Every participating thread
+reaches the staging barrier before the row-tail return. No global scratch,
+weight conversion, extra kernel or per-launch device configuration is added.
+
+A fresh CMake build exercises default-OFF, ON, OFF again and ON again. Each
+state passes 17 GGUF and 15 attention tests, with the second-device test skipped.
+The byte-exact matrix test adds 16384 and 16640 columns, covering the four-part
+capacity boundary and fallback alongside the existing 4096/4352 single-part
+boundary. The Q5 in-place update/calling-stream test also adds 4096 and 4352
+columns. Offsets, partial row tiles, canaries and uneven K partitions remain
+covered. No native test or numerical condition is disabled.
+
+OFF device images reproduce the qualified original image exactly. Repeated
+OFF and ON states reproduce their object/runtime hashes, and ON includes the
+new shared-input entry points. The ON image also contains fallback kernels;
+whole-image identity to the uniform prototype is not asserted. Only this new
+GGUF device object is substituted into the protected host-runtime link for
+model validation. Fresh whole-CMake runtime coverage is native tests, not a
+full-model throughput claim for every rebuilt host object.
+
+The isolated source runtime SHA-256 is
+`fbcf3f43f2a09cb9f18d8c6a30afbf948e013becfed034310d77cb530a60c93a`.
+It passes another 2298 complete outputs, 1149 reset pairs, original IDs/EOS,
+eighteen rejected negative controls and the unchanged frozen-HF gate. Every
+output remains byte-identical to source attention alone, with the same HF
+errors reported above. Raw image encoding and HF are not rerun. Independent
+auditing rechecks the four build states, capacity guards, output/reference
+bytes, maps, protected hashes and the single-object substitution.
+
+Source timing repeats the original ordinary-runner ABBA/BAAB protocol, with
+eight samples per variant, full warmups/checks and quiet agent activity:
+
+| Source series / variant | Minimum | Median | Maximum decode tokens/s | Serial-prefill median |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline | 9.0558 | 10.4778 | 10.7499 | 10.5816 |
+| Guarded shared input | 8.7852 | 9.5085 | 12.1616 | 9.6578 |
+
+The pooled median ratio is 0.90749; ABBA and BAAB ratios are 0.97986 and
+0.89679. The final source-candidate process measures 9.7467 then 12.1616.
+These slower observations remain in the record. The source series does not
+reproduce the prototype's favorable median or prove stable ten-token/s
+throughput. Neither a causal source regression nor an external-activity/clock
+explanation is established by these separated ordinary processes. In
+particular, prototype pairing must not replace the unfavorable source timing.
+The option stays default OFF pending direct integrated-kernel pairing and
+further investigation of the low-throughput samples.
 
 ## Refreshed global profiling
 
@@ -176,14 +275,35 @@ hashes, maps, original trajectories and all 268 execution windows, recomputes
 compute unions, checks launch/synchronization counts, and rechecks the blocking
 per-kernel sums and nonoverlap. No ordinary rate is inferred from the traces.
 
+### Source-dispatch trace
+
+A separate source-runtime blocking capture covers 28 prefill and eight decode
+steps, without a full-generation warmup. An independent raw-SQLite audit verifies
+all 36 windows, the loaded source-runtime hash, original nine-ID prefix and
+147 shared-input launches per step: 75 single-part Q4, 48 four-part Q4 and
+24 Q5. There are no original packet-kernel launches for this workload; the
+capacity fallback remains covered by native boundary tests. Total kernel count
+is still 788, fused attention count eight, stream synchronizations twelve and
+async allocations/frees zero.
+
+Source blocking median total kernel time is 118.678 ms, including 99.763 ms of
+packed Linear and 18.939 ms of other kernels. Shared Q4 single-part, Q4 four-part
+and Q5 aggregate medians are 41.745, 15.895 and 11.568 ms respectively. Host
+execution is 223.512 ms and compute union 118.782 ms. This confirms dispatch and
+bounded attribution, not ordinary throughput or a causal comparison against
+the earlier prototype trace. The full nonblocking trace above belongs to the
+prototype, not this later source binary.
+
 ## Decision and evidence
 
-The transposed-input prototype merits same-process pairing and a guarded,
-default-off source implementation with fresh build-toggle, native and model
-qualification. The plain-layout and warp-broadcast variants are not selected.
-Further work must retain the small-shape regression and low ordinary samples,
-and distinguish a source build from this isolated prototype. **Stable minimum
-decode throughput of ten tokens/s remains unproven.**
+The prototype pairing supports the guarded default-off source experiment, but
+the integrated candidate's ordinary timing is still inconsistent. The plain
+layout and warp-broadcast variants are not selected. Next work should directly
+compare the integrated kernels and prototype under paired timing and collect
+evidence for the low-throughput condition without locking clocks or discarding
+samples. Keep the small-shape regression and distinguish instrumented, ordinary
+and profiled measurements. **Stable minimum decode throughput of ten tokens/s
+remains unproven.**
 
 Under ETSupport `artifacts/gguf-20261029`:
 
@@ -204,3 +324,20 @@ Under ETSupport `artifacts/gguf-20261029`:
   `audit_packed_input_reuse_profiles_v1.py`,
   `packed-input-reuse-profile-decision-v1.json`: full nonblocking and short
   blocking traces, interval/count analyses and independent raw-trace audit.
+- `build_alternating_input_reuse_v1.py`, `alternating-input-reuse-probe-v1`,
+  `alternating-input-reuse-validation-v1`, `alternating-input-reuse-benchmark-v1`,
+  `audit_alternating_input_reuse_v1.py`, `alternating-input-reuse-decision-v1.json`:
+  prototype generation switching, exact text outputs and all eight timing pairs.
+- `build_shared_input_source_v1.py`, `build-shared-input-source-cmake-v1`,
+  `build-shared-input-source-v1`, `validate_shared_input_source_v1.py`,
+  `shared-input-source-validation-v1`, `audit_shared_input_source_v1.py`,
+  `shared-input-source-decision-v1.json`: guarded source, four builds, boundary
+  tests and independent full-model/source/provenance qualification.
+- `benchmark_shared_input_source_v1.py`, `shared-input-source-benchmark-v1`,
+  `audit_shared_input_source_ordinary_v1.py`,
+  `shared-input-source-ordinary-decision-v1.json`: separate ordinary source
+  timing, original trajectories, low samples and independent audit.
+- `shared-input-source-blocking-profile-v1`,
+  `audit_shared_input_source_profile_v1.py`,
+  `shared-input-source-profile-decision-v1.json`: source-dispatch trace,
+  all 36 windows and independently checked kernel/interval counts.

@@ -322,7 +322,7 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
     const int block_bytes = quant_type == 12 ? 144
         : quant_type == 13                   ? 176
                                              : 210;
-    for (int columns : {256, 768, 2560, 4096, 4352, 9216, 12288}) {
+    for (int columns : {256, 768, 2560, 4096, 4352, 9216, 12288, 16384, 16640}) {
       for (int rows : {1, 5, 17, 127, 128, 129, 143}) {
         SCOPED_TRACE(quant_type);
         SCOPED_TRACE(columns);
@@ -1118,7 +1118,7 @@ TEST_F(MusaGgufTest, Q5DecodeObservesInPlaceUpdatesOnCallingStream) {
     auto guard = executorch::backends::cuda::CUDAStreamGuard::create(stream, 0);
     ASSERT_TRUE(guard.ok());
     for (int rows : {17, 128, 129}) {
-      for (int columns : {256, 2560}) {
+      for (int columns : {256, 2560, 4096, 4352}) {
         for (const auto& offsets :
              {std::array<int, 2>{0, 0}, {1, 1}, {16, 4}}) {
           SCOPED_TRACE(
