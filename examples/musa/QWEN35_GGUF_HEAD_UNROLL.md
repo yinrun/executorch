@@ -159,6 +159,40 @@ These ordinary measurements do not confirm an end-to-end improvement, despite
 the small favorable same-process result. The candidate remains experimental;
 no new head option or default is added on this evidence.
 
+## Bounded scheduling follow-up
+
+A separate six-configuration sweep checks whether lower register pressure or
+the opposite compiler scheduling policy improves the current grouped head.
+It compares four-row-tile default/two-block unroll with MAX_ILP on/off, and
+two-row-tile two-block unroll with MAX_ILP on/off. This is head-only timing:
+other kernels compiled under changed flags are not model-qualified and must
+not be installed through a wholesale replacement of the GGUF object.
+
+All builds finish before the twelve forward/reverse timing processes. The
+harness retains three-second alternating warmup, 100 pairs per process, full
+output buffers and canaries. All **36 complete outputs are byte-identical**,
+with **288 canaries** intact. All 1200 frequency samples read 1.4 GHz; no clock
+is requested or locked, and between-sample changes remain possible. The two
+controls reproduce the previous default and two-block complete device images.
+
+| Row tiles / unroll / MAX_ILP | Forward ratio | Reverse ratio | Temp registers |
+| --- | ---: | ---: | ---: |
+| 4 / default / on, original control | 1.000347 | 1.000181 | 110 |
+| 4 / 2 / on, existing candidate | 1.040789 | 1.039957 | 190 |
+| 4 / default / off | 0.977912 | 0.977888 | 81 |
+| 4 / 2 / off | 0.909584 | 0.909220 | 140 |
+| 2 / 2 / on | 0.900635 | 0.900129 | 116 |
+| 2 / 2 / off | 0.923446 | 0.923639 | 86 |
+
+Ratios again compare each candidate with the qualified original runtime in
+alternating event timing. All six configurations report zero local/spill bytes.
+Reducing registers does not improve this workload: every new configuration
+regresses in both orders. The existing candidate's roughly 4% head-only result
+is reproduced, but does not supersede its inconsistent end-to-end evidence.
+No new scheduling variant warrants full-model promotion. The global trace
+still prioritizes the much larger Q4/Q5 projection cost over further marginal
+head-only tuning; the minimum-ten goal remains unproven.
+
 Local evidence under ETSupport `artifacts/gguf-20261029`:
 
 - `profile_fused_prefix_source_blocking_v1.py`,
@@ -182,5 +216,8 @@ Local evidence under ETSupport `artifacts/gguf-20261029`:
 - `benchmark_q6_head_unroll_v1.py`, `q6-head-unroll-benchmark-v1`,
   `audit_q6_head_ordinary_v1.py`, `q6-head-unroll-ordinary-decision-v1.json`:
   original-runner timing, all trajectories/maps and independent raw-rate audit.
+- `q6-head-schedule-probe-v1`, `audit_q6_head_schedule_v1.py`,
+  `q6-head-schedule-decision-v1.json`: six configurations, retained regressions,
+  raw outputs/timings, resources, frequency samples and independent audit.
 
 Stable ten decode tokens/s and ordinary whole-model speedup are not established.
