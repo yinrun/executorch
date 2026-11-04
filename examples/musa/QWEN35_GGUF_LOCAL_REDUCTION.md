@@ -290,9 +290,43 @@ not an unhandled regression. The correctly configured suites all pass.
 The source kernel is relinked into the protected historical host runtime for
 model qualification. Its complete shared-library SHA-256 is identical to the
 qualified prototype, `cec93027f0c289166410d80ce1a772bd9ce4fbfd600546762dfbd8ed5852decf`.
-Fresh source-build full-model validation, ordinary timing and profiling are
-in progress; historical instrumented timings are not substituted for them.
-The default remains OFF and the 10 tokens/s goal remains unmet.
+Fresh source-build qualification is complete: all 2298 full logits match the
+qualified local-reduction prototype byte for byte, with 1149 reset pairs and
+18 negative controls. The frozen HF gate, finite checks, exact argmax and
+original IDs/EOS pass without changing tolerances. Maximum HF absolute errors
+are 0.0000307560 (text), 0.0006275177 (single image) and 0.0007100105 (multiple
+images). Exactness here is to the local-reduction prototype, not the older
+packet-scheduling baseline. HF and the raw-image frontend are not rerun.
+
+Fresh ordinary timings use the protected runner, the same Split-K PTE/PTD,
+one full warmup and two measured generations per process, with no profiler,
+launch blocking or logit dumping. All original IDs/EOS and native-only maps
+pass. The shared GPU remains unlocked; all low samples are retained.
+
+| Series | Packet baseline median | Local-first median | Local-first minimum | Local-first maximum |
+| --- | ---: | ---: | ---: | ---: |
+| ABBA | 9.1270 | 10.4265 | 10.2935 | 10.5812 |
+| BAAB | 9.2483 | 8.3959 | 8.2063 | 10.5670 |
+| Combined, eight samples each | 9.2050 | 10.3382 | 8.2063 | 10.5812 |
+
+Units are decode tokens/s. The favorable series improves 14.24%, whereas the
+reverse series regresses 9.22%; the baseline also changes substantially within
+a series. These numbers do not establish a causal 14% optimization. The earlier
+same-process paired comparison remains evidence for a modest, approximately
+1% gain, not an explanation for all cross-process variation. Neither the peak
+nor the pooled median establishes stable 10 tokens/s; the minimum-based gate
+still fails. The default remains OFF and the goal remains unmet.
+
+A separate complete-generation global capture confirms 812 kernel labels,
+147 packet-kernel labels, 12 stream synchronizations, three event records and
+eight async allocations per measured decode step. Median host execution is
+138.132 ms, compute-track union 123.806 ms, compute/copy union 124.444 ms and
+post-execution validation gap 0.850 ms. These profiled times are not ordinary
+throughput; overlapping labels and waits cannot be added. The local-first and
+original packet kernels share names, so trace labels alone do not establish
+the reduction policy: build hashes, references and the negative control do.
+An independent audit rehashes all outputs and protected artifacts and verifies
+the build, timing and trace evidence.
 
 The [metadata arithmetic and narrower-thread experiments](QWEN35_GGUF_METADATA_ARITHMETIC.md)
 are separate unpromoted investigations, not part of this source option.
@@ -337,3 +371,8 @@ ETSupport artifacts under `artifacts/gguf-20261029`:
 - `validate_local_reduction_source_v1.py`, `benchmark_local_reduction_source_v1.py`,
   `benchmark_local_reduction_source_v2.py`, `profile_global_local_reduction_source_v1.py`,
   `analyze_global_local_reduction_source_v1.py`: fresh source-build qualification chain.
+- `local-reduction-source-validation-v1`, `local-reduction-source-benchmark-v1`,
+  `local-reduction-source-benchmark-v2`, `global-local-reduction-source-profile-v1`:
+  completed source-build full-model outputs, both timing orders and global trace.
+- `audit_local_reduction_source_v1.py`, `local-reduction-source-decision-v1.json`:
+  independent source/model/timing audit, including all low-speed samples.
