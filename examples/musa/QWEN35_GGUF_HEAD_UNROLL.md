@@ -221,3 +221,7 @@ Local evidence under ETSupport `artifacts/gguf-20261029`:
   raw outputs/timings, resources, frequency samples and independent audit.
 
 Stable ten decode tokens/s and ordinary whole-model speedup are not established.
+
+The subsequent [packed-loop and packet-plane investigation](QWEN35_GGUF_PACKED_LOOP_AND_PLANES.md)
+returns to the larger Q4/Q5 projection bottleneck, retaining negative unroll
+results and testing unchanged-size layout and Q5-specific cache policies.
