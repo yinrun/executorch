@@ -9,7 +9,8 @@ namespace {
 #if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT) ||    \
     defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC) || \
     defined(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD) || \
-    defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+    defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE) || \
+    defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
 using UnsignedByteQuad = unsigned char __attribute__((ext_vector_type(4)));
 using FloatQuad = float __attribute__((ext_vector_type(4)));
 #endif
@@ -215,7 +216,8 @@ __device__ uint32_t load_packed_four(const uint8_t* address) {
   }
 }
 
-#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE) || \
+    defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
 struct PackedQuadBlock {
   uint4 metadata;
   uint4 first;
@@ -327,6 +329,16 @@ __global__ void linear_packed_quad_decode_kernel(
       }
     }
   }
+#if defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+  const FloatQuad components = (accum[0] + accum[2]) + (accum[1] + accum[3]);
+  float sum = (components[0] + components[2]) + (components[1] + components[3]);
+  for (int stride = 4; stride > 0; stride /= 2) {
+    sum += __shfl_down_sync(0xffffffff, sum, stride, 8);
+  }
+  if (lane == 0) {
+    output[part * rows + row] = sum;
+  }
+#else
 #pragma unroll
   for (int word = 0; word < 4; ++word) {
 #pragma unroll
@@ -341,6 +353,7 @@ __global__ void linear_packed_quad_decode_kernel(
     const FloatQuad sum = (accum[0] + accum[2]) + (accum[1] + accum[3]);
     output[part * rows + row] = (sum[0] + sum[2]) + (sum[1] + sum[3]);
   }
+#endif
 }
 #endif
 
@@ -868,7 +881,8 @@ musaError_t launch_linear_vector_decode(
         <<<(rows + 3) / 4, 128, 0, stream>>>(
             output, input, packed, rows, columns);
   } else if (rows >= 128 && reinterpret_cast<uintptr_t>(packed) % 16 == 0) {
-#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE) || \
+    defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
     linear_packed_quad_decode_kernel<QuantType>
 #else
     linear_vector_decode_kernel<QuantType, 16>
@@ -930,7 +944,8 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
     return musaErrorInvalidValue;
   }
   if (quant_type == 12) {
-#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE) || \
+    defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
     linear_packed_quad_decode_kernel<12, 4>
 #else
     linear_vector_decode_kernel<12, 16, 4>

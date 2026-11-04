@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -89,6 +90,74 @@ SlimTensor weight(int64_t quant_type, int64_t columns, int rows = 3) {
   write(packed, data);
   return packed;
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+std::vector<float> local_reduction_reference(
+    SlimTensor& packed,
+    const std::vector<float>& values,
+    int quant_type,
+    int rows,
+    int columns,
+    int parts) {
+  auto indices = tensor({rows}, ScalarType::Long);
+  std::vector<int64_t> row_indices(rows);
+  for (int row = 0; row < rows; ++row) {
+    row_indices[row] = row;
+  }
+  write(indices, row_indices);
+  auto weights = tensor({rows, columns});
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_embedding_out(
+          &weights, &indices, &packed, quant_type),
+      Error::Ok);
+  const auto decoded = read(weights);
+  std::vector<float> result(rows, 0);
+  for (int part = 0; part < parts; ++part) {
+    for (int row = 0; row < rows; ++row) {
+      std::array<std::array<float, 16>, 8> partial{};
+      for (int block = (columns / 256) * part / parts;
+           block < (columns / 256) * (part + 1) / parts;
+           ++block) {
+        for (int lane = 0; lane < 8; ++lane) {
+          for (int component = 0; component < 16; ++component) {
+            const int column = block * 256 + lane * 16 + component;
+            partial[lane][component] = std::fma(
+                decoded[row * columns + column],
+                values[column],
+                partial[lane][component]);
+            partial[lane][component] = std::fma(
+                decoded[row * columns + column + 128],
+                values[column + 128],
+                partial[lane][component]);
+          }
+        }
+      }
+      std::array<float, 8> sums{};
+      for (int lane = 0; lane < 8; ++lane) {
+        std::array<float, 4> components{};
+        for (int component = 0; component < 4; ++component) {
+          components[component] =
+              (partial[lane][component] + partial[lane][component + 8]) +
+              (partial[lane][component + 4] + partial[lane][component + 12]);
+        }
+        sums[lane] =
+            (components[0] + components[2]) + (components[1] + components[3]);
+      }
+      for (int stride = 4; stride > 0; stride /= 2) {
+        for (int lane = 0; lane + stride < 8; ++lane) {
+          sums[lane] += sums[lane + stride];
+        }
+      }
+      if (part == 0) {
+        result[row] = sums[0];
+      } else {
+        result[row] += sums[0];
+      }
+    }
+  }
+  return result;
+}
+#endif
 
 #if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
 std::vector<float> split_reference(
@@ -295,6 +364,18 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
             ? split_reference(data, values, quant_type, rows, columns)
             : std::vector<float>{};
 #endif
+#if defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+        int local_parts = 1;
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+        if (quant_type == 12 && columns >= 4096) {
+          local_parts = 4;
+        }
+#endif
+        const auto local_values = quant_type != 14 && rows >= 128
+            ? local_reduction_reference(
+                  reference_packed, values, quant_type, rows, columns, local_parts)
+            : std::vector<float>{};
+#endif
         values.resize(columns);
         for (int packed_offset : {0, 1, 2, 4, 16}) {
           auto owner = tensor({rows * row_bytes + 16}, ScalarType::Byte);
@@ -320,6 +401,12 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
             if (!split_values.empty() && packed_offset % 16 == 0 &&
                 input_offset % 4 == 0) {
               expected_output = split_values.data();
+            }
+#endif
+#if defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+            if (!local_values.empty() && packed_offset % 16 == 0 &&
+                input_offset % 4 == 0) {
+              expected_output = local_values.data();
             }
 #endif
             for (int row = 0; row < rows; ++row) {

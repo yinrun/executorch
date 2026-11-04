@@ -5,8 +5,8 @@
 An isolated local-first reduction prototype passes the complete frozen-HF
 model gate. Separate-process timing is inconsistent; the subsequent
 same-process comparison below supports a small, approximately one-percent
-benefit, not stable 10 tokens/s. It is not integrated into default or opt-in
-production dispatch. The previous
+benefit, not stable 10 tokens/s. An independent default-OFF source option is
+now available as described below. The previous
 [packed scheduling source build](QWEN35_GGUF_PACKED_SCHEDULE.md) remains intact.
 The 10 tokens/s goal is not accepted from one favorable series or a peak.
 
@@ -243,6 +243,60 @@ All builds report zero local/spill bytes, and a few fewer registers do not
 translate into a broad measured gain. No model re-export, full-model
 qualification or production adoption is performed for this rejected family.
 
+## Opt-in source integration
+
+For an already configured MUSA build:
+
+```sh
+cmake -S . -B <build> -DEXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION=ON
+cmake --build <build> --target aoti_cuda_shims test_musa_gguf test_musa_causal_attention -j8
+```
+
+This option selects the packet kernel with local-first reduction at the
+existing aligned, single-vector Q4/Q5 wide dispatch and eligible Q4 partial
+dispatch. It does not enable Split-K itself. PACKED_SCHEDULE, QUAD_ARITHMETIC
+and SPLIT_K may be OFF independently; the measured configuration retains
+these options, grouped Q6 head and MAX_ILP. If both scheduling and local
+reduction are enabled, local-first reduction takes precedence. Disabling
+local reduction restores whichever prior dispatch the other options select.
+
+There is no new host API, operator schema, scratch allocation, mutable
+selector or caller-owned-output ABI. Unlike the instrumentation above, the
+production choice is compile-time only. Q6, batched and unaligned fallbacks,
+stream handling and existing input/output validation remain unchanged.
+No re-export is needed for the existing caller-owned Split-K model.
+
+Five fresh CMake configurations pass both native suites: local reduction OFF,
+ON, OFF again, ON with PACKED_SCHEDULE/QUAD_ARITHMETIC/SPLIT_K OFF, and ON again
+with those options restored. Repeated ON/OFF objects reproduce exactly; OFF
+also reproduces the qualified packet-scheduling kernel object byte for byte.
+The standalone configuration still retains grouped Q6 head and MAX_ILP; it is
+not a test with every other experimental option disabled. The attention
+suite retains its existing unavailable-second-device skip.
+
+The offset/tail/bit-plane matrix retains strict byte comparisons. For selected
+local-first cases, an independent reference dequantizes through the embedding
+path, then uses host FP32 `std::fma` and explicit component/subgroup/partition
+trees. Other cases keep the original generic/Split-K reference. This is unit
+test reference arithmetic, not CPU model inference or a timing baseline.
+Existing double-precision partial checks, canaries and stream/lifetime tests
+remain. No tolerance is widened to accommodate the new reduction.
+
+As a negative control, the ON reference test runs against a separately saved
+OFF runtime and fails on the byte comparison as intended; loader diagnostics
+verify the OFF library. Its retained failure is deliberate oracle coverage,
+not an unhandled regression. The correctly configured suites all pass.
+
+The source kernel is relinked into the protected historical host runtime for
+model qualification. Its complete shared-library SHA-256 is identical to the
+qualified prototype, `cec93027f0c289166410d80ce1a772bd9ce4fbfd600546762dfbd8ed5852decf`.
+Fresh source-build full-model validation, ordinary timing and profiling are
+in progress; historical instrumented timings are not substituted for them.
+The default remains OFF and the 10 tokens/s goal remains unmet.
+
+The [metadata arithmetic and narrower-thread experiments](QWEN35_GGUF_METADATA_ARITHMETIC.md)
+are separate unpromoted investigations, not part of this source option.
+
 ## Local evidence
 
 ETSupport artifacts under `artifacts/gguf-20261029`:
@@ -277,3 +331,9 @@ ETSupport artifacts under `artifacts/gguf-20261029`:
 - `fixed-shape-packed-probe-v1`, `audit_fixed_shape_packed_v1.py`,
   `fixed-shape-packed-decision-v1.json`: five builds, three distinct libraries,
   both microbenchmark orders and independent rejection/precision evidence.
+- `build_local_reduction_source_v1.py`, `build-local-reduction-source-cmake-v1`,
+  `build-local-reduction-source-v1`: source integration, five configurations,
+  strict-reference negative control and protected-host relink.
+- `validate_local_reduction_source_v1.py`, `benchmark_local_reduction_source_v1.py`,
+  `benchmark_local_reduction_source_v2.py`, `profile_global_local_reduction_source_v1.py`,
+  `analyze_global_local_reduction_source_v1.py`: fresh source-build qualification chain.

@@ -317,6 +317,12 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_conversion_flags
          -DEXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE=1)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION
+         "Enable local-first FP32 reduction for aligned MUSA Q4/Q5 GEMV" OFF)
+  if(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION=1)
+  endif()
   option(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD
          "Use experimental regrouped FP32 dot products for the Qwen3.5-4B Q6 head" OFF)
   if(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
@@ -623,6 +629,9 @@ if(BUILD_TESTING)
     endforeach()
     if(EXECUTORCH_MUSA_GGUF_SPLIT_K)
       target_compile_definitions(test_musa_gguf PRIVATE EXECUTORCH_MUSA_GGUF_SPLIT_K=1)
+    endif()
+    if(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
+      target_compile_definitions(test_musa_gguf PRIVATE EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION=1)
     endif()
     target_link_libraries(test_musa_device c10)
     target_link_libraries(test_musa_storage ${CMAKE_DL_LIBS})
