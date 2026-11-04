@@ -267,3 +267,8 @@ Under ETSupport `artifacts/gguf-20261029`:
 
 No stable ten-token/s deployment is established here. Microbenchmarks and a
 favorable instrumented series are not substitutes for the ordinary timing gate.
+
+The subsequent [input-reuse investigation](QWEN35_GGUF_INPUT_REUSE.md) tests
+per-block shared activation staging and warp broadcasts. Its transposed-shared
+prototype passes complete model qualification and records an 11.0429 ordinary
+decode median, but retains an 8.8133 low and is not a stable-ten deployment.
