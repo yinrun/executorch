@@ -332,6 +332,8 @@ The [metadata arithmetic and narrower-thread experiments](QWEN35_GGUF_METADATA_A
 are separate unpromoted investigations, not part of this source option.
 The subsequent [dequantization FMA and Q6 reduction probes](QWEN35_GGUF_INSTRUCTION_FOLLOWUP.md)
 also remain unpromoted; smaller instruction counts do not establish model gains.
+The [stream-priority and telemetry investigation](QWEN35_GGUF_STREAM_PRIORITY.md)
+verifies actual stream selection but finds no useful scheduling speedup.
 
 ## Local evidence
 
