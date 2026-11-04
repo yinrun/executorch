@@ -146,16 +146,46 @@ PTE/PTD. This scheduling option does not itself enable those other options.
 A fresh CMake build passes both GGUF and attention suites in five states:
 default OFF, ON, OFF again, ON with QUAD_ARITHMETIC/SPLIT_K OFF, and ON again
 with those two options restored. The repeated ON objects are identical,
-as are the repeated OFF objects; ON differs from OFF. The native regression
+as are the repeated OFF objects; ON differs from OFF. The default OFF object
+also matches the protected qualified Split-K kernel object byte for byte.
+The native regression
 matrix now also covers 4352 columns and a 143-row, fifteen-row tail, including
 the existing offset/alignment and packed-bit-plane checks. The attention
 suite retains its existing second-device skip on this single-device system.
 
 The source kernel object is also linked into the protected host runtime
 for controlled full-model validation and timing. This is not a throughput
-measurement of every newly compiled CMake host object. Full-model source
-qualification and the fresh source-build benchmark are in progress; the
-prototype numbers above must not be substituted for those results.
+measurement of every newly compiled CMake host object. All 2298 full logits
+match the qualified caller-owned Split-K runtime byte for byte; the unchanged
+HF gate, original IDs/EOS, 1149 reset pairs and 18 negative controls pass.
+Independent auditing rehashes every output and the protected build inputs.
+The source runtime SHA-256 is
+`fe9cfd69f2c221ef45e7a7fad08b6d1dfbf8a3ee6fb4071adbcf4bbfc4dc4028`.
+
+Fresh ordinary timing uses the same workload and comparison rules as above:
+
+| Source-build series | Baseline median | Candidate median | Median change |
+| --- | ---: | ---: | ---: |
+| ABBA | 9.4932 | 9.7156 | +2.3430% |
+| BAAB | 7.3540 | 7.2729 | -1.1027% |
+| Pooled, eight samples each | 8.3758 | 8.5095 | +1.5956% |
+
+Units are decode tokens/s. The candidate range is 6.8870--9.7918, versus
+7.2634--9.8398 for the control. All samples are retained. Both sides slow
+substantially in the second series, and the improvement changes sign.
+The pooled median falls between two separated timing regimes; it does not
+establish stable performance or a reproducible improvement. The first
+series' 9.7156 median is not sustained across both orders. No particular
+desktop process or clock change is established as the cause. The option
+remains default OFF and the 10 tokens/s goal remains unmet.
+
+A separate source-build global trace confirms 812 kernel labels per step,
+147 selected packet/quad launches, twelve stream synchronizations, three
+event records and eight async allocations. Across 88 measured decode steps,
+median host execution is 150.178 ms, compute interval union 123.945 ms,
+compute-plus-copy union 125.020 ms and post-execution validation gap
+1.316 ms. These are profiled intervals, not ordinary performance, and
+overlapping async labels still cannot identify individual kernel costs.
 
 ## Local evidence
 
@@ -184,3 +214,13 @@ ETSupport artifacts under `artifacts/gguf-20261029`:
 - `build_packed_schedule_source_v1.py`, `build-packed-schedule-source-cmake-v1`,
   `build-packed-schedule-source-v1`: integrated kernel source, five CMake
   configurations and controlled kernel-object replacement in the runtime.
+- `validate_packed_schedule_source_v1.py`, `packed-schedule-source-validation-v1`:
+  complete source-build model gate and original full-logit files.
+- `benchmark_packed_schedule_source_v1.py`, `benchmark_packed_schedule_source_v2.py`,
+  `packed-schedule-source-benchmark-v1/v2`: both ordinary timing orders,
+  including all slower reverse-series observations.
+- `profile_global_packed_schedule_source_v1.py`,
+  `analyze_global_packed_schedule_source_v1.py`,
+  `global-packed-schedule-source-profile-v1`: separate complete global trace.
+- `audit_packed_schedule_source_v1.py`, `packed-schedule-source-decision-v1.json`:
+  independent qualification, build-toggle checks and timing aggregation.
