@@ -98,6 +98,9 @@ not a directly measured bandwidth attribution. Keep the compressed path;
 future probes should target its critical path without assuming expansion
 or fewer launches automatically improves throughput.
 
+The [compressed GEMV scheduling follow-up](QWEN35_GGUF_PACKED_SCHEDULE.md)
+tests block-ahead preloading without expanding the weights.
+
 ## Local evidence
 
 ETSupport artifacts under `artifacts/gguf-20261029`:
