@@ -268,7 +268,8 @@ static_assert(
     kSharedInputBlockThreads == 512 || kSharedInputBlockThreads == 1024);
 constexpr int kSharedInputBlockRows = kSharedInputBlockThreads / 8;
 
-template <int QuantType, int Parts, bool SharedInput>
+template <int QuantType, int Parts, bool SharedInput,
+          int BlockThreads = kSharedInputBlockThreads>
 __device__ __forceinline__ void packed_quad_decode_body(
 #else
 template <int QuantType, int Parts = 1>
@@ -281,6 +282,9 @@ __global__ void linear_packed_quad_decode_kernel(
     int columns) {
   static_assert(QuantType == 12 || QuantType == 13);
   static_assert(Parts == 1 || Parts == 4);
+  static_assert(
+      BlockThreads == 128 || BlockThreads == 256 || BlockThreads == 512 ||
+      BlockThreads == 1024);
 #if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
   extern __shared__ float4 shared_input[];
   const int block_begin = (columns / 256) * (Parts == 1 ? 0 : blockIdx.y) / Parts;
@@ -303,7 +307,7 @@ __global__ void linear_packed_quad_decode_kernel(
   const int lane = threadIdx.x % 8;
 #if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
   const int row =
-      blockIdx.x * (SharedInput ? kSharedInputBlockRows : 16) + threadIdx.x / 8;
+      blockIdx.x * (SharedInput ? BlockThreads / 8 : 16) + threadIdx.x / 8;
 #else
   const int row = blockIdx.x * 16 + threadIdx.x / 8;
 #endif
@@ -462,6 +466,88 @@ __global__ void linear_shared_input_quad_kernel(
   packed_quad_decode_body<QuantType, Parts, true>(
       output, input, packed, rows, columns);
 }
+
+template <int BlockThreads, int QuantType, int Parts = 1>
+__global__ void linear_shape_shared_input_quad_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  packed_quad_decode_body<QuantType, Parts, true, BlockThreads>(
+      output, input, packed, rows, columns);
+}
+
+template <int BlockThreads, int QuantType, int Parts>
+musaError_t launch_shape_shared_input_quad(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns,
+    int64_t shared_columns,
+    musaStream_t stream) {
+  constexpr int block_rows = BlockThreads / 8;
+  if constexpr (Parts == 1) {
+    if constexpr (BlockThreads == kSharedInputBlockThreads) {
+      linear_shared_input_quad_kernel<QuantType, Parts>
+          <<<(rows + block_rows - 1) / block_rows,
+             BlockThreads,
+             shared_columns * sizeof(float),
+             stream>>>(output, input, packed, rows, columns);
+    } else {
+      linear_shape_shared_input_quad_kernel<BlockThreads, QuantType, Parts>
+          <<<(rows + BlockThreads / 8 - 1) / (BlockThreads / 8),
+             BlockThreads,
+             shared_columns * sizeof(float),
+             stream>>>(output, input, packed, rows, columns);
+    }
+  } else {
+    if constexpr (BlockThreads == kSharedInputBlockThreads) {
+      linear_shared_input_quad_kernel<QuantType, Parts>
+          <<<dim3((rows + block_rows - 1) / block_rows, Parts),
+             BlockThreads,
+             shared_columns * sizeof(float),
+             stream>>>(output, input, packed, rows, columns);
+    } else {
+      linear_shape_shared_input_quad_kernel<BlockThreads, QuantType, Parts>
+          <<<dim3((rows + block_rows - 1) / block_rows, Parts),
+             BlockThreads,
+             shared_columns * sizeof(float),
+             stream>>>(output, input, packed, rows, columns);
+    }
+  }
+  return musaGetLastError();
+}
+
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_SHAPE_SPECIALIZED)
+template <int QuantType, int Parts>
+musaError_t launch_shape_specialized_shared_input_quad(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns,
+    int64_t shared_columns,
+    musaStream_t stream) {
+  if constexpr (QuantType == 12) {
+    if (rows == 1024 && columns == 2560) {
+      return launch_shape_shared_input_quad<256, QuantType, Parts>(
+          output, input, packed, rows, columns, shared_columns, stream);
+    }
+    if (rows == 2560 && columns == 4096) {
+      constexpr int block_threads = 256;
+      if constexpr (Parts == 4) {
+        return launch_shape_shared_input_quad<block_threads, QuantType, Parts>(
+            output, input, packed, rows, columns, shared_columns, stream);
+      }
+    }
+  }
+  return launch_shape_shared_input_quad<
+      kSharedInputBlockThreads, QuantType, Parts>(
+      output, input, packed, rows, columns, shared_columns, stream);
+}
+#endif
 #endif
 #endif
 
@@ -1052,11 +1138,16 @@ musaError_t launch_linear_vector_decode(
     defined(EXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION)
 #if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
     if (columns <= kSharedInputMaxElements) {
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_SHAPE_SPECIALIZED)
+      return launch_shape_specialized_shared_input_quad<QuantType, 1>(
+          output, input, packed, rows, columns, columns, stream);
+#else
       linear_shared_input_quad_kernel<QuantType>
           <<<(rows + kSharedInputBlockRows - 1) / kSharedInputBlockRows,
              kSharedInputBlockThreads, columns * sizeof(float), stream>>>(
               output, input, packed, rows, columns);
       return musaGetLastError();
+#endif
     }
 #endif
     linear_packed_quad_decode_kernel<QuantType>
@@ -1125,6 +1216,11 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
 #if defined(EXECUTORCH_MUSA_GGUF_SHARED_INPUT)
     const int64_t part_columns = ((columns / 256 + 3) / 4) * 256;
     if (part_columns <= kSharedInputMaxElements) {
+#if defined(EXECUTORCH_MUSA_GGUF_SHARED_SHAPE_SPECIALIZED)
+      return launch_shape_specialized_shared_input_quad<12, 4>(
+          output, input, packed, static_cast<int>(rows),
+          static_cast<int>(columns), part_columns, stream);
+#else
       linear_shared_input_quad_kernel<12, 4>
           <<<dim3(
                  (rows + kSharedInputBlockRows - 1) / kSharedInputBlockRows, 4),
@@ -1132,6 +1228,7 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
              part_columns * sizeof(float),
              stream>>>(output, input, packed, rows, columns);
       return musaGetLastError();
+#endif
     }
 #endif
     linear_packed_quad_decode_kernel<12, 4>

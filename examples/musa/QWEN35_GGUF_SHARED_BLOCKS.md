@@ -340,3 +340,24 @@ the historical 128/256/512 tables above are not retroactively changed. The
 1024-thread source candidate is combined with Q6 256-thread staging in
 [Q6 projection input reuse](QWEN35_GGUF_Q6_PARTS_INPUT.md), where its ordinary
 minimum is reported separately.
+
+## Current shape-specialized follow-up
+
+The current source follow-up is guarded by the default-OFF CMake option
+`EXECUTORCH_MUSA_GGUF_SHARED_SHAPE_SPECIALIZED`. It requires
+`EXECUTORCH_MUSA_GGUF_SHARED_INPUT` and keeps the selected global block size as
+the fallback. On M1000 MP22 with `EXECUTORCH_MUSA_GGUF_SHARED_THREADS=1024`,
+the qualified shape mapping uses 256 threads for `1024x2560` single-part Q4
+and `2560x4096` four-part Q4; other tested Q4/Q5 shapes retain the original
+1024-thread kernel. The 512-thread `4096x2560` choice and broad wrapper-based
+1024 dispatch were rejected after global trace review because they did not
+improve end-to-end attribution.
+
+The final candidate passes 18 GGUF native tests, 15 causal-attention tests
+(one two-device test is skipped on this host), and preserves the original
+full-model token trajectory. Its audited nonblocking trace contains 232
+windows with 788 kernel records per window. Compared with the qualified
+1024-thread source trace, measured Decode host-window and compute-union medians
+decrease from 116.6543/102.4701 ms to 115.9276/101.7774 ms. These are profile
+intervals, not a causal ordinary-throughput claim; ordinary results remain
+frequency- and process-order-sensitive.
