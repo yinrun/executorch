@@ -133,6 +133,10 @@ This narrows the integer-dot approach without changing numerical tolerances,
 removing output checks, replacing weights, enabling TF32, or claiming a new
 end-to-end speed record. The qualified runtime remains untouched.
 
+The subsequent [integer matrix-instruction experiment](QWEN35_GGUF_INTEGER_MMA.md)
+checks collective signed-int8 execution, a specific code-generation hazard,
+and the cost of computing lossless input planes with matrix instructions.
+
 Under ETSupport `artifacts/gguf-20261029`:
 
 - `residual-dot-probe-v1/v2`: codecs, independent tests, Q4/Q5 kernels,
