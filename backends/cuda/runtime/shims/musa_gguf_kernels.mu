@@ -828,8 +828,15 @@ __global__ void linear_q6_tiled_decode_kernel(
   }
 }
 
+#if defined(EXECUTORCH_MUSA_GGUF_Q6_SHARED_INPUT)
+constexpr int kQ6SharedInputMaxElements = 4096;
+
+template <int Tile, int Parts, bool SharedInput>
+__device__ __forceinline__ void predecoded_q6_decode_body(
+#else
 template <int Tile, int Parts = 1>
 __global__ void linear_predecoded_q6_decode_kernel(
+#endif
     float* output,
     const float* input,
     const uint8_t* packed,
@@ -840,7 +847,23 @@ __global__ void linear_predecoded_q6_decode_kernel(
   constexpr int lanes = 128 / Width;
   const int part = Parts == 1 ? 0 : blockIdx.y;
   const int lane = threadIdx.x % lanes;
-  const int row = blockIdx.x * Width * Tile + threadIdx.x / lanes;
+#if defined(EXECUTORCH_MUSA_GGUF_Q6_SHARED_INPUT)
+  constexpr int block_rows = SharedInput ? 8 : Width;
+  extern __shared__ float4 shared_input[];
+  const int block_begin = (columns / 256) * blockIdx.y / Parts;
+  if constexpr (SharedInput) {
+    const int block_end = (columns / 256) * (blockIdx.y + 1) / Parts;
+    for (int quad = threadIdx.x; quad < (block_end - block_begin) * 64;
+         quad += blockDim.x) {
+      shared_input[quad] = __ldg(
+          reinterpret_cast<const float4*>(input) + block_begin * 64 + quad);
+    }
+    __syncthreads();
+  }
+#else
+  constexpr int block_rows = Width;
+#endif
+  const int row = blockIdx.x * block_rows * Tile + threadIdx.x / lanes;
   if (row >= rows) {
     return;
   }
@@ -853,10 +876,21 @@ __global__ void linear_predecoded_q6_decode_kernel(
     float second_inputs[Width];
 #pragma unroll
     for (int word = 0; word < Width / 4; ++word) {
+#if defined(EXECUTORCH_MUSA_GGUF_Q6_SHARED_INPUT)
+      const float4 first = SharedInput
+          ? shared_input[(block - block_begin) * 64 + element / 4 + word]
+          : __ldg(reinterpret_cast<const float4*>(
+                input + block * 256 + element + word * 4));
+      const float4 second = SharedInput
+          ? shared_input[(block - block_begin) * 64 + element / 4 + 32 + word]
+          : __ldg(reinterpret_cast<const float4*>(
+                input + block * 256 + element + 128 + word * 4));
+#else
       const float4 first = __ldg(reinterpret_cast<const float4*>(
           input + block * 256 + element + word * 4));
       const float4 second = __ldg(reinterpret_cast<const float4*>(
           input + block * 256 + element + 128 + word * 4));
+#endif
       first_inputs[word * 4] = first.x;
       first_inputs[word * 4 + 1] = first.y;
       first_inputs[word * 4 + 2] = first.z;
@@ -868,9 +902,10 @@ __global__ void linear_predecoded_q6_decode_kernel(
     }
 #pragma unroll
     for (int tile = 0; tile < Tile; ++tile) {
-      if (row + tile * Width < rows) {
+      if (row + tile * block_rows < rows) {
         const auto* weight = packed +
-            (int64_t(row + tile * Width) * (columns / 256) + block) * bytes;
+            (int64_t(row + tile * block_rows) * (columns / 256) + block) *
+                bytes;
         const float first_scale =
             __ldg(reinterpret_cast<const float*>(weight + 256) + element / 16);
         const float second_scale = __ldg(
@@ -943,7 +978,7 @@ __global__ void linear_predecoded_q6_decode_kernel(
             0xffffffff, partial[tile][component], stride, lanes);
       }
     }
-    if (lane == 0 && row + tile * Width < rows) {
+    if (lane == 0 && row + tile * block_rows < rows) {
 #pragma unroll
       for (int stride = Width / 2; stride > 0; stride /= 2) {
 #pragma unroll
@@ -951,10 +986,34 @@ __global__ void linear_predecoded_q6_decode_kernel(
           partial[tile][component] += partial[tile][component + stride];
         }
       }
-      output[part * rows + row + tile * Width] = partial[tile][0];
+      output[part * rows + row + tile * block_rows] = partial[tile][0];
     }
   }
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_Q6_SHARED_INPUT)
+template <int Tile, int Parts = 1>
+__global__ void linear_predecoded_q6_decode_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  predecoded_q6_decode_body<Tile, Parts, false>(
+      output, input, packed, rows, columns);
+}
+
+template <int Tile, int Parts>
+__global__ void shared_predecoded_q6_decode_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  predecoded_q6_decode_body<Tile, Parts, true>(
+      output, input, packed, rows, columns);
+}
+#endif
 
 #if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
 __global__ void
@@ -1080,6 +1139,16 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
         <<<dim3((rows + 15) / 16, 4), 128, 0, stream>>>(
             output, input, packed, rows, columns);
   } else {
+#if defined(EXECUTORCH_MUSA_GGUF_Q6_SHARED_INPUT)
+    const int64_t part_columns = ((columns / 256 + 3) / 4) * 256;
+    if (part_columns <= kQ6SharedInputMaxElements) {
+      shared_predecoded_q6_decode_kernel<2, 4>
+          <<<dim3((rows + 15) / 16, 4), 256,
+             part_columns * sizeof(float), stream>>>(
+              output, input, packed, rows, columns);
+      return musaGetLastError();
+    }
+#endif
     linear_predecoded_q6_decode_kernel<2, 4>
         <<<dim3((rows + 7) / 8, 4), 128, 0, stream>>>(
             output, input, packed, rows, columns);

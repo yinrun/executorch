@@ -852,6 +852,9 @@ TEST_F(MusaGgufTest, LongKProjectionsCoverPartitionsTailsOffsetsAndFallbacks) {
           {129, 4096, 1, 0},
           {257, 4352, 1, 0},
           {129, 9216, 1, 0},
+          {161, 9216, 1, 0},
+          {129, 16384, 1, 0},
+          {129, 16640, 1, 0},
           {127, 4096, 1, 0},
           {129, 4096, 2, 0},
           {129, 4096, 1, 1}}) {

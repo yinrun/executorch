@@ -162,9 +162,93 @@ In particular, 9.9536 is below ten and must not be rounded into a pass.
 The 13.4882 observation is a new historical ordinary-model peak. The 512-thread
 Q6 candidate also has the higher batch median, while 256 has the higher minimum
 and more consistent microbenchmark gain. Neither is yet a stable-ten result.
-Retain both isolated candidates for same-process full-model pairing before
-selecting a source option; do not select from the peak alone. No default or
-installed deployment is changed by this experiment.
+Both isolated candidates are retained for the same-process full-model pairing
+below; selection must not use the peak alone. No default or installed
+deployment is changed by this experiment.
+
+## Same-process comparison
+
+Each candidate has a separate instrumented runtime that switches between the
+qualified 512-thread Q4/Q5 source path and the candidate only at synchronized
+generation boundaries. Q4/Q5, the Q6 head, single-part Q6 and all other kernels
+are unchanged. The calling thread's counters reset per generation and verify
+exactly sixteen Q6-part calls per step in the requested mode. Original shape,
+type, alignment, partition-capacity and stream guards remain in place.
+
+Each instrumented runtime's complete device image is byte-identical to its
+previously qualified candidate image. Independent ELF auditing additionally
+verifies all fifty baseline device-function bodies and twenty-six baseline
+kernel metadata records. No whole-host-binary identity is claimed. Each pair
+has 464 fresh complete byte-exact text outputs and 232 reset pairs against
+both independently qualified runtimes; instrumented image trajectories are
+not rerun. The isolated candidates' earlier three-case qualification remains
+separate evidence.
+
+Two processes per candidate use opposite mode sequences, one full warmup per
+mode per process, and eight measured generations per mode. All eight adjacent
+pairs, original IDs/EOS and low observations are independently audited.
+
+| Instrumented pair | Baseline min / median / max | Candidate min / median / max | Paired median ratio | Paired geometric mean | Improved pairs |
+| --- | --- | --- | ---: | ---: | ---: |
+| Q6 256 | 12.1868 / 12.2883 / 12.3879 | 12.3330 / 12.6137 / 13.4815 | 1.02862 | 1.03321 | 8 / 8 |
+| Q6 512 | 9.9151 / 12.1992 / 12.3357 | 9.5890 / 12.6157 / 13.5027 | 1.03147 | 1.03002 | 6 / 8 |
+
+Rates are tokens/s. The 256 candidate's weakest pair is 1.00254; the 512
+candidate's two losing pairs, 0.95974 and 0.96712, are retained. These separate
+pairing experiments are not a directly paired 256-versus-512 comparison.
+Select 256 for a default-OFF source option based on the combined micro,
+ordinary-minimum and paired-consistency evidence, not on the highest peak.
+
+The runner reads frequency endpoints outside each step timer. Its measured
+sampling-time fraction of the full loop has medians 0.1649% and 0.1639% in the
+two experiments; cadence effects are not excluded. The 256 baseline has all
+704 decode observations at 1400-to-1400 MHz; its candidate has 701 such samples
+and three observations involving 1290 MHz. The 512 pair includes 730 MHz
+observations and transitions in both modes. No samples are filtered and no
+frequency causation or constant-intra-step-frequency claim is made.
+
+The instrumented 13.5027 peak is not a new ordinary-runner record. Likewise,
+the 256 instrumented minimum above twelve does not erase its 9.9536 ordinary
+low. Stable minimum ordinary decode throughput of ten remains unproven.
+
+## Default-OFF source option
+
+`EXECUTORCH_MUSA_GGUF_Q6_SHARED_INPUT` enables the selected 256-thread,
+sixteen-output-row staging path for eligible four-part prepared-Q6 calls.
+It defaults OFF and does not enable split-K, Q4/Q5 input staging or vector
+dequantization. The original 4096-float capacity bound, barrier-before-row-guard,
+calling stream and all dispatch validation are preserved. Larger partitions
+continue using the original 128-thread Q6 kernel. The output head and
+single-part Q6 path are unchanged. A shared inline body avoids maintaining
+duplicate arithmetic implementations.
+
+The first source refactor passed native tests but failed the exact-device-image
+gate: staging offsets computed from signed `part` changed code generation
+relative to the prototype's `blockIdx.y` expressions. All fifty original
+functions still matched, but the new kernel was 2628 rather than 2636 bytes.
+No prior performance evidence was promoted for that image. Restoring the
+prototype's unsigned partition expressions reproduces its complete device
+image byte for byte. The failed v1 build and source snapshots are retained.
+
+A fresh v2 CMake build verifies four states: omitted/default OFF, ON, OFF,
+and restored ON. Each passes 18 GGUF and 15 attention tests, with the unavailable
+second-device test skipped. OFF images match the qualified 512-thread Q4/Q5
+source; ON images match the paired and ordinary-tested Q6-256 prototype.
+Repeated settings reproduce object, runtime and device-image hashes. Only the
+GGUF device object is then substituted into an isolated source runtime.
+
+Fresh independent three-case source qualification verifies 2298 complete
+byte-exact outputs, 1149 reset pairs, eighteen negative controls, original
+IDs/EOS and the same frozen-HF errors listed above. An additional native test
+expansion covers row 161 at K=9216, the exact staging-capacity boundary K=16384
+and the first overflow/fallback K=16640 for quant types 12, 13 and 114. Both OFF
+and ON states pass all eighteen GGUF tests with those shapes; the corresponding
+runtime and kernel hashes remain unchanged.
+
+This is a selectable source implementation, not a default deployment change
+or a fresh source-runtime ordinary-throughput result. Its device-image identity
+links it to the existing candidate measurements, but the prior ordinary low
+of 9.9536 tokens/s remains in acceptance. Stable minimum ten is not claimed.
 
 ## Evidence
 
@@ -196,6 +280,31 @@ Under ETSupport `artifacts/gguf-20261029`:
   `audit_q6_parts_staging_ordinary_v1.py`,
   `q6-parts-staging-ordinary-decision-v1.json`: all ordinary timings, warmups,
   original IDs/EOS, runtime mappings and protected inputs.
+- `build_alternating_q6_parts_{256,512}_v1.py`,
+  `alternating-q6-parts-{256,512}-probe-v1`,
+  `build-alternating-q6-parts-{256,512}-v1`,
+  `audit_q6_parts_pair_devices_v1.py`,
+  `alternating-q6-parts-{256,512}-device-audit-v1`: both instrumented builds,
+  exact candidate images and original function/metadata identity.
+- `alternating_q6_parts_{256,512}_common.py`,
+  `validate_alternating_q6_parts_{256,512}_v1.py`,
+  `alternating-q6-parts-{256,512}-validation-v1`,
+  `benchmark_alternating_q6_parts_{256,512}_v1.py`,
+  `alternating-q6-parts-{256,512}-benchmark-v1`,
+  `audit_alternating_q6_parts_{256,512}_v1.py`,
+  `alternating-q6-parts-{256,512}-decision-v1.json`: complete text precision,
+  mode counters, every paired timing and all frequency observations.
+- `build_q6_parts_source_v1.py`, `build-q6-parts-source-cmake-v1`,
+  `q6-parts-source-review-v1`: retained first image-gate failure, original
+  source snapshots and the exact-image unsigned-partition correction check.
+- `build_q6_parts_source_v2.py`, `build-q6-parts-source-cmake-v2`,
+  `build-q6-parts-source-v2`, `validate_q6_parts_source_v2.py`,
+  `q6-parts-source-validation-v2`, `audit_q6_parts_source_runtime_v2.py`,
+  `q6-parts-source-runtime-decision-v2.json`: four source build states,
+  exact device images and independent three-case source-runtime qualification.
+- `validate_q6_parts_source_boundaries_v1.py`, `q6-parts-source-boundaries-v1`:
+  additional row-tail, exact-capacity and capacity-overflow native tests in
+  both OFF and ON states with unchanged qualified runtime hashes.
 
 These are kernel-level measurements, not ordinary-model throughput. Stable
 minimum model decode throughput of ten tokens/s remains unproven.
