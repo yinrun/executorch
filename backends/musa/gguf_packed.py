@@ -56,6 +56,38 @@ def embedding_meta(value, packed, quant_type):
     )
 
 
+def parts_shape(value, packed, quant_type):
+    shape = packed_shape(value, packed, quant_type, False)
+    torch._check(quant_type in (12, Q6_PREDECODED_ID))
+    torch._check(value.numel() == value.shape[-1])
+    torch._check(4096 <= value.shape[-1] <= 2**31 - 1)
+    torch._check(128 <= packed.shape[0] <= (2**31 - 1) // 4)
+    return (4, *shape)
+
+
+def parts_meta(value, packed, quant_type):
+    return value.new_empty(parts_shape(value, packed, quant_type))
+
+
+def parts_eager(value, packed, quant_type):
+    parts_shape(value, packed, quant_type)
+    if value.data_ptr() % 16 or packed.data_ptr() % 16:
+        raise ValueError("GGUF partial projection requires 16-byte-aligned inputs")
+    block_bytes = 144 if quant_type == 12 else Q6_PREDECODED_BYTES
+    blocks = value.shape[-1] // 256
+    partials = []
+    for part in range(4):
+        first, last = blocks * part // 4, blocks * (part + 1) // 4
+        partials.append(
+            linear_eager(
+                value[..., first * 256 : last * 256].contiguous(),
+                packed[:, first * block_bytes : last * block_bytes].contiguous(),
+                quant_type,
+            )
+        )
+    return torch.stack(partials)
+
+
 def linear_eager(value, packed, quant_type):
     packed_shape(value, packed, quant_type, False)
     outputs = []
@@ -126,8 +158,29 @@ def embedding_out_eager(value, packed, quant_type, *, out):
     return packed_out(value, packed, quant_type, out, True)
 
 
+def parts_out_meta(value, packed, quant_type, *, out):
+    torch._check(tuple(out.shape) == tuple(parts_shape(value, packed, quant_type)))
+    torch._check(out.device == packed.device and out.dtype == torch.float32)
+    torch._check(out.is_contiguous())
+    return out
+
+
+def parts_out_eager(value, packed, quant_type, *, out):
+    parts_out_meta(value, packed, quant_type, out=out)
+    begin = out.data_ptr()
+    end = begin + out.numel() * out.element_size()
+    for source in (value, packed):
+        if (
+            begin < source.data_ptr() + source.numel() * source.element_size()
+            and source.data_ptr() < end
+        ):
+            raise ValueError("GGUF partial output must not overlap inputs")
+    return out.copy_(parts_eager(value, packed, quant_type))
+
+
 for name, eager, meta, out_eager, out_meta in (
     ("gguf_linear", linear_eager, linear_meta, linear_out_eager, linear_out_meta),
+    ("gguf_parts", parts_eager, parts_meta, parts_out_eager, parts_out_meta),
     (
         "gguf_embedding",
         embedding_eager,
@@ -146,6 +199,7 @@ for name, eager, meta, out_eager, out_meta in (
     _library.impl(f"{name}.out", out_meta, "Meta")
 
 GGUF_LINEAR = torch.ops.executorch_musa.gguf_linear.default
+GGUF_PARTS = torch.ops.executorch_musa.gguf_parts.default
 GGUF_EMBEDDING = torch.ops.executorch_musa.gguf_embedding.default
 
 
@@ -192,17 +246,49 @@ def lower_embedding(value, packed, quant_type):
     return lower_packed(value, packed, quant_type, True)
 
 
+@lowering.register_lowering(GGUF_PARTS, type_promotion_kind=None)
+def lower_parts(value, packed, quant_type):
+    value.realize()
+    packed.realize()
+    shape = [4, *value.get_size()[:-1], packed.get_size()[0]]
+    layout = ir.FixedLayout(
+        value.get_device(),
+        torch.float32,
+        shape,
+        ir.FlexibleLayout.contiguous_strides(shape),
+    )
+    return ir.TensorBox.create(
+        ir.ExternKernelOut(
+            layout=layout,
+            inputs=[value, packed],
+            constant_args=[quant_type],
+            python_kernel_name="executorch_musa.gguf_parts.out",
+            cpp_kernel_name="aoti_torch_musa_gguf_parts_out",
+            op_overload=torch.ops.executorch_musa.gguf_parts.out,
+        )
+    )
+
+
 class GgufLinear(torch.nn.Module):
-    def __init__(self, packed, quant_type, bias=None):
+    def __init__(self, packed, quant_type, bias=None, *, split_k=False):
         super().__init__()
         if quant_type not in QUANT_IDS:
             raise ValueError(f"Unsupported GGUF quantization: {quant_type}")
         self.register_buffer("packed_weight", packed)
         self.register_buffer("bias", bias)
         self.quant_type = QUANT_IDS[quant_type]
+        self.split_k = split_k
 
     def forward(self, value):
-        result = GGUF_LINEAR(value.contiguous(), self.packed_weight, self.quant_type)
+        if self.split_k:
+            partials = GGUF_PARTS(
+                value.contiguous(), self.packed_weight, self.quant_type
+            )
+            result = ((partials[0] + partials[1]) + partials[2]) + partials[3]
+        else:
+            result = GGUF_LINEAR(
+                value.contiguous(), self.packed_weight, self.quant_type
+            )
         return result if self.bias is None else result + self.bias
 
 

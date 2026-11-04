@@ -839,6 +839,7 @@ class MusaBackend(AotiBackend, BackendDetails):
             "aoti_torch_musa_reduce_out": None,
             "aoti_torch_musa_bf16_sum_out": None,
             "aoti_torch_musa_gguf_linear_out": None,
+            "aoti_torch_musa_gguf_parts_out": None,
             "aoti_torch_musa_gguf_embedding_out": None,
             "aoti_torch_musa_gdn_recurrence_out": None,
             "aoti_torch_musa_vision_layer_norm_out": None,

@@ -17,6 +17,7 @@ namespace {
 namespace slim = executorch::backends::aoti::slim;
 using executorch::backends::cuda::aoti_torch_musa_gguf_embedding_out;
 using executorch::backends::cuda::aoti_torch_musa_gguf_linear_out;
+using executorch::backends::cuda::aoti_torch_musa_gguf_parts_out;
 using executorch::runtime::Error;
 using slim::SlimTensor;
 using slim::c10::ScalarType;
@@ -716,6 +717,7 @@ TEST_F(MusaGgufTest, LongKProjectionsCoverPartitionsTailsOffsetsAndFallbacks) {
       write(input, values);
       std::vector<uint8_t> data(packed.numel(), 0);
       std::vector<double> reference(shape.batches * shape.rows, 0);
+      std::vector<double> part_reference(4 * shape.batches * shape.rows, 0);
       for (int row = 0; row < shape.rows; ++row) {
         for (int block_index = 0; block_index < shape.columns / 256;
              ++block_index) {
@@ -754,9 +756,14 @@ TEST_F(MusaGgufTest, LongKProjectionsCoverPartitionsTailsOffsetsAndFallbacks) {
               weight_value = 0.125f * level - 0.0625f;
             }
             for (int batch = 0; batch < shape.batches; ++batch) {
-              reference[batch * shape.rows + row] +=
-                  static_cast<double>(weight_value) *
+              const auto product = static_cast<double>(weight_value) *
                   values[batch * shape.columns + block_index * 256 + element];
+              reference[batch * shape.rows + row] += product;
+              const int part =
+                  ((block_index + 1) * 4 - 1) / (shape.columns / 256);
+              part_reference
+                  [(part * shape.batches + batch) * shape.rows + row] +=
+                  product;
             }
           }
         }
@@ -774,6 +781,30 @@ TEST_F(MusaGgufTest, LongKProjectionsCoverPartitionsTailsOffsetsAndFallbacks) {
             reference[index],
             0.001 + 0.001 * std::abs(reference[index]));
       }
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+      if (shape.batches == 1 && shape.offset == 0 && shape.rows >= 128 &&
+          shape.columns >= 4096 && quant_type != 13) {
+        auto parts = tensor({4, 1, shape.rows});
+        ASSERT_EQ(
+            aoti_torch_musa_gguf_parts_out(&parts, &input, &packed, quant_type),
+            Error::Ok);
+        const auto partials = read(parts);
+        for (size_t index = 0; index < partials.size(); ++index) {
+          ASSERT_TRUE(std::isfinite(partials[index]));
+          ASSERT_NEAR(
+              partials[index],
+              part_reference[index],
+              0.001 + 0.001 * std::abs(part_reference[index]));
+        }
+        for (int row = 0; row < shape.rows; ++row) {
+          float sum = partials[row];
+          for (int part = 1; part < 4; ++part) {
+            sum += partials[part * shape.rows + row];
+          }
+          ASSERT_EQ(std::memcmp(&sum, &actual[row], sizeof(float)), 0);
+        }
+      }
+#endif
     }
   }
 }
@@ -838,6 +869,135 @@ TEST_F(MusaGgufTest, LongKWorkspaceLifetimeAndCallingStream) {
   }
   EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+TEST_F(MusaGgufTest, PartialOutputsUseCallerStorageAndStreamWithRankFive) {
+  cudaStream_t stream;
+  ASSERT_EQ(
+      musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  {
+    auto guard = executorch::backends::cuda::CUDAStreamGuard::create(stream, 0);
+    ASSERT_TRUE(guard.ok());
+    auto packed = tensor({129, 17 * 144}, ScalarType::Byte);
+    std::vector<uint8_t> data(packed.numel(), 0);
+    for (int index = 0; index < 129 * 17; ++index) {
+      auto* block = data.data() + index * 144;
+      block[1] = 0x3c;
+      std::fill(block + 4, block + 12, 1);
+      std::fill(block + 12, block + 144, 0x11);
+    }
+    write(packed, data);
+    auto positive = tensor({1, 1, 1, 4352});
+    auto zero = tensor({1, 1, 1, 4352});
+    write(positive, std::vector<float>(4352, 1));
+    ASSERT_EQ(
+        cudaMemsetAsync(zero.data_ptr(), 0, zero.nbytes(), stream),
+        cudaSuccess);
+    std::vector<SlimTensor> owners;
+    for (int iteration = 0; iteration < 9; ++iteration) {
+      owners.push_back(tensor({4 * 129 + 2}));
+      write(owners.back(), std::vector<float>(4 * 129 + 2, -12345));
+    }
+    for (int iteration = 0; iteration < 9; ++iteration) {
+      auto output = owners[iteration].as_strided(
+          {4, 1, 1, 1, 129}, {129, 129, 129, 129, 1}, 1);
+      auto& input = iteration % 2 == 0 ? positive : zero;
+      if (iteration == 8) {
+        ASSERT_EQ(
+            cudaMemsetAsync(packed.data_ptr(), 0, packed.nbytes(), stream),
+            cudaSuccess);
+      }
+      ASSERT_EQ(
+          aoti_torch_musa_gguf_parts_out(&output, &input, &packed, 12),
+          Error::Ok);
+    }
+    ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    for (size_t iteration = 0; iteration < owners.size(); ++iteration) {
+      const auto actual = read(owners[iteration]);
+      ASSERT_EQ(actual.front(), -12345);
+      ASSERT_EQ(actual.back(), -12345);
+      for (int index = 0; index < 4 * 129; ++index) {
+        const float expected = iteration < 8 && iteration % 2 == 0
+            ? (index / 129 == 3 ? 1280 : 1024)
+            : 0;
+        ASSERT_EQ(actual[index + 1], expected);
+      }
+    }
+  }
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
+TEST_F(
+    MusaGgufTest,
+    PartialOutputsRejectUnsupportedGeometryAlignmentAndTailAliases) {
+  auto packed = tensor({128, 16 * 144}, ScalarType::Byte);
+  auto input = tensor({1, 4096});
+  auto output = tensor({4, 1, 128});
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(nullptr, &input, &packed, 12),
+      Error::InvalidArgument);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&output, nullptr, &packed, 12),
+      Error::InvalidArgument);
+  auto short_output = tensor({1, 128});
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&short_output, &input, &packed, 12),
+      Error::InvalidArgument);
+  auto wrong_type = tensor({4, 1, 128}, ScalarType::Half);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&wrong_type, &input, &packed, 12),
+      Error::InvalidArgument);
+  auto short_input = tensor({1, 2560});
+  auto short_weight = tensor({128, 10 * 144}, ScalarType::Byte);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&output, &short_input, &short_weight, 12),
+      Error::InvalidArgument);
+  auto small_weight = tensor({127, 16 * 144}, ScalarType::Byte);
+  auto small_output = tensor({4, 1, 127});
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&small_output, &input, &small_weight, 12),
+      Error::InvalidArgument);
+  auto batch_input = tensor({2, 4096});
+  auto batch_output = tensor({4, 2, 128});
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&batch_output, &batch_input, &packed, 12),
+      Error::InvalidArgument);
+  auto q5 = tensor({128, 16 * 176}, ScalarType::Byte);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&output, &input, &q5, 13),
+      Error::InvalidArgument);
+  auto owner = tensor({4096 + 128});
+  auto unaligned_input = owner.as_strided({1, 4096}, {4096, 1}, 1);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&output, &unaligned_input, &packed, 12),
+      Error::InvalidArgument);
+  auto packed_owner = tensor({128 * 16 * 144 + 1}, ScalarType::Byte);
+  auto unaligned_packed =
+      packed_owner.as_strided({128, 16 * 144}, {16 * 144, 1}, 1);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&output, &input, &unaligned_packed, 12),
+      Error::InvalidArgument);
+  auto tail_input = owner.as_strided({1, 4096}, {4096, 1}, 128);
+  auto tail_alias = owner.as_strided({4, 1, 128}, {128, 128, 1}, 0);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&tail_alias, &tail_input, &packed, 12),
+      Error::InvalidArgument);
+  auto short_owner = tensor({128});
+  auto invalid_span = short_owner.as_strided({4, 1, 128}, {128, 128, 1}, 0);
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&invalid_span, &input, &packed, 12),
+      Error::InvalidArgument);
+}
+#else
+TEST_F(MusaGgufTest, PartialOutputsReportDisabledBuild) {
+  auto packed = tensor({128, 16 * 144}, ScalarType::Byte);
+  auto input = tensor({1, 4096});
+  auto output = tensor({4, 1, 128});
+  EXPECT_EQ(
+      aoti_torch_musa_gguf_parts_out(&output, &input, &packed, 12),
+      Error::NotSupported);
+}
+#endif
 
 TEST_F(MusaGgufTest, UsesCallingStreamOnDeviceZero) {
   cudaStream_t stream;

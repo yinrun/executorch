@@ -778,11 +778,10 @@ __global__ void embedding_kernel(float* output, const int64_t* indices,
 }
 
 #if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
-extern "C" musaError_t executorch_musa_gguf_split_k_launch(
+extern "C" musaError_t executorch_musa_gguf_parts_launch(
     float* output,
     const float* input,
     const uint8_t* packed,
-    float* workspace,
     int64_t rows,
     int64_t columns,
     int64_t batches,
@@ -799,13 +798,27 @@ extern "C" musaError_t executorch_musa_gguf_split_k_launch(
   if (quant_type == 12) {
     linear_vector_decode_kernel<12, 16, 4>
         <<<dim3((rows + 15) / 16, 4), 128, 0, stream>>>(
-            workspace, input, packed, rows, columns);
+            output, input, packed, rows, columns);
   } else {
     linear_predecoded_q6_decode_kernel<2, 4>
         <<<dim3((rows + 7) / 8, 4), 128, 0, stream>>>(
-            workspace, input, packed, rows, columns);
+            output, input, packed, rows, columns);
   }
-  const auto status = musaGetLastError();
+  return musaGetLastError();
+}
+
+extern "C" musaError_t executorch_musa_gguf_split_k_launch(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    float* workspace,
+    int64_t rows,
+    int64_t columns,
+    int64_t batches,
+    int64_t quant_type,
+    musaStream_t stream) {
+  const auto status = executorch_musa_gguf_parts_launch(
+      workspace, input, packed, rows, columns, batches, quant_type, stream);
   if (status != musaSuccess) {
     return status;
   }

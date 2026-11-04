@@ -5,8 +5,9 @@
 `EXECUTORCH_MUSA_GGUF_SPLIT_K` is a default-OFF experimental MUSA build
 option. It partitions a single-vector Q4 or losslessly predecoded Q6
 projection into four K ranges, then adds the four FP32 partial outputs.
-It does not change weights, quantization, public shim arguments or the
-existing PTE/PTD. The accepted deployment is not overwritten.
+The runtime-only switch does not change weights, quantization, existing shim
+arguments or PTE/PTD. The separately opt-in caller-owned export below does
+require a new PTE/PTD. The accepted deployment is not overwritten.
 
 The model is Qwen3.5-4B **Q4_K_M**, with FP32 activations, recurrent state
 and accumulation, not BF16 weights. Existing grouped-Q6-head, merged-FFN
@@ -130,8 +131,9 @@ output, owned by AOTI's combined memory pool. Explicit ordered additions
 `((part0 + part1) + part2) + part3` remain in the exported graph, allowing
 Inductor to fuse them with the following residual/RMSNorm work. There is no
 per-call native scratch tensor or native reduction launch. This new export
-operation and native entry point are **not integrated into the production
-backend or public loader**; they live only in the local probe artifacts.
+operation and native entry point were initially restricted to the local
+probe artifacts. The subsequent source integration is described below;
+the measurements in this PoC section remain measurements of the prototype.
 
 The re-export replaces 64 projections while retaining one delegate, the same
 64 mutated state buffers, 32 merged-FFN calls and eight valid-prefix-attention
@@ -174,11 +176,78 @@ attribution from overlapping async labels.
 
 The PoC runtime SHA-256 is
 `b1f7ff396d314c28f596080aad2e3592f7d793f3cef1b03702b2a0e1a484806f`.
-The accepted deployment and default flags remain unchanged. Next is a
-production-quality opt-in implementation with boundary/ownership tests and
-fresh source-runtime qualification; the artifact's benchmark must not be
-attributed to an unbuilt production implementation. Further large-matrix
-optimization is still needed to reach 10 tokens/s.
+The accepted deployment and default flags remain unchanged. The artifact's
+benchmark must not be attributed to a different production build. Further
+large-matrix optimization is still needed to reach 10 tokens/s.
+
+## Integrated caller-owned export
+
+The source backend now provides `executorch_musa.gguf_parts` and its `.out`
+variant, meta/eager implementations and AOTI lowering. Its native
+`aoti_torch_musa_gguf_parts_out` shim shares the four-part kernel launcher
+with the original temporary-scratch Split-K path. It writes directly to the
+caller-owned output and does not allocate native scratch. The existing
+linear/embedding interfaces are unchanged.
+
+Use **both** opt-ins:
+
+- Build the runtime with `-DEXECUTORCH_MUSA_GGUF_SPLIT_K=ON`.
+- Re-export using `load_gguf_text(..., split_k_projections=True)`; for the
+  measured model also retain `valid_length_attention=True`,
+  `predecode_q6_weights=True` and `merge_ffn_gate_up=True`.
+
+The loader marks only eligible Q4/predecoded-Q6 projections and records
+their names in `loading["split_k_projections"]`. It selects the same 64
+projections as the PoC. The direct module API is
+`GgufLinear(packed, encoding, bias, split_k=True)`. The Python option and
+build option both default to disabled. A disabled runtime exposes the shim
+but returns `NotSupported` with the required build-option name rather than
+silently using a different reduction. An old PTE still uses the original
+linear operation; turning on the build flag alone does not activate
+caller-owned partials or epilogue fusion.
+
+This is a single-vector, FP32, aligned long-K path, not a general batched
+prefill implementation. Unsupported geometry, types and input alignment
+are rejected. Complete output storage spans and input/weight overlap are
+checked across **all four parts**, not only the first view. Caller streams
+and output offsets are respected; the regular linear path retains its
+existing fallback behavior.
+
+Both CMake configurations pass the native GGUF suite. New coverage checks
+each partial against double-accumulated references, exact recombination,
+uneven K partitions, row tails, five-dimensional outputs, canaries,
+nondefault-stream queued calls, weight updates, invalid geometry/alignment,
+overlap only in later parts, truncated storage and the disabled-build error.
+All nine Python/eager/export/runner tests pass without skips, including the
+existing packed-runner regression. The re-exported source model separately
+passes the complete 2298-logit frozen-HF/argmax gate, original IDs/EOS,
+1149 reset pairs and 18 negative controls.
+
+The integrated-source outputs are byte-identical to the qualified epilogue
+PoC across all 2298 comparisons. A fresh ABBA+BAAB series directly compares
+the new source-export/runtime pair with the **original accepted grouped-head
+deployment**, rather than combining earlier speed ratios:
+
+| Runtime | Decode minimum | Decode median | Serial prefill median |
+| --- | ---: | ---: | ---: |
+| Original accepted deployment | 7.3221 | 7.3557 | 7.3318 |
+| Integrated caller-owned Split-K | 7.5265 | 7.5716 | 7.5683 |
+
+All speeds are tokens/s. Combined median decode gain is **2.93%**, with
+individual order gains **2.57%** and **3.34%**, using eight measured samples
+per variant. The source runtime SHA-256 is
+`986d48509199fd1ab9b542a9c77be66252d1256db1b92acb643c7f53e1b7d987`.
+This is an isolated controlled replacement of the GGUF host/kernel objects
+in the protected runtime, plus a fresh export from repository Python code;
+it is not a throughput measurement of every current CMake-built host object.
+
+The separate integrated-source global trace confirms 812 kernel records,
+three `musaEventRecord` calls, 12 stream synchronizations and eight
+`musaMallocAsync` calls per measured decode step. It includes 48 Q4 and 16
+Q6 four-part kernels and no standalone partial-reduction kernel. The audit
+rehashes source, runtime, model artifacts and output files and verifies the
+same original workload/IDs and native-only runtime mappings. The defaults
+and accepted deployment remain unchanged; **10 tokens/s is still unmet**.
 
 ## Local evidence
 
@@ -208,3 +277,14 @@ ETSupport evidence under `artifacts/gguf-20261029`:
   and the separate global trace.
 - `audit_split_k_epilogue_v1.py`, `split-k-epilogue-decision-v1.json`:
   independent rehashing and model/export/accuracy/performance/profile audit.
+- `build_split_k_parts_v1.py`, `build-split-k-parts-cmake-v1`,
+  `build-split-k-parts-v1`: integrated-source CMake ON/OFF tests and controlled
+  host/kernel replacement in the protected runtime.
+- `split-k-parts-python-runner-tests-v1.log`, `export_split_k_parts_v1.py`,
+  `split-k-parts-export-v1`, `split-k-parts-validation-v1`: Python/native
+  regression, source-only export without temporary operator patches, and
+  complete model accuracy.
+- `split-k-parts-benchmark-v1/v2`, `global-split-k-parts-profile-v1`,
+  `audit_split_k_parts_v1.py`, `split-k-parts-decision-v1.json`: fresh ordinary
+  comparison against the original accepted deployment, separate trace and
+  integrated-source audit.

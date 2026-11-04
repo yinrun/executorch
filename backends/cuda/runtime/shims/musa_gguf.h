@@ -21,6 +21,11 @@ extern "C" {
 MUSA_GGUF_EXPORT MusaGgufError
 aoti_torch_musa_gguf_linear_out(MusaGgufTensor output, MusaGgufTensor input,
                                 MusaGgufTensor packed, int64_t quant_type);
+MUSA_GGUF_EXPORT MusaGgufError aoti_torch_musa_gguf_parts_out(
+    MusaGgufTensor output,
+    MusaGgufTensor input,
+    MusaGgufTensor packed,
+    int64_t quant_type);
 MUSA_GGUF_EXPORT MusaGgufError aoti_torch_musa_gguf_embedding_out(
     MusaGgufTensor output, MusaGgufTensor indices, MusaGgufTensor packed,
     int64_t quant_type);

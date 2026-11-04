@@ -18,7 +18,12 @@ from executorch.backends.musa.causal_prefix_attention import (
 from executorch.backends.musa.gguf import BLOCK_BYTES
 from executorch.backends.musa.gdn_recurrence import GDN_RECURRENCE
 from executorch.backends.musa.gguf_packed import GgufEmbedding, GgufLinear, QUANT_NAMES
-from executorch.backends.musa.q6_predecoded import Q6_PREDECODED, predecode_q6
+from executorch.backends.musa.q6_predecoded import (
+    Q6_PREDECODED,
+    Q6_PREDECODED_BYTES,
+    Q6_PREDECODED_ID,
+    predecode_q6,
+)
 from executorch.examples.models.llama.attention import (
     AttentionGatedDeltaNet,
     AttentionMHA,
@@ -306,6 +311,7 @@ def load_gguf_text(
     merge_ffn_gate_up=False,
     merge_gdn_gate_projections=False,
     native_gdn_recurrence=False,
+    split_k_projections=False,
 ):
     import gguf
 
@@ -423,6 +429,18 @@ def load_gguf_text(
         for layer in model.layers:
             if isinstance(layer.attention, GgufGatedDeltaNet):
                 layer.attention.native_recurrence = True
+    split_k_names = []
+    if split_k_projections:
+        for name, layer in model.named_modules():
+            if isinstance(layer, GgufLinear) and layer.quant_type in (
+                12,
+                Q6_PREDECODED_ID,
+            ):
+                block_bytes = 144 if layer.quant_type == 12 else Q6_PREDECODED_BYTES
+                columns = layer.packed_weight.shape[1] // block_bytes * 256
+                if layer.packed_weight.shape[0] >= 128 and columns >= 4096:
+                    layer.split_k = True
+                    split_k_names.append(name)
     for name, value in list(model.named_buffers()):
         if value.is_meta:
             if not name.endswith(STATE_SUFFIXES):
@@ -485,4 +503,6 @@ def load_gguf_text(
         multimodal_enabled=False,
         full_model_accuracy_validated=False,
     )
+    if split_k_projections:
+        report["split_k_projections"] = split_k_names
     return model, report

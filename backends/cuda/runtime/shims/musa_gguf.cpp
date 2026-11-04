@@ -7,6 +7,15 @@
 #include <limits>
 
 #if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+extern "C" musaError_t executorch_musa_gguf_parts_launch(
+    float*,
+    const float*,
+    const uint8_t*,
+    int64_t,
+    int64_t,
+    int64_t,
+    int64_t,
+    musaStream_t);
 extern "C" musaError_t executorch_musa_gguf_split_k_launch(
     float*,
     const float*,
@@ -157,6 +166,72 @@ aoti_torch_musa_gguf_linear_out(SlimTensor* output, SlimTensor* input,
                            "GGUF linear kernel launch failed: %s",
                            musaGetErrorString(status));
   return Error::Ok;
+}
+
+extern "C" AOTI_SHIM_EXPORT Error aoti_torch_musa_gguf_parts_out(
+    SlimTensor* output,
+    SlimTensor* input,
+    SlimTensor* packed,
+    int64_t quant_type) {
+#if defined(EXECUTORCH_MUSA_GGUF_SPLIT_K)
+  ET_CHECK_OR_RETURN_ERROR(
+      output != nullptr && output->dim() >= 2 && output->dim() <= 5 &&
+          output->size(0) == 4 && output->is_contiguous(),
+      InvalidArgument,
+      "GGUF partial output requires four contiguous parts");
+  auto output_span = checked_musa_tensor_span(*output);
+  ET_CHECK_OK_OR_RETURN_ERROR(output_span.error());
+  const executorch::runtime::IntArrayRef shape(
+      output->sizes().data() + 1, output->dim() - 1);
+  const executorch::runtime::IntArrayRef strides(
+      output->strides().data() + 1, output->dim() - 1);
+  auto first = output->as_strided(shape, strides, output->storage_offset());
+  int64_t rows, columns, batches;
+  ET_CHECK_OK_OR_RETURN_ERROR(validate(
+      &first, input, packed, quant_type, false, rows, columns, batches));
+  ET_CHECK_OR_RETURN_ERROR(
+      batches == 1 && rows >= 128 &&
+          rows <= std::numeric_limits<int>::max() / 4 && columns >= 4096 &&
+          columns <= std::numeric_limits<int>::max() &&
+          (quant_type == 12 || quant_type == 114) &&
+          reinterpret_cast<uintptr_t>(input->data_ptr()) % 16 == 0 &&
+          reinterpret_cast<uintptr_t>(packed->data_ptr()) % 16 == 0,
+      InvalidArgument,
+      "GGUF partial projection requires aligned long-K Q4/Q6 and one vector");
+  auto input_span = checked_musa_tensor_span(*input);
+  ET_CHECK_OK_OR_RETURN_ERROR(input_span.error());
+  auto packed_span = checked_musa_tensor_span(*packed);
+  ET_CHECK_OK_OR_RETURN_ERROR(packed_span.error());
+  ET_CHECK_OR_RETURN_ERROR(
+      !musa_tensor_spans_overlap(output_span.get(), input_span.get()) &&
+          !musa_tensor_spans_overlap(output_span.get(), packed_span.get()),
+      InvalidArgument,
+      "GGUF partial output must not overlap inputs");
+  auto guard = CUDAGuard::create(input->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(guard.error());
+  auto stream = getCurrentCUDAStream(input->device_index());
+  ET_CHECK_OK_OR_RETURN_ERROR(stream.error());
+  const auto status = executorch_musa_gguf_parts_launch(
+      static_cast<float*>(output->data_ptr()),
+      static_cast<const float*>(input->data_ptr()),
+      static_cast<const uint8_t*>(packed->data_ptr()),
+      rows,
+      columns,
+      batches,
+      quant_type,
+      stream.get());
+  ET_CHECK_OR_RETURN_ERROR(
+      status == musaSuccess,
+      Internal,
+      "GGUF partial projection failed: %s",
+      musaGetErrorString(status));
+  return Error::Ok;
+#else
+  ET_CHECK_OR_RETURN_ERROR(
+      false,
+      NotSupported,
+      "GGUF partial projection requires EXECUTORCH_MUSA_GGUF_SPLIT_K");
+#endif
 }
 
 extern "C" AOTI_SHIM_EXPORT Error
