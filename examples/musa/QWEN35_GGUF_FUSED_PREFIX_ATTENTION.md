@@ -81,7 +81,8 @@ The prototype dispatches only grouped FP32 attention with valid length at
 most 128 and a 16-byte-aligned value pointer. BF16, longer prefixes and
 unaligned values retain the original muDNN path. Existing dtype, geometry,
 device, span, alias, position and complete causal-mask validation is unchanged
-and precedes dispatch. This is not yet a production build option.
+and precedes dispatch. This first experiment uses an isolated prototype; the
+subsequent default-off source option is described below.
 
 The first integration attempt detects that today's host source does not
 reproduce the historical object; it stops before linking. The corrected
@@ -114,7 +115,8 @@ Normalized error must remain at most one for every element. All original
 IDs/EOS and exact argmax checks pass; outputs are not byte-identical to the
 previous runtime. Prepared image features and frozen HF references are reused,
 not rerun through the raw-image frontend. This does not establish a full
-4096-token trajectory, concurrent-service behavior or source-option coverage.
+4096-token trajectory or concurrent-service behavior. Source-option coverage
+is qualified separately below.
 
 ## Ordinary whole-model timing
 
@@ -140,9 +142,87 @@ the earlier recorded 10.5812, but neither peak is a stability guarantee.
 All slow baseline samples remain: the second BAAB baseline process records
 8.2780 and 8.3027 tokens/s. ABBA's median ratio is 1.01253, whereas BAAB's is
 1.12991 and the pooled ratio 1.03202. These inconsistent ratios do not prove a
-causal 13% or 3.2% improvement. A same-process alternating comparison and wider
-qualification remain necessary before treating this as stable deployment
-performance. No new default or export is installed from this favorable series.
+causal 13% or 3.2% improvement. The subsequent same-process comparison below
+does not confirm a stable minimum of ten. No new default or export is installed
+from this favorable series.
+
+## Same-process alternating comparison
+
+A benchmark-only runner switches between the original muDNN path and the
+qualified fused kernel between complete synchronized generations. Both modes
+share the same loaded model, buffers and process. Counters verify eight calls
+per executed step in the selected branch and zero calls in the other branch.
+These hooks are not part of the source option or production runner.
+
+Before timing, four complete text generations compare 464 full logit outputs
+byte for byte with the independently HF-qualified runtimes, including 232
+reset pairs. This instrumented harness does not rerun image trajectories.
+Two processes then use opposite sequences, `0101101001` and `1010010110`;
+the first two complete generations warm up each mode once. All eight subsequent
+generations per process are retained, giving eight measured samples per mode.
+
+| Mode | Minimum | Median | Maximum |
+| --- | ---: | ---: | ---: |
+| Original muDNN | 8.6849 | 10.0307 | 10.5892 |
+| Fused prefix | 8.4903 | 10.1675 | 10.7272 |
+
+Units are decode tokens/s. Six of eight adjacent pairs improve; the paired
+median ratio is 1.01157 and geometric mean ratio 1.00640. The first measured
+generation in each process is slow, but belongs to opposite modes. This is an
+observation, not a diagnosis of clocks, allocator behavior or desktop activity.
+All low samples remain. The instrumented 10.7272 peak is not an ordinary-runner
+record, and the 8.4903 minimum fails the stability target.
+
+## Default-off source option
+
+The MUSA backend now supports `EXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION`, default
+`OFF`. Add `-DEXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION=ON` to an existing qualified
+MUSA build configuration (`EXECUTORCH_BUILD_MUSA=ON`) to enable it. The separate
+`.mu` object uses the configured MUSA architecture and `-ffp-contract=off`,
+without applying GGUF-specific MAX_ILP flags. CUDA and ROCm paths are unchanged.
+
+Dispatch occurs after the existing checks and current-stream/device selection,
+but before scratch allocation. Only grouped FP32, valid prefix lengths 1--128
+and 16-byte-aligned values use the fused kernel. BF16, longer prefixes and
+misaligned values retain muDNN. Both checked attention entry points share this
+dispatch. No runtime experiment switch, counters or tolerance changes enter
+the production source.
+
+A fresh CMake tree is configured in default-OFF, ON, OFF-again and ON-again
+order. The attention and GGUF suites pass in all four states: 31 native tests
+pass and one unavailable second-device test is skipped. OFF/ON objects and
+libraries reproduce byte for byte on revisiting each configuration. The added
+boundary test covers 48 combinations of capacities 129/4096, prefix lengths
+1/7/31/63/115/127/128/129, aligned/misaligned values, output canaries, poisoned
+future cache entries and unchanged complete KV storage. It retains the existing
+independent double-reference unit bound of `3e-5`.
+
+Removing formatter-added namespace comments subsequently reproduces both test
+binaries, the attention objects and the CMake shared library byte for byte;
+CTest is rerun. The current source objects are also linked into an isolated
+copy of the historically qualified runtime, leaving all other objects intact.
+That isolated source link passes all three full-model cases: 2298 complete
+logits are byte-identical to the qualified fused prototype, with the unchanged
+HF gate, original IDs/EOS, 1149 reset pairs and eighteen negative controls.
+This is not a full-model qualification of every freshly rebuilt CMake object.
+
+The source-linked runtime receives another ordinary ABBA+BAAB series using the
+unchanged runner, one full warmup and two measured generations per process:
+
+| Mode | Minimum | Median | Maximum |
+| --- | ---: | ---: | ---: |
+| Original local-first runtime | 8.0835 | 8.4762 | 10.5297 |
+| Source-linked fused prefix | 8.6756 | 10.4421 | 10.7215 |
+
+The candidate's serial-prefill median is 9.3282 tokens/s. All samples and
+original trajectories are retained. The pooled ratio of 1.23193 is not evidence
+of a causal 23% improvement: baseline low samples dominate this series and the
+same-process result is much smaller. The candidate again fails the minimum-ten
+check. No concurrent agent GPU work, compilation or heavy audit runs during
+timing. A user-requested historical-results summary causes lightweight reads
+and a response during the run, so the intended wait-only protocol is not
+strictly achieved; no causal effect is inferred. The option remains off by
+default and stable ten tokens/s remains unproven.
 
 ## Fresh global capture
 
@@ -189,3 +269,17 @@ Under ETSupport `artifacts/gguf-20261029`:
   rates, protected artifacts and all 232 raw-trace kernel/allocation counts.
   The first audit script has a retained syntax failure; the corrected script
   changes no model data, numerical bound or measurement.
+- `alternating-attention-probe-v1`, `build-alternating-attention-v1`,
+  `alternating-attention-validation-v1`, `alternating-attention-benchmark-v1`,
+  `alternating-attention-decision-v1.json`: benchmark-only switching harness,
+  branch counts, full text qualification and independently checked paired rates.
+- `build_fused_prefix_source_v1.py`, `build-fused-prefix-source-cmake-v1`,
+  `build-fused-prefix-source-v1`, `fused-prefix-source-clean-build-v1.json`:
+  four-configuration native tests, isolated source link and clean-source binary
+  reproduction. Pre-cleanup source snapshots retain the initial build hashes.
+- `validate_fused_prefix_source_v1.py`, `fused-prefix-source-validation-v1`,
+  `benchmark_fused_prefix_source_v1.py`, `fused-prefix-source-benchmark-v1`:
+  source-linked full-model precision and unfiltered ordinary timing.
+- `audit_fused_prefix_source_v1.py`, `fused-prefix-source-decision-v1.json`:
+  independent current-source/build hash checks, full raw-logit and reference
+  rechecks, original trajectories, process maps and recomputed timing summaries.

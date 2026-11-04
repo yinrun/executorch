@@ -335,6 +335,62 @@ TEST_F(MusaCausalAttentionTest, GroupedFp32RejectsInvalidControlsAndStorage) {
 
 TEST_F(
     MusaCausalAttentionTest,
+    GroupedFp32ShortPrefixBoundariesAndValueAlignment) {
+  for (int64_t capacity : {129, 4096}) {
+    for (int64_t offset : {0, 1, 4}) {
+      SCOPED_TRACE(capacity);
+      SCOPED_TRACE(offset);
+      GroupedInputs inputs(capacity);
+      auto value_storage = tensor({4 * capacity * 256 + 8}, ScalarType::Float);
+      inputs.value = value_storage.as_strided(
+          {1, 4, capacity, 256},
+          {4 * capacity * 256, capacity * 256, 256, 1},
+          offset);
+      auto output_storage = tensor({4096 + 8}, ScalarType::Float);
+      inputs.output =
+          output_storage.as_strided({1, 16, 1, 256}, {4096, 256, 256, 1}, 1);
+      for (int64_t length : {1, 7, 31, 63, 115, 127, 128, 129}) {
+        SCOPED_TRACE(length);
+        ASSERT_EQ(
+            musaMemset(value_storage.data_ptr(), 0x5A, value_storage.nbytes()),
+            musaSuccess);
+        const auto expected = inputs.set_length(length);
+        const auto original_value = bytes(value_storage);
+        const auto original_key = bytes(inputs.key);
+        ASSERT_EQ(
+            musaMemset(
+                output_storage.data_ptr(), 0x5A, output_storage.nbytes()),
+            musaSuccess);
+        const auto original_output = bytes(output_storage);
+        ASSERT_EQ(inputs.run(), Error::Ok);
+        const auto storage = bytes(output_storage);
+        std::vector<float> actual(4096);
+        std::memcpy(
+            actual.data(),
+            storage.data() + sizeof(float),
+            4096 * sizeof(float));
+        for (size_t index = 0; index < actual.size(); ++index) {
+          ASSERT_TRUE(std::isfinite(actual[index]));
+          ASSERT_NEAR(actual[index], expected[index], 0.00003) << index;
+        }
+        EXPECT_EQ(
+            std::memcmp(storage.data(), original_output.data(), sizeof(float)),
+            0);
+        EXPECT_EQ(
+            std::memcmp(
+                storage.data() + 4097 * sizeof(float),
+                original_output.data() + 4097 * sizeof(float),
+                7 * sizeof(float)),
+            0);
+        EXPECT_EQ(bytes(value_storage), original_value);
+        EXPECT_EQ(bytes(inputs.key), original_key);
+      }
+    }
+  }
+}
+
+TEST_F(
+    MusaCausalAttentionTest,
     ValidLengthsAndPoisonedFutureDoNotMutateInputs) {
   for (int64_t capacity : {64, 128, 256}) {
     Inputs inputs(capacity);

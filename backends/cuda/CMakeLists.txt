@@ -374,6 +374,25 @@ if(EXECUTORCH_BUILD_MUSA)
     "${_musa_gdn_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE
   )
   list(APPEND _aoti_cuda_shim_sources "${_musa_gdn_object}")
+  option(EXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION
+         "Enable experimental fused FP32 attention for prefixes up to 128 tokens" OFF)
+  if(EXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION)
+    set(_musa_prefix_attention_object
+        "${CMAKE_CURRENT_BINARY_DIR}/musa_prefix_attention_kernels.o")
+    add_custom_command(
+      OUTPUT "${_musa_prefix_attention_object}"
+      COMMAND "${EXECUTORCH_MUSA_MCC}" -x musa -std=c++17 -O3 -fPIC
+              -ffp-contract=off ${_musa_gguf_arch_flags}
+              -c "${CMAKE_CURRENT_SOURCE_DIR}/runtime/shims/musa_prefix_attention_kernels.mu"
+              -o "${_musa_prefix_attention_object}"
+      DEPENDS runtime/shims/musa_prefix_attention_kernels.mu
+      VERBATIM
+    )
+    set_source_files_properties(
+      "${_musa_prefix_attention_object}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE
+    )
+    list(APPEND _aoti_cuda_shim_sources "${_musa_prefix_attention_object}")
+  endif()
 endif()
 
 add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
@@ -382,6 +401,9 @@ add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
 target_compile_definitions(aoti_cuda_shims PRIVATE CUDA_AVAILABLE=1)
 if(EXECUTORCH_BUILD_MUSA)
   target_compile_definitions(aoti_cuda_shims PUBLIC EXECUTORCH_USE_MUSA=1)
+  if(EXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION)
+    target_compile_definitions(aoti_cuda_shims PRIVATE EXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION=1)
+  endif()
 elseif(EXECUTORCH_BUILD_ROCM)
   target_compile_definitions(aoti_cuda_shims PUBLIC EXECUTORCH_USE_HIP=1)
 endif()

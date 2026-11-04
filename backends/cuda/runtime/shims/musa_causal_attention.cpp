@@ -12,6 +12,16 @@
 #include <executorch/extension/cuda/runtime_api.h>
 
 namespace executorch::backends::cuda {
+#if defined(EXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION)
+extern "C" musaError_t executorch_musa_fused_prefix_attention_launch(
+    float*,
+    const float*,
+    const float*,
+    const float*,
+    int,
+    int,
+    musaStream_t);
+#endif
 namespace {
 
 namespace dnn = ::musa::dnn;
@@ -233,6 +243,20 @@ Error run_attention(
   ET_CHECK_OK_OR_RETURN_ERROR(stream_result.error());
   const auto stream = stream_result.get();
   const size_t score_bytes = query_heads * length * query->itemsize();
+#if defined(EXECUTORCH_MUSA_FUSED_PREFIX_ATTENTION)
+  if (grouped_fp32 && length <= 128 &&
+      reinterpret_cast<uintptr_t>(value->data_ptr()) % 16 == 0) {
+    ET_CUDA_CHECK_OR_RETURN_ERROR(executorch_musa_fused_prefix_attention_launch(
+        static_cast<float*>(output->data_ptr()),
+        static_cast<const float*>(query->data_ptr()),
+        static_cast<const float*>(key->data_ptr()),
+        static_cast<const float*>(value->data_ptr()),
+        static_cast<int>(capacity),
+        static_cast<int>(length),
+        stream));
+    return Error::Ok;
+  }
+#endif
   const std::array<size_t, 5> sizes = {
       score_bytes,
       score_bytes,
