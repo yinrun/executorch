@@ -226,6 +226,11 @@ default and stable ten tokens/s remains unproven.
 
 ## Fresh global capture
 
+The subsequent [Q6 head scheduling investigation](QWEN35_GGUF_HEAD_UNROLL.md)
+adds a short blocking attribution trace of the source-linked runtime and
+tests the remaining output-head bottleneck. Its diagnostic times are separate
+from the ordinary measurements above and the complete nonblocking trace below.
+
 A separate nonblocking capture covers loading, complete warmup, serial prefill,
 full measured decode and output checks. Library maps and original trajectories
 are verified. Every one of the 232 execution windows contains eight fused
