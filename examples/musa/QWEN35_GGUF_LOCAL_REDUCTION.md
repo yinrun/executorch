@@ -211,10 +211,37 @@ The instrumented runtime SHA-256 is
 `e6fe684df153641425d28b1366d5ee0e5d479ba283a222a53dd449abfdcce998`;
 its runner SHA-256 is
 `6c50cd6e0a79880769189be5fca3659798b7ccf3e7944e69b22f5fa7804ad2a1`.
-Protected deployment files and production source are unchanged. The next
-kernel investigation tests fixed matrix dimensions while preserving FP32
-reduction order; the approximately one-percent reduction benefit alone is
-not sufficient evidence of reaching 10 tokens/s.
+Protected deployment files and production source are unchanged. The
+approximately one-percent reduction benefit alone is not sufficient evidence
+of reaching 10 tokens/s. The following additional experiment tests a separate
+way to reduce inner-kernel overhead without changing rounding order.
+
+## Fixed-dimension follow-up: not selected
+
+An independent microbenchmark family starts from the qualified packet kernel,
+not the local-first candidate. It specializes K alone or both rows and K for
+eight actual Q4/Q5 matrices, including the merged 18432-by-2560 gate/up.
+Fixed row specializations remove the row-tail branch only for these exact
+multiples of sixteen; the probe rejects other shapes. No general tail support
+or production shape dispatch is inferred from this experiment.
+
+Five builds include the dynamic control, fixed-K and fixed-row/K variants,
+and explicit no-unroll versus compiler-default loop policies. The two
+fixed-K libraries are byte-identical; so are the two fixed-row/K libraries.
+The explicit loop directive therefore has no binary effect in this test.
+Only the three distinct libraries are timed, with those aliases verified
+before both sweeps. All **144 complete native outputs** match the qualified
+runtime byte for byte, preserving packed format, dequantization, FMA and
+final reduction order. Original GGUF and runtime hashes are rechecked.
+
+The results do not justify a general specialization. Fixed-row/K attention
+gate speed ratios are **0.9480/0.9531** in forward/reverse sweeps; merged
+gate/up is **0.9858/0.9861**, and attention query **0.9795/0.9808**. Fixed-K
+alone is mostly near parity, with several changes comparable to control
+variation and an SSM-output result that changes direction between sweeps.
+All builds report zero local/spill bytes, and a few fewer registers do not
+translate into a broad measured gain. No model re-export, full-model
+qualification or production adoption is performed for this rejected family.
 
 ## Local evidence
 
@@ -247,3 +274,6 @@ ETSupport artifacts under `artifacts/gguf-20261029`:
   `global-alternating-reduction-profile-v1`: mode-specific dispatch verification.
 - `audit_alternating_reduction_v1.py`, `alternating-reduction-decision-v1.json`:
   independent byte/hash/trajectory/counter checks and paired timing analysis.
+- `fixed-shape-packed-probe-v1`, `audit_fixed_shape_packed_v1.py`,
+  `fixed-shape-packed-decision-v1.json`: five builds, three distinct libraries,
+  both microbenchmark orders and independent rejection/precision evidence.
