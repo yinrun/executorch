@@ -58,6 +58,11 @@ but attention Q is 0.9740/0.9988 and Q5 QKV changes direction. The identical
 control also varies. No variant is promoted by selecting only favorable shapes
 or rounds; all samples and unchanged-code controls remain available.
 
+Fresh hardware counters, bounded-active-warmup timings and a current packed
+block-size sweep are documented in the
+[counter follow-up](QWEN35_GGUF_PACKED_COUNTER_FOLLOWUP.md). They do not
+establish a broad gain or promote a dequantization variant.
+
 ## Prepared Q6 projection reduction
 
 The existing prepared-Q6 projection reduces four component accumulators across
