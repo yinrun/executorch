@@ -8,7 +8,8 @@ qualified caller-owned Split-K export. Investigate scheduling within the
 compressed Q4/Q5 GEMV instead of increasing weight traffic. No TF32,
 requantization, MTP, vocabulary pruning or relaxed numerical gate is used.
 
-These kernels remain isolated prototypes. The production source, default
+The preloading kernels remain isolated prototypes. The no-preload scheduling
+candidate now has an opt-in source implementation described below. Default
 dispatch, accepted export and runtime are not replaced. The 10 tokens/s
 goal remains unmet; microbenchmark gains are not whole-model gains.
 
@@ -102,7 +103,7 @@ The isolated candidate runtime SHA-256 is
 `4e42c7f25a23f2690b231028f70021b675cc964b5401fbd145dc050310c05d9e`.
 Independent auditing rehashes all 2298 outputs against recorded qualified
 Split-K hashes, build inputs, protected libraries and ordinary-run artifacts.
-The candidate has not yet been integrated into repository kernel source.
+This table measures the isolated prototype, not the subsequent source build.
 
 ## Separate global trace
 
@@ -119,6 +120,42 @@ latencies. Async labels share intervals; do not sum their durations or add
 CPU waits to GPU intervals. An exceptional Pixel event warning is retained;
 the selected model compute intervals pass the analyzer's monotonic checks.
 The trace verifies dispatch, not a causal per-kernel speedup attribution.
+
+## Opt-in source implementation
+
+For a configured MUSA build, enable:
+
+```sh
+cmake -S . -B <build> -DEXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE=ON
+cmake --build <build> --target aoti_cuda_shims test_musa_gguf test_musa_causal_attention -j8
+```
+
+The option defaults to OFF. It selects `linear_packed_quad_decode_kernel`
+only at the existing aligned width-16 Q4/Q5 dispatch and, when Split-K is
+enabled, the existing Q4 partial-output dispatch. It changes no host shim,
+operator schema, output ownership or shape/type/alignment validation.
+The Q6 path, grouped head and width-4/generic fallbacks are unchanged.
+The source implementation removes the rejected preloading modes rather
+than carrying runtime policy branches or unused activation buffers.
+
+No re-export is required for this kernel-only option. The benchmarked
+configuration additionally retains the existing MAX_ILP, QUAD_ARITHMETIC,
+GROUPED_Q6_HEAD and SPLIT_K build options and the caller-owned Split-K
+PTE/PTD. This scheduling option does not itself enable those other options.
+
+A fresh CMake build passes both GGUF and attention suites in five states:
+default OFF, ON, OFF again, ON with QUAD_ARITHMETIC/SPLIT_K OFF, and ON again
+with those two options restored. The repeated ON objects are identical,
+as are the repeated OFF objects; ON differs from OFF. The native regression
+matrix now also covers 4352 columns and a 143-row, fifteen-row tail, including
+the existing offset/alignment and packed-bit-plane checks. The attention
+suite retains its existing second-device skip on this single-device system.
+
+The source kernel object is also linked into the protected host runtime
+for controlled full-model validation and timing. This is not a throughput
+measurement of every newly compiled CMake host object. Full-model source
+qualification and the fresh source-build benchmark are in progress; the
+prototype numbers above must not be substituted for those results.
 
 ## Local evidence
 
@@ -144,3 +181,6 @@ ETSupport artifacts under `artifacts/gguf-20261029`:
 - `profile_global_packed_reorder_v1.py`, `analyze_global_packed_reorder_v1.py`,
   `global-packed-reorder-profile-v1`: separate global capture and
   interval-union analysis, including original IDs and runtime-map checks.
+- `build_packed_schedule_source_v1.py`, `build-packed-schedule-source-cmake-v1`,
+  `build-packed-schedule-source-v1`: integrated kernel source, five CMake
+  configurations and controlled kernel-object replacement in the runtime.

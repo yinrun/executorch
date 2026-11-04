@@ -8,7 +8,8 @@ namespace {
 
 #if defined(EXECUTORCH_MUSA_GGUF_BYTE_CONVERT) ||    \
     defined(EXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC) || \
-    defined(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
+    defined(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD) || \
+    defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
 using UnsignedByteQuad = unsigned char __attribute__((ext_vector_type(4)));
 using FloatQuad = float __attribute__((ext_vector_type(4)));
 #endif
@@ -213,6 +214,135 @@ __device__ uint32_t load_packed_four(const uint8_t* address) {
         reinterpret_cast<const uint32_t*>(address));
   }
 }
+
+#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+struct PackedQuadBlock {
+  uint4 metadata;
+  uint4 first;
+  uint4 second;
+  uint4 high;
+};
+
+template <int QuantType>
+__device__ __forceinline__ PackedQuadBlock
+load_packed_quad_block(const uint8_t* weight, int element) {
+  constexpr int offset = QuantType == 12 ? 16 : 48;
+  const int group = element / 32;
+  const int channel = element % 32;
+  PackedQuadBlock result;
+  result.metadata =
+      load_decode_value<QuantType>(reinterpret_cast<const uint4*>(weight));
+  result.first = load_decode_value<QuantType>(reinterpret_cast<const uint4*>(
+      weight + offset + group / 2 * 32 + channel));
+  result.second = load_decode_value<QuantType>(reinterpret_cast<const uint4*>(
+      weight + offset + group / 2 * 32 + channel + 64));
+  if constexpr (QuantType == 13) {
+    result.high = load_decode_value<QuantType>(
+        reinterpret_cast<const uint4*>(weight + 16 + channel));
+  }
+  return result;
+}
+
+template <int QuantType, int Parts = 1>
+__global__ void linear_packed_quad_decode_kernel(
+    float* output,
+    const float* input,
+    const uint8_t* packed,
+    int rows,
+    int columns) {
+  static_assert(QuantType == 12 || QuantType == 13);
+  static_assert(Parts == 1 || Parts == 4);
+  constexpr int bytes = QuantType == 12 ? 144 : 176;
+  const int lane = threadIdx.x % 8;
+  const int row = blockIdx.x * 16 + threadIdx.x / 8;
+  if (row >= rows) {
+    return;
+  }
+  const int part = Parts == 1 ? 0 : blockIdx.y;
+  const int element = lane * 16;
+  const int group = element / 32;
+  const auto* weight_row =
+      packed + static_cast<int64_t>(row) * (columns / 256) * bytes;
+  FloatQuad accum[4] = {};
+  for (int block = (columns / 256) * part / Parts;
+       block < (columns / 256) * (part + 1) / Parts;
+       ++block) {
+    const auto current = load_packed_quad_block<QuantType>(
+        weight_row + static_cast<int64_t>(block) * bytes, element);
+    const float scale =
+        __half2float(__ushort_as_half(current.metadata.x & 65535));
+    const float minimum =
+        __half2float(__ushort_as_half(current.metadata.x >> 16));
+    const uint32_t low_scale = (current.metadata.y >> (group * 8)) & 255;
+    const uint32_t low_minimum = (current.metadata.z >> (group * 8)) & 255;
+    const uint32_t high = (current.metadata.w >> (group * 8)) & 255;
+    const float first_scale = scale * static_cast<float>(low_scale & 63);
+    const float first_minimum = minimum * static_cast<float>(low_minimum & 63);
+    const float second_scale =
+        scale * static_cast<float>((high & 15) | ((low_scale >> 6) << 4));
+    const float second_minimum =
+        minimum * static_cast<float>((high >> 4) | ((low_minimum >> 6) << 4));
+    const uint32_t first_words[4] = {
+        current.first.x, current.first.y, current.first.z, current.first.w};
+    const uint32_t second_words[4] = {
+        current.second.x, current.second.y, current.second.z, current.second.w};
+    uint32_t high_words[4] = {};
+    if constexpr (QuantType == 13) {
+      high_words[0] = current.high.x;
+      high_words[1] = current.high.y;
+      high_words[2] = current.high.z;
+      high_words[3] = current.high.w;
+    }
+#pragma unroll
+    for (int word = 0; word < 4; ++word) {
+      uint32_t first_levels =
+          (first_words[word] >> (group % 2 * 4)) & 0x0f0f0f0fU;
+      uint32_t second_levels =
+          (second_words[word] >> (group % 2 * 4)) & 0x0f0f0f0fU;
+      if constexpr (QuantType == 13) {
+        first_levels |= ((high_words[word] >> group) & 0x01010101U) << 4;
+        second_levels |= ((high_words[word] >> (group + 4)) & 0x01010101U) << 4;
+      }
+      const FloatQuad first_values = __builtin_convertvector(
+          __builtin_bit_cast(UnsignedByteQuad, first_levels), FloatQuad);
+      const FloatQuad second_values = __builtin_convertvector(
+          __builtin_bit_cast(UnsignedByteQuad, second_levels), FloatQuad);
+      const FloatQuad first_weight = first_scale * first_values - first_minimum;
+      const FloatQuad second_weight =
+          second_scale * second_values - second_minimum;
+      const float4 first =
+          load_decode_value<QuantType>(reinterpret_cast<const float4*>(
+              input + block * 256 + element + word * 4));
+      const float4 second =
+          load_decode_value<QuantType>(reinterpret_cast<const float4*>(
+              input + block * 256 + element + word * 4 + 128));
+      const FloatQuad first_input = {first.x, first.y, first.z, first.w};
+      const FloatQuad second_input = {second.x, second.y, second.z, second.w};
+#pragma unroll
+      for (int byte = 0; byte < 4; ++byte) {
+        accum[word][byte] =
+            fmaf(first_weight[byte], first_input[byte], accum[word][byte]);
+        accum[word][byte] =
+            fmaf(second_weight[byte], second_input[byte], accum[word][byte]);
+      }
+    }
+  }
+#pragma unroll
+  for (int word = 0; word < 4; ++word) {
+#pragma unroll
+    for (int byte = 0; byte < 4; ++byte) {
+      for (int stride = 4; stride > 0; stride /= 2) {
+        accum[word][byte] +=
+            __shfl_down_sync(0xffffffff, accum[word][byte], stride, 8);
+      }
+    }
+  }
+  if (lane == 0) {
+    const FloatQuad sum = (accum[0] + accum[2]) + (accum[1] + accum[3]);
+    output[part * rows + row] = (sum[0] + sum[2]) + (sum[1] + sum[3]);
+  }
+}
+#endif
 
 template <int QuantType, int Width, int Parts = 1>
 __global__ void linear_vector_decode_kernel(
@@ -738,7 +868,11 @@ musaError_t launch_linear_vector_decode(
         <<<(rows + 3) / 4, 128, 0, stream>>>(
             output, input, packed, rows, columns);
   } else if (rows >= 128 && reinterpret_cast<uintptr_t>(packed) % 16 == 0) {
+#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+    linear_packed_quad_decode_kernel<QuantType>
+#else
     linear_vector_decode_kernel<QuantType, 16>
+#endif
         <<<(rows + 15) / 16, 128, 0, stream>>>(
             output, input, packed, rows, columns);
   } else {
@@ -796,7 +930,11 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
     return musaErrorInvalidValue;
   }
   if (quant_type == 12) {
+#if defined(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+    linear_packed_quad_decode_kernel<12, 4>
+#else
     linear_vector_decode_kernel<12, 16, 4>
+#endif
         <<<dim3((rows + 15) / 16, 4), 128, 0, stream>>>(
             output, input, packed, rows, columns);
   } else {

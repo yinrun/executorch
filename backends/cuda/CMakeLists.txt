@@ -311,6 +311,12 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_conversion_flags
          -DEXECUTORCH_MUSA_GGUF_QUAD_ARITHMETIC=1)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE
+         "Use experimental packed-block scheduling for native Q4/Q5 GEMV" OFF)
+  if(EXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_PACKED_SCHEDULE=1)
+  endif()
   option(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD
          "Use experimental regrouped FP32 dot products for the Qwen3.5-4B Q6 head" OFF)
   if(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)
