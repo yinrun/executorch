@@ -250,6 +250,35 @@ or a fresh source-runtime ordinary-throughput result. Its device-image identity
 links it to the existing candidate measurements, but the prior ordinary low
 of 9.9536 tokens/s remains in acceptance. Stable minimum ten is not claimed.
 
+## Q4/Q5 1024-thread source candidate
+
+The M1000 reports a 1024-thread block limit, so the Q4/Q5 shared-input source
+setting was extended to 1024 for a separate candidate. It is combined here with
+the Q6 256-thread staging path; the Q6 path itself remains 256 threads. The
+candidate passes the native GGUF/attention tests and a fresh three-case
+qualification with 2298 byte-exact outputs, 1149 reset pairs and 18 negative
+controls. A fresh 36-window blocking trace reports 104.0809 ms kernel sum,
+104.1842 ms compute-track union, 85.1445 ms packed Linear aggregate and
+11.2085 ms Q6 four-part aggregate. The unchanged Q6 head is 15.3278 ms.
+The complete nonblocking trace retains one warmup and one measured generation
+over 232 windows. Its measured decode medians are 116.6543 ms host execute,
+102.4701 ms compute-track union, 0.6857 ms copy-label union and 0.8491 ms
+post-execute validation gap. Async kernel labels overlap and are not summed.
+
+An ordinary eight-sample comparison against the 512-thread Q4/Q5 source keeps
+all warmups, lows and original trajectories:
+
+| Runtime | Minimum | Median | Maximum | Serial prefill median |
+| --- | ---: | ---: | ---: | ---: |
+| 512-thread Q4/Q5 source | 9.6646 | 12.9822 | 13.5204 | 11.3823 |
+| 1024-thread Q4/Q5 + Q6-256 source | 10.1974 | 12.8816 | 13.5555 | 13.1943 |
+
+The candidate minimum exceeds ten in this batch, but its median is 0.99225 of
+the control and the two order-series medians are 1.14813 and 0.86593. This is
+not stable-ten evidence and not a causal speedup claim. Keep 1024 default OFF;
+it is a selectable source candidate for further paired testing, not a promoted
+deployment setting. The earlier ordinary lows remain in acceptance.
+
 ## Evidence
 
 Under ETSupport `artifacts/gguf-20261029`:
@@ -305,6 +334,28 @@ Under ETSupport `artifacts/gguf-20261029`:
 - `validate_q6_parts_source_boundaries_v1.py`, `q6-parts-source-boundaries-v1`:
   additional row-tail, exact-capacity and capacity-overflow native tests in
   both OFF and ON states with unchanged qualified runtime hashes.
+- `build_q6_parts_source_1024_v1.py`, `build-q6-parts-source-1024-cmake-v1`,
+  `build-q6-parts-source-1024-v1`, `validate_q6_parts_source_1024_v1.py`,
+  `q6-parts-source-1024-validation-v1`,
+  `audit_q6_parts_source_runtime_1024_v1.py`,
+  `q6-parts-source-1024-runtime-decision-v1.json`: 1024-thread Q4/Q5 plus
+  Q6-256 source build and independent three-case qualification.
+- `profile_q6_parts_source_1024_blocking_v1.py`,
+  `q6-parts-source-1024-blocking-profile-v1`,
+  `analyze_q6_parts_source_1024_blocking_v1.py`,
+  `audit_q6_parts_source_1024_profile_v1.py`,
+  `q6-parts-source-1024-profile-decision-v1.json`: fresh blocking profile.
+- `benchmark_q6_parts_source_1024_v1.py`,
+  `q6-parts-source-1024-benchmark-v1`,
+  `audit_q6_parts_source_ordinary_1024_v1.py`,
+  `q6-parts-source-1024-ordinary-decision-v1.json`: ordinary eight-sample
+  comparison with all low observations retained.
+- `profile_global_q6_parts_source_1024_v1.py`,
+  `global-q6-parts-source-1024-profile-v1`,
+  `analyze_global_q6_parts_source_1024_v1.py`,
+  `audit_q6_parts_source_1024_global_v1.py`,
+  `global-q6-parts-source-1024-profile-decision-v1.json`: complete 232-window
+  nonblocking trace and independent interval/phase audit.
 
 These are kernel-level measurements, not ordinary-model throughput. Stable
 minimum model decode throughput of ten tokens/s remains unproven.

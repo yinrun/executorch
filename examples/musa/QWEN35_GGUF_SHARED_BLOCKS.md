@@ -333,3 +333,10 @@ Under ETSupport `artifacts/gguf-20261029`:
 
 These microbenchmarks are not model throughput. Stable minimum decode
 throughput of ten tokens/s remains unproven.
+
+The source setting also accepts 1024 threads on M1000, whose device limit is
+1024 threads per block. It is retained as a separate experimental candidate;
+the historical 128/256/512 tables above are not retroactively changed. The
+1024-thread source candidate is combined with Q6 256-thread staging in
+[Q6 projection input reuse](QWEN35_GGUF_Q6_PARTS_INPUT.md), where its ordinary
+minimum is reported separately.

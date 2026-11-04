@@ -265,7 +265,7 @@ constexpr int kSharedInputMaxElements = 4096;
 constexpr int kSharedInputBlockThreads = EXECUTORCH_MUSA_GGUF_SHARED_THREADS;
 static_assert(
     kSharedInputBlockThreads == 128 || kSharedInputBlockThreads == 256 ||
-    kSharedInputBlockThreads == 512);
+    kSharedInputBlockThreads == 512 || kSharedInputBlockThreads == 1024);
 constexpr int kSharedInputBlockRows = kSharedInputBlockThreads / 8;
 
 template <int QuantType, int Parts, bool SharedInput>
@@ -1126,9 +1126,11 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
     const int64_t part_columns = ((columns / 256 + 3) / 4) * 256;
     if (part_columns <= kSharedInputMaxElements) {
       linear_shared_input_quad_kernel<12, 4>
-          <<<dim3((rows + kSharedInputBlockRows - 1) / kSharedInputBlockRows, 4),
-             kSharedInputBlockThreads, part_columns * sizeof(float), stream>>>(
-              output, input, packed, rows, columns);
+          <<<dim3(
+                 (rows + kSharedInputBlockRows - 1) / kSharedInputBlockRows, 4),
+             kSharedInputBlockThreads,
+             part_columns * sizeof(float),
+             stream>>>(output, input, packed, rows, columns);
       return musaGetLastError();
     }
 #endif
@@ -1143,9 +1145,10 @@ extern "C" musaError_t executorch_musa_gguf_parts_launch(
     const int64_t part_columns = ((columns / 256 + 3) / 4) * 256;
     if (part_columns <= kQ6SharedInputMaxElements) {
       shared_predecoded_q6_decode_kernel<2, 4>
-          <<<dim3((rows + 15) / 16, 4), 256,
-             part_columns * sizeof(float), stream>>>(
-              output, input, packed, rows, columns);
+          <<<dim3((rows + 15) / 16, 4),
+             256,
+             part_columns * sizeof(float),
+             stream>>>(output, input, packed, rows, columns);
       return musaGetLastError();
     }
 #endif
