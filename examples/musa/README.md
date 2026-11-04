@@ -2,7 +2,7 @@
 
 ## Qwen3.5-4B GGUF bring-up
 
-**Latest requested-target result (2026-10-30):** the original Qwen3.5-4B
+**Initial requested-target result (2026-10-30):** the original Qwen3.5-4B
 Q4_K_M + BF16/F32 vision artifacts run the report's text, single-image and
 multi-image cases through native MUSA, including a raw-image/question host
 entry. Matching HF step precision, relocation/reset, actual context-4096
@@ -13,6 +13,13 @@ raw-image entry supports only the two exported grids. The workspace report
 `QWEN35_4B_Q4KM_REPORT.md` and `requirements-review-4b-v2.json` collect final
 scope and evidence. The following paragraphs preserve chronological stage
 history; their earlier pending statuses are not the current summary.
+
+**Current combined decode result (2026-11-05):** the qualified Qwen3.5-4B
+Q4_K_M split-K export combined with merged FFN projections and shared attention
+prefix control reaches **13.282 tok/s decode median**, **13.019 tok/s minimum**
+and **13.826 tok/s peak** in the current M1000 MP22 A/B series. See
+`QWEN35_GGUF_SPLIT_K_SHARED_PREFIX.md` for the exact export flags, validation
+boundary and profile evidence.
 
 The next target is the unchanged Qwen3.5-4B Q4_K_M GGUF with its BF16 vision
 projector, not a uniform INT4 requantization of the accepted 0.8B model. The local
