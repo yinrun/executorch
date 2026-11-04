@@ -259,6 +259,10 @@ the inconsistent attention-gate matrix and all ordinary low samples. Further
 work must reduce the packed Linear cost rather than remove checks or select
 only high-frequency runs.
 
+The next [shared-input block-grouping experiment](QWEN35_GGUF_SHARED_BLOCKS.md)
+tests the new staging path with larger independent row groups, rather than
+repeating the old global-input block-size experiment unchanged.
+
 ## Evidence
 
 Under ETSupport `artifacts/gguf-20261029`:
