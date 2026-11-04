@@ -161,6 +161,10 @@ fallbacks, residual arithmetic and complete preparation cost would need fresh
 validation. This result does not authorize dropping low planes or loosening
 the original model gate to obtain speed.
 
+The subsequent [integer-component plus FP32-residual experiment](QWEN35_GGUF_RESIDUAL_DOT.md)
+implements and validates that alternative. Its one/two-plane and loop-unroll
+variants also remain slower and are not promoted.
+
 Under ETSupport `artifacts/gguf-20261029`:
 
 - `lossless-dot-probe-v1/v2`: codec, independent fixtures, kernels, harnesses,
