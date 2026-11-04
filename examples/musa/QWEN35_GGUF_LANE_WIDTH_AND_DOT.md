@@ -119,6 +119,11 @@ and full-model precision/performance validation are **not implemented or
 accepted here**. The original FP32 model path remains in use; no lossy input
 quantization or relaxed gate is silently substituted.
 
+A subsequent [lossless-input integer GEMV prototype](QWEN35_GGUF_LOSSLESS_DOT.md)
+implements four/five byte planes with checked FP32 fallback. Its codec and
+micro numerical checks pass, but timings including preparation regress; it
+does not replace the qualified runtime.
+
 ## Evidence
 
 Under ETSupport `artifacts/gguf-20261029`:
