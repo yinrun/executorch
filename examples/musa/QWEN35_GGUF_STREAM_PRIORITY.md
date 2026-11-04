@@ -97,7 +97,10 @@ Near-continuous CPU residency is compatible with active runtime waiting; it
 does not mean inference arithmetic moved to CPU, nor prove polling is the
 bottleneck. A next controlled experiment can compare the runtime's host wait
 policies and inspect CPU wait behavior, preserving the same GPU math and
-output checks. Merely increasing GPU stream priority did not solve this case.
+output checks. That follow-up is now complete in
+[host wait-policy investigation](QWEN35_GGUF_WAIT_POLICY.md): blocking saves
+substantial CPU time but slightly reduces throughput. Merely increasing GPU
+stream priority did not solve this case.
 
 ## Evidence
 
