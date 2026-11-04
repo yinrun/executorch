@@ -249,6 +249,10 @@ rehashes source, runtime, model artifacts and output files and verifies the
 same original workload/IDs and native-only runtime mappings. The defaults
 and accepted deployment remain unchanged; **10 tokens/s is still unmet**.
 
+The subsequent [dense FP32 cache investigation](QWEN35_GGUF_DENSE_FP32.md)
+tests muBLAS and six direct native layouts. All tested native layouts are
+slower; it does not replace this qualified source/export pair.
+
 ## Local evidence
 
 ETSupport evidence under `artifacts/gguf-20261029`:
