@@ -330,6 +330,8 @@ the build, timing and trace evidence.
 
 The [metadata arithmetic and narrower-thread experiments](QWEN35_GGUF_METADATA_ARITHMETIC.md)
 are separate unpromoted investigations, not part of this source option.
+The subsequent [dequantization FMA and Q6 reduction probes](QWEN35_GGUF_INSTRUCTION_FOLLOWUP.md)
+also remain unpromoted; smaller instruction counts do not establish model gains.
 
 ## Local evidence
 
