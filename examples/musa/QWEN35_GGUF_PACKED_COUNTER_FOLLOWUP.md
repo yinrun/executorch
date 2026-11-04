@@ -123,3 +123,7 @@ The current evidence does not justify replacing the qualified runtime.
 Future promotion still requires a reproducible representative gain followed
 by the complete model numerical gate and ordinary end-to-end timing; a
 favorable counter capture or one matrix is insufficient.
+
+The subsequent [lane-width and integer-dot investigation](QWEN35_GGUF_LANE_WIDTH_AND_DOT.md)
+tests the current packet kernel's per-lane work distribution and checks the
+SDK's signed/unsigned integer primitives before considering a new algorithm.
