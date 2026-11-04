@@ -294,15 +294,65 @@ bounded attribution, not ordinary throughput or a causal comparison against
 the earlier prototype trace. The full nonblocking trace above belongs to the
 prototype, not this later source binary.
 
+## Device equivalence and source frequency endpoints
+
+A subsequent binary audit extracts the MP22 device ELF from each offload
+bundle. All 44 prototype function bodies match the corresponding guarded
+source bodies, with the packed/shared entrypoint names mapped. All 44 baseline
+function bodies also match their source fallback counterparts. The source has
+50 functions because the shared entrypoints and their constant-calculation
+companions are additional. All 46 compared kernel metadata records match after
+normalizing only entrypoint and constant-calculation names. This is device
+function/metadata equivalence, not whole host-library identity.
+
+A new generation-switching probe is built from source revision `1f3749ac42`,
+retaining its capacity guards. Its complete device image is byte-identical to
+the qualified source ON image. It reads the GPU frequency immediately before
+and after each step, outside the step timer; the loop timer still includes
+these reads. Both modes pass 464 complete text-output comparisons, including
+232 reset pairs, against their qualified ordinary runtimes. Every step selects
+147 shared or fallback calls as requested.
+
+Two opposite-order sequences retain eight measured generations per mode and
+all eight neighboring pairs:
+
+| Instrumented source mode | Minimum | Median | Maximum decode tokens/s |
+| --- | ---: | ---: | ---: |
+| Original fallback | 8.4084 | 10.1111 | 10.6800 |
+| Guarded shared input | 8.8126 | 11.2854 | 12.1659 |
+
+All eight pairs improve; the paired median ratio is 1.10974 and geometric mean
+1.10460. These are instrumented diagnostics, not replacement ordinary-runner
+records. The minimum remains below ten.
+
+The 704 measured decode steps per mode have the following same-frequency
+endpoint groups; transition endpoints remain in the raw evidence and in all
+generation rates:
+
+| Mode / both endpoints | Steps | Median step time (ms) |
+| --- | ---: | ---: |
+| Fallback / 730 MHz | 125 | 134.3806 |
+| Shared / 730 MHz | 129 | 128.8832 |
+| Fallback / 1400 MHz | 521 | 97.6283 |
+| Shared / 1400 MHz | 520 | 87.1816 |
+
+Low-throughput generations contain more low-frequency endpoints. This is an
+association, not proof of a clock-induced slowdown: matching endpoints do not
+establish constant frequency during the step. Sampling costs a median 0.1362%
+of loop time, but its possible cadence effects are not excluded. No clocks,
+governors, application priorities or other desktop applications are changed.
+
 ## Decision and evidence
 
 The prototype pairing supports the guarded default-off source experiment, but
 the integrated candidate's ordinary timing is still inconsistent. The plain
-layout and warp-broadcast variants are not selected. Next work should directly
-compare the integrated kernels and prototype under paired timing and collect
-evidence for the low-throughput condition without locking clocks or discarding
-samples. Keep the small-shape regression and distinguish instrumented, ordinary
-and profiled measurements. **Stable minimum decode throughput of ten tokens/s
+layout and warp-broadcast variants are not selected. Device equivalence and
+source pairing now support a real shared-input benefit, while the frequency
+endpoints do not establish a causal explanation of the low-throughput condition.
+The next experiment combines shared input with vector metadata and scoped
+dequantization contraction; see [the follow-up](QWEN35_GGUF_SHARED_DEQUANT.md).
+Keep the small-shape regression and distinguish instrumented, ordinary and
+profiled measurements. **Stable minimum decode throughput of ten tokens/s
 remains unproven.**
 
 Under ETSupport `artifacts/gguf-20261029`:
@@ -341,3 +391,12 @@ Under ETSupport `artifacts/gguf-20261029`:
   `audit_shared_input_source_profile_v1.py`,
   `shared-input-source-profile-decision-v1.json`: source-dispatch trace,
   all 36 windows and independently checked kernel/interval counts.
+- `shared-input-device-inspection-v1/equivalence-audit.json`,
+  `shared_input_elf.py`, `audit_shared_input_device_equivalence_v1.py`:
+  extracted function bytes, kernel metadata and instrumented device-image audit.
+- `alternating-shared-source-freq-probe-v1`,
+  `alternating-shared-source-freq-validation-v1`,
+  `alternating-shared-source-freq-benchmark-v1`,
+  `audit_alternating_shared_source_freq_v1.py`,
+  `alternating-shared-source-freq-decision-v1.json`: source-mode pairing,
+  complete text outputs, frequency endpoints and sampling-time audit.
