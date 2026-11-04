@@ -107,9 +107,57 @@ from the repository kernel only by the bounded unroll directive.
 
 Prepared image features and frozen HF references are reused, not rerun through
 the raw-image frontend. This does not qualify arbitrary shapes, long-context
-service or a new production build option. Ordinary whole-model timing of this
-head candidate is still pending; numerical acceptance does not establish a
-throughput gain or the ten-token/s target.
+service or a new production build option. The subsequent timing below does not
+establish stable ten tokens/s or justify changing the deployed default.
+
+## Full-generation timing follow-up
+
+A benchmark-only combined library retains both head kernel bodies. A
+thread-local selector changes modes only between complete synchronized
+generations. Branch counters require exactly one selected head launch per
+executed step and zero launches of the other mode. Both modes use the same
+loaded model, buffers, export and fused prefix attention; the protected ordinary
+runner and deployment runtime are not overwritten.
+
+Before timing, four complete text generations in order `0110` compare 464 full
+logit buffers byte for byte against the corresponding independently qualified
+runtimes, with 232 within-mode reset pairs and original IDs/EOS. The switching
+harness does not rerun image trajectories. Two processes then warm each mode
+once and measure eight complete generations each, using opposite sequences
+`0101101001` and `1010010110`. All eight samples per mode and eight adjacent
+pairs remain; switches and counter collection are outside generation timing.
+
+| Same-process mode | Minimum tok/s | Median tok/s | Maximum tok/s |
+| --- | ---: | ---: | ---: |
+| Qualified original head | 10.1046 | 10.1433 | 10.2550 |
+| Two-block unroll | 10.1378 | 10.1997 | 10.6953 |
+
+Five of eight pairs improve. The paired median ratio is 1.00604 and geometric
+mean ratio 1.00930; the latter includes one 1.04773 pair. No high or low sample
+is excluded. This supports at most a small observed gain in this series, not
+the full head microbenchmark ratio applied to the whole model. Both modes
+exceed ten in this instrumented series, but ordinary runs below contradict a
+broader minimum-ten claim.
+
+The unchanged ordinary runner subsequently executes eight ABBA+BAAB processes,
+each with one full warmup and two measured original generations. Prefill remains
+serial, with 28 prompt tokens and 88 decode steps to the original EOS. No
+profiler, launch blocking, logit dumping, compilation, heavy audit or concurrent
+investigation GPU work runs during either timing series. The agent only waits;
+the desktop GPU remains shared and unlocked.
+
+| Ordinary mode | Minimum tok/s | Median tok/s | Maximum tok/s |
+| --- | ---: | ---: | ---: |
+| Qualified original head | 9.1156 | 10.2675 | 10.7046 |
+| Two-block unroll | 8.5350 | 10.0907 | 10.7474 |
+
+Candidate serial-prefill median is 9.1212 tok/s, versus 10.4471 for the control.
+ABBA and BAAB median ratios are 0.94491 and 0.98278; pooled ratio is 0.98278.
+All low results, including 8.8506 and 8.5350 in one candidate process, remain.
+The 10.7474 ordinary peak is a new observation, not stable deployment speed.
+These ordinary measurements do not confirm an end-to-end improvement, despite
+the small favorable same-process result. The candidate remains experimental;
+no new head option or default is added on this evidence.
 
 Local evidence under ETSupport `artifacts/gguf-20261029`:
 
@@ -127,5 +175,12 @@ Local evidence under ETSupport `artifacts/gguf-20261029`:
 - `validate_q6_head_unroll_v1.py`, `q6-head-unroll-validation-v1`,
   `audit_q6_head_unroll_runtime_v1.py`, `q6-head-unroll-runtime-decision-v1.json`:
   complete three-case qualification and independent numerical/provenance audit.
+- `alternating-head-probe-v1`, `build-alternating-head-v1`,
+  `alternating-head-validation-v1`, `alternating-head-benchmark-v1`,
+  `alternating-head-decision-v1.json`: benchmark-only switching, full text
+  identity, branch counts and independently recomputed paired timing.
+- `benchmark_q6_head_unroll_v1.py`, `q6-head-unroll-benchmark-v1`,
+  `audit_q6_head_ordinary_v1.py`, `q6-head-unroll-ordinary-decision-v1.json`:
+  original-runner timing, all trajectories/maps and independent raw-rate audit.
 
 Stable ten decode tokens/s and ordinary whole-model speedup are not established.
