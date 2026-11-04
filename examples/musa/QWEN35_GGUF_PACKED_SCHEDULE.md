@@ -189,6 +189,11 @@ overlapping async labels still cannot identify individual kernel costs.
 
 ## Local evidence
 
+The subsequent [local-first reduction investigation](QWEN35_GGUF_LOCAL_REDUCTION.md)
+refreshes blocking attribution and tests a rounding-changing Q4/Q5 reduction
+tree. Its complete numerical gate passes, but its whole-model timing remains
+inconsistent; it does not replace this source implementation.
+
 ETSupport artifacts under `artifacts/gguf-20261029`:
 
 - `pipelined-packed-probe-v1`, `pipelined-metadata-probe-v1`: sources,
