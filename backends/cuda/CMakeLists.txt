@@ -323,6 +323,12 @@ if(EXECUTORCH_BUILD_MUSA)
     list(APPEND _musa_gguf_conversion_flags
          -DEXECUTORCH_MUSA_GGUF_LOCAL_REDUCTION=1)
   endif()
+  option(EXECUTORCH_MUSA_GGUF_Q5_CACHED_LOADS
+         "Enable experimental read-only cached loads for MUSA Q5 GEMV" OFF)
+  if(EXECUTORCH_MUSA_GGUF_Q5_CACHED_LOADS)
+    list(APPEND _musa_gguf_conversion_flags
+         -DEXECUTORCH_MUSA_GGUF_Q5_CACHED_LOADS=1)
+  endif()
   option(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD
          "Use experimental regrouped FP32 dot products for the Qwen3.5-4B Q6 head" OFF)
   if(EXECUTORCH_MUSA_GGUF_GROUPED_Q6_HEAD)

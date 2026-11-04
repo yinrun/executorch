@@ -151,8 +151,85 @@ original trajectories, protected hashes and the cache-only source/flag change.
 Prepared image features and frozen HF are reused; the raw-image frontend and
 HF model are not rerun. This is an isolated-link qualification, not new CMake
 option coverage, arbitrary-shape/concurrent-service acceptance or deployment.
-Ordinary and same-process full-generation timing of this Q5 candidate remain
-necessary before claiming a model-level performance improvement.
+The subsequent source-option qualification is separate below.
+
+## Q5 full-generation timing
+
+An instrumented runner switches between original and cached Q5 kernels only
+between synchronized complete generations. Each mode executes exactly 24 Q5
+calls per step and zero calls to the other mode. The original Q6 head remains
+unchanged. Four validation generations produce 464 complete text outputs,
+byte-identical to the independently qualified runtimes, with unchanged IDs and
+232 reset pairs. This switching harness does not validate image trajectories.
+
+Two processes use opposite starting orders, one full warmup per mode and eight
+measured generations per process: eight samples per mode and eight adjacent
+pairs. Seven pairs improve, but the paired median gain is only **0.329%** and
+the paired geometric-mean gain is **0.228%**. This is instrumented timing, not
+ordinary deployment throughput.
+
+Ordinary timing uses the unchanged runner/export, eight processes ordered
+ABBA then BAAB, one complete warmup and two measured generations per process.
+Both the prototype and the subsequent source-linked candidate use that protocol.
+No profiler, launch blocking or logit dumps run during these measurements.
+The agent only waits during timing; the shared desktop GPU is not exclusive.
+All lows, warmups, original token IDs/EOS and 88 decode steps are retained.
+
+| Series / mode | Minimum | Median | Maximum decode tokens/s |
+| --- | ---: | ---: | ---: |
+| Same-process baseline | 10.0952 | 10.1695 | 10.5543 |
+| Same-process cached Q5 | 10.1727 | 10.2227 | 10.3693 |
+| Ordinary prototype baseline | 8.4990 | 10.1818 | 10.6866 |
+| Ordinary cached Q5 prototype | 8.5510 | 10.2476 | 10.5983 |
+| Ordinary source baseline | 10.1099 | 10.2817 | 10.6417 |
+| Ordinary cached Q5 source | 8.5191 | 10.1903 | 10.6248 |
+
+The prototype ordinary pooled median ratio is 1.00646, but its BAAB median
+ratio is 0.94301. The source candidate has pooled median ratio 0.99111;
+its ABBA and BAAB ratios are 0.99093 and 0.91061. The final source-candidate
+process measures 8.5191 and 8.5287 tokens/s; neither is discarded. These
+separate series do not establish a causal regression or improvement, and the
+small same-process gain does not resolve the ordinary low-throughput condition.
+The source candidate's serial-prefill median is 10.1572 tokens/s, versus
+10.4967 for its baseline; this is serial prefill, not a batched-prefill result.
+
+## Default-off source option
+
+`EXECUTORCH_MUSA_GGUF_Q5_CACHED_LOADS=ON` enables read-only cached loads for
+Q5 through the existing `load_decode_value` helper. The default is **OFF**.
+Q4 retains its existing cached loads; Q6, arithmetic, reductions, packed
+storage and dispatch guards do not change. There is no packet-plane conversion,
+weight requantization, TF32, MTP or acceptance-tolerance change. This option is
+an experimental reproducible candidate, not a new deployment default.
+
+A fresh MUSA CMake build exercises default-OFF, ON, OFF again and ON again,
+with the other qualified GGUF options and fused-prefix attention enabled.
+Each configuration passes 17 GGUF and 15 attention tests; the second-device
+attention test skips because it requires another device. The new Q5 test covers
+18 combinations of rows 17/128/129, columns 256/2560 and aligned/misaligned
+weight/input offsets. It queues five operator calls on a
+nonblocking calling stream while zeroing and restoring the same input and
+weight buffers, checking 90 complete outputs and 180 output canaries per
+configuration. This tests cache visibility across ordered launches, not
+concurrent writes to buffers being read by a kernel.
+
+OFF and ON device images reproduce the measured original-layout micro control
+and cache-only candidate exactly. Repeated states also reproduce identical
+object/runtime hashes. An isolated relink replaces only the GGUF device object
+in the qualified source-attention runtime; all other link inputs, runner,
+extension, PTE/PTD and protected runtimes are unchanged. The fresh whole CMake
+runtime is covered by native tests, not claimed as the full-model deployment.
+
+That isolated source runtime passes another complete three-case validation:
+2298 full logit buffers, 1149 byte-identical reset pairs, eighteen rejected
+negative controls, original IDs/EOS and the unchanged frozen-HF bound. Every
+output remains byte-identical to source attention alone, with the same errors
+listed above. Independent auditing rechecks raw buffers/HF references, library
+maps, hashes, the exact kernel-source change, four build states and the single
+device-object substitution. Ordinary source timing is independently audited
+as well. Stable minimum-based ten tokens/s remains **unproven**; further work
+must address the dominant packed Linear cost and ordinary low samples rather
+than promote this small micro-level gain as completion.
 
 ## Evidence
 
@@ -173,6 +250,20 @@ Under ETSupport `artifacts/gguf-20261029`:
   `audit_q5_cached_loads_runtime_v1.py`, `q5-cached-loads-runtime-decision-v1.json`:
   original-layout cached-load runtime, protected inputs, three complete cases
   and independent full-buffer/frozen-HF/provenance audit.
+- `alternating-q5-validation-v1`, `alternating-q5-benchmark-v1`,
+  `alternating-q5-decision-v1.json`: switching counts, complete text outputs,
+  eight same-process pairs and independent timing/precision audit.
+- `q5-cached-loads-benchmark-v1`, `q5-cached-loads-ordinary-decision-v1.json`:
+  original-runner prototype ABBA/BAAB timing and independent audit.
+- `build_q5_cached_source_v1.py`, `build-q5-cached-source-cmake-v1`,
+  `build-q5-cached-source-v1`, `validate_q5_cached_source_v1.py`,
+  `q5-cached-source-validation-v1`, `audit_q5_cached_source_v1.py`,
+  `q5-cached-source-decision-v1.json`: fresh four-state builds, native tests,
+  measured device-image identity and full-model source qualification.
+- `benchmark_q5_cached_source_v1.py`, `q5-cached-source-benchmark-v1`,
+  `audit_q5_cached_source_ordinary_v1.py`,
+  `q5-cached-source-ordinary-decision-v1.json`: eight ordinary source processes,
+  all warmups, trajectories, runtime maps, low samples and independent audit.
 
-No new ordinary full-model throughput is established here. Stable ten decode
-tokens/s remains unproven; microbenchmarks are not substitutes for that gate.
+No stable ten-token/s deployment is established here. Microbenchmarks and a
+favorable instrumented series are not substitutes for the ordinary timing gate.

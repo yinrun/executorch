@@ -197,7 +197,11 @@ __global__ void linear_decode_kernel(float* output, const float* input,
 
 template <int QuantType, typename Value>
 __device__ Value load_decode_value(const Value* address) {
+#if defined(EXECUTORCH_MUSA_GGUF_Q5_CACHED_LOADS)
+  if constexpr (QuantType == 12 || QuantType == 13) {
+#else
   if constexpr (QuantType == 12) {
+#endif
     return __ldg(address);
   } else {
     return *address;

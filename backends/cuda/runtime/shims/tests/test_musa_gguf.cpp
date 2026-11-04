@@ -1110,6 +1110,95 @@ TEST_F(MusaGgufTest, UsesCallingStreamOnDeviceZero) {
   EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
 
+TEST_F(MusaGgufTest, Q5DecodeObservesInPlaceUpdatesOnCallingStream) {
+  cudaStream_t stream;
+  ASSERT_EQ(
+      musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
+  {
+    auto guard = executorch::backends::cuda::CUDAStreamGuard::create(stream, 0);
+    ASSERT_TRUE(guard.ok());
+    for (int rows : {17, 128, 129}) {
+      for (int columns : {256, 2560}) {
+        for (const auto& offsets :
+             {std::array<int, 2>{0, 0}, {1, 1}, {16, 4}}) {
+          SCOPED_TRACE(
+              ::testing::Message()
+              << rows << "x" << columns << " weight offset " << offsets[0]
+              << " input offset " << offsets[1]);
+          const int row_bytes = columns / 256 * 176;
+          auto packed_owner =
+              tensor({rows * row_bytes + offsets[0]}, ScalarType::Byte);
+          auto packed = packed_owner.as_strided(
+              {rows, row_bytes}, {row_bytes, 1}, offsets[0]);
+          std::vector<uint8_t> data(packed.numel(), 0);
+          for (int index = 0; index < rows * columns / 256; ++index) {
+            auto* block = data.data() + index * 176;
+            block[1] = 0x3c;
+            std::fill(block + 4, block + 12, 1);
+            std::fill(block + 12, block + 16, 0x11);
+            std::fill(block + 48, block + 176, 0x11);
+          }
+          write(packed, data);
+          auto input_owner = tensor({columns + offsets[1]});
+          auto input =
+              input_owner.as_strided({1, columns}, {columns, 1}, offsets[1]);
+          const std::vector<float> positive(columns, 1);
+          write(input, positive);
+          std::vector<SlimTensor> owners;
+          for (int iteration = 0; iteration < 5; ++iteration) {
+            owners.push_back(tensor({rows + 2}));
+            write(owners.back(), std::vector<float>(rows + 2, -12345));
+          }
+          for (int iteration = 0; iteration < 5; ++iteration) {
+            if (iteration == 1) {
+              ASSERT_EQ(
+                  cudaMemsetAsync(input.data_ptr(), 0, input.nbytes(), stream),
+                  cudaSuccess);
+            } else if (iteration == 2) {
+              ASSERT_EQ(
+                  cudaMemcpyAsync(
+                      input.data_ptr(),
+                      positive.data(),
+                      input.nbytes(),
+                      cudaMemcpyHostToDevice,
+                      stream),
+                  cudaSuccess);
+            } else if (iteration == 3) {
+              ASSERT_EQ(
+                  cudaMemsetAsync(
+                      packed.data_ptr(), 0, packed.nbytes(), stream),
+                  cudaSuccess);
+            } else if (iteration == 4) {
+              ASSERT_EQ(
+                  cudaMemcpyAsync(
+                      packed.data_ptr(),
+                      data.data(),
+                      packed.nbytes(),
+                      cudaMemcpyHostToDevice,
+                      stream),
+                  cudaSuccess);
+            }
+            auto output = owners[iteration].as_strided({1, rows}, {rows, 1}, 1);
+            ASSERT_EQ(
+                aoti_torch_musa_gguf_linear_out(&output, &input, &packed, 13),
+                Error::Ok);
+          }
+          ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+          for (size_t iteration = 0; iteration < owners.size(); ++iteration) {
+            const auto actual = read(owners[iteration]);
+            ASSERT_EQ(actual.front(), -12345);
+            ASSERT_EQ(actual.back(), -12345);
+            for (int row = 0; row < rows; ++row) {
+              ASSERT_EQ(actual[row + 1], iteration % 2 == 0 ? columns : 0);
+            }
+          }
+        }
+      }
+    }
+  }
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
 TEST_F(MusaGgufTest, VectorDecodeUsesCallingStreamWithPartialRowTile) {
   cudaStream_t stream;
   ASSERT_EQ(musaStreamCreateWithFlags(&stream, musaStreamNonBlocking), musaSuccess);
