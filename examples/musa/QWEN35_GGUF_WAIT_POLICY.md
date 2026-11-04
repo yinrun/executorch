@@ -97,6 +97,11 @@ no attribution to a particular application is made. Model-window analysis is
 retained, but this trace must not be used for complete pre-model device
 accounting. The independent audit records warning timestamps and this limit.
 
+The [all-process device-overlap analysis](QWEN35_GGUF_DEVICE_OVERLAP.md)
+subsequently checks every exported engine on the same GPU and independently
+verifies all 464 windows. Substantial graphics overlap is observed, but is
+not interpreted as additive lost time or an exclusive-device speed estimate.
+
 ## Interpretation and evidence
 
 Near-continuous CPU residency in the default mode largely disappears when
