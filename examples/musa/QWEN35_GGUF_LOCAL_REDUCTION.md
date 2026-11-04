@@ -334,6 +334,8 @@ The subsequent [dequantization FMA and Q6 reduction probes](QWEN35_GGUF_INSTRUCT
 also remain unpromoted; smaller instruction counts do not establish model gains.
 The [stream-priority and telemetry investigation](QWEN35_GGUF_STREAM_PRIORITY.md)
 verifies actual stream selection but finds no useful scheduling speedup.
+The [short-prefix attention fusion experiment](QWEN35_GGUF_FUSED_PREFIX_ATTENTION.md)
+investigates allocation and launch overhead separately from packed Linear.
 
 ## Local evidence
 

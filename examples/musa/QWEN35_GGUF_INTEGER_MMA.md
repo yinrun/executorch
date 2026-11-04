@@ -130,6 +130,10 @@ a different tile layout, but are not measured attribution of the slowdown.
 Volatile-store overhead is not independently isolated. Simply replacing DOT8
 with these matrix instructions is rejected as an optimization.
 
+The [group-tiled follow-up](QWEN35_GGUF_GROUP_TILED_MMA.md) tests a different
+layout, separates fallback and adds synchronization controls. It retains
+substantial slowdowns and new precision failures rather than promoting them.
+
 Under ETSupport `artifacts/gguf-20261029`:
 
 - `integer-mma-capability-v1`, `integer-mma-liveness-v1/v2`,
