@@ -323,7 +323,8 @@ TEST_F(MusaGgufTest, VectorDecodeMatchesGenericForOffsetsTailsAndBitPlanes) {
         : quant_type == 13                   ? 176
                                              : 210;
     for (int columns : {256, 768, 2560, 4096, 4352, 9216, 12288, 16384, 16640}) {
-      for (int rows : {1, 5, 17, 127, 128, 129, 143}) {
+      for (int rows :
+           {1, 5, 17, 127, 128, 129, 143, 159, 160, 161, 191, 192, 193}) {
         SCOPED_TRACE(quant_type);
         SCOPED_TRACE(columns);
         SCOPED_TRACE(rows);

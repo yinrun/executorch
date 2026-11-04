@@ -191,7 +191,7 @@ and cost a median 0.1786% of loop time; cadence effects are not excluded.
 This pairing supports an approximately 5% benefit in the observed instrumented
 setting, but it does not replace the mixed ordinary three-mode series, establish
 low-frequency behavior or turn the 9.7423 ordinary minimum into a pass. The
-512-thread source option still needs source integration and ordinary acceptance.
+512-thread source integration below still needs its own ordinary acceptance.
 
 ## Complete nonblocking global trace
 
@@ -211,13 +211,70 @@ not ordinary throughput or independent additive costs. Asynchronous kernel
 labels can share intervals and are not summed for per-kernel attribution.
 The short blocking traces above remain the bounded attribution evidence.
 
+## Selectable source block size
+
+`EXECUTORCH_MUSA_GGUF_SHARED_THREADS` is a CMake string setting accepting 128,
+256 or 512, with default 128. It affects only the shared-input packed GEMV
+launches. `SHARED_INPUT` and `VECTOR_DEQUANT` remain independently default OFF;
+the block-size setting does not enable either feature. Source compilation
+without an explicit thread definition also defaults to 128, and a static
+assertion rejects unsupported values when the shared path is compiled.
+
+The row index and launch grid now use the selected row groups. Staging capacity,
+barrier placement, original 128-thread non-shared fallbacks, per-row arithmetic,
+Q6 kernels and all type/alignment/stream checks are unchanged. Existing
+byte-exact offset/tail tests additionally cover rows 159/160/161 and 191/192/193,
+including boundaries of both the 32-row and 64-row blocks.
+
+A fresh source build tests eight configurations: omitted/default 128, 256, 512,
+reset to 128, repeated 512, 512 with shared input disabled, 512 with vector
+dequantization disabled, and restored 512. Each passes 18 GGUF and 15 attention
+tests, with the unavailable second-device test skipped. The first five and
+restored configurations use the existing qualified shared/vector settings;
+this does not mean the project's default enables these features.
+
+Complete 128/256/512 device images match the previously measured corresponding
+prototypes. Repeated 128 and 512 settings reproduce object, runtime and image
+hashes. The disabled-shared image matches the previous qualified non-shared
+image. The disabled-vector configuration has native correctness coverage, not
+a new performance claim. Five separate configure attempts reject 0, 64, 1024,
+a semicolon-separated list and a nonnumeric string with the intended diagnostic.
+
+Only the 512 GGUF object is substituted into an isolated source runtime for
+full-model testing. A fresh independent audit verifies all three cases again:
+2298 byte-exact complete outputs, 1149 reset pairs, 18 negative controls and all
+original IDs/EOS with unchanged frozen-HF bounds. The fresh CMake build and
+isolated model link are distinct evidence; production artifacts are not replaced.
+
+## Source-runtime ordinary retest
+
+A fresh ordinary-runner comparison uses the qualified 128-thread source,
+the new 512-thread source and an isolated Q6-head shared-input candidate.
+Two opposite three-mode orders retain twelve process warmups and all 24
+measured generations, eight per mode. No profiler, frequency sampling or
+blocking environment is added; all original token IDs and EOS are retained.
+
+| Runtime | Decode minimum | Decode median | Decode maximum | Serial prefill median |
+| --- | ---: | ---: | ---: | ---: |
+| 128-thread combined source | 9.5891 | 11.8339 | 12.4482 | 11.0075 |
+| 512-thread source | 10.1224 | 12.3788 | 13.0030 | 11.1898 |
+| 512 threads plus Q6 head staging | 9.9777 | 11.2519 | 12.8348 | 11.2436 |
+
+All rates are tokens/s. The 512-thread source exceeds ten in every measured
+generation of this batch, with a 1.04605 unpaired median ratio to its control.
+This is not a causal speedup estimate or proof of stable deployment throughput:
+the earlier byte-identical 512-thread device prototype still has a 9.7423 low,
+and the historical ordinary peak remains 13.0393. Do not discard that batch.
+The added head staging does not establish a model benefit; its microbenchmark,
+precision qualification and blocking trace are recorded in
+[Q6 output-head input reuse](QWEN35_GGUF_Q6_HEAD_INPUT.md).
+
 ## Decision
 
-Retain 128 as the existing source/default block size. The 64-thread variant is
-rejected; both larger variants are numerically qualified, and 512 is the leading
-candidate for a selectable source implementation because of the combined
-microbenchmark, blocking-profile and same-process evidence. It is not yet a
-stable-ten deployment result. After source qualification, remaining packed
+Retain 128 as the source/default block size. The 64-thread variant is rejected;
+both larger variants are numerically qualified, and 512 now has a selectable
+source implementation backed by the microbenchmark, blocking-profile and
+same-process evidence. It is not yet a stable-ten deployment result. Remaining packed
 Linear work, including the roughly 28.1 ms Q6 head/projection contribution in
 the blocking trace, remains a target. No precision, token checks, low samples
 or desktop GPU conditions are changed to satisfy the throughput objective.
@@ -259,6 +316,16 @@ Under ETSupport `artifacts/gguf-20261029`:
   `audit_shared_block_512_global_v1.py`,
   `global-shared-block-512-profile-decision-v1.json`: complete nonblocking
   trace, all 232 windows and independently verified interval/phase summaries.
+- `build_shared_block_source_v1.py`, `build-shared-block-source-cmake-v1`,
+  `build-shared-block-source-v1`, `validate_shared_block_source_v1.py`,
+  `shared-block-source-validation-v1`, `audit_shared_block_source_v1.py`,
+  `shared-block-source-decision-v1.json`: eight source configurations, five
+  invalid values, exact device images, expanded row boundaries and fresh
+  independent three-case source-runtime qualification.
+- `benchmark_source_head_staging_v1.py`, `source-head-staging-benchmark-v1`,
+  `audit_source_head_staging_ordinary_v1.py`,
+  `source-head-staging-ordinary-decision-v1.json`: source-runtime three-mode
+  retest, all 24 measured generations, twelve warmups and original trajectories.
 
 These microbenchmarks are not model throughput. Stable minimum decode
 throughput of ten tokens/s remains unproven.
